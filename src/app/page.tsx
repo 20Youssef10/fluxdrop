@@ -14,6 +14,7 @@ import { FullPageDropZone } from '@/components/fluxdrop/full-page-drop-zone'
 import { HelpDialog } from '@/components/fluxdrop/help-dialog'
 import { TransferAnnouncer } from '@/components/fluxdrop/transfer-announcer'
 import { OnboardingTour } from '@/components/fluxdrop/onboarding-tour'
+import { ConnectionRipple } from '@/components/fluxdrop/connection-ripple'
 import { useFluxDrop } from '@/hooks/fluxdrop/use-fluxdrop'
 import { useKeyboardShortcuts } from '@/hooks/fluxdrop/use-keyboard-shortcuts'
 import { useSessionStore } from '@/stores/session-store'
@@ -177,6 +178,7 @@ export default function Home() {
       <HelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
       <TransferAnnouncer />
       <OnboardingTour />
+      <ConnectionRipple />
     </div>
   )
 }

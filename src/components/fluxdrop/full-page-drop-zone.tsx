@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useRef, type ReactNode } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { UploadCloud } from 'lucide-react'
+import { UploadCloud, FileImage, FileVideo, FileAudio, FileText, FileArchive, FileCode, File as FileDefault } from 'lucide-react'
 
 interface FullPageDropZoneProps {
   onFiles: (files: File[]) => void
@@ -101,6 +101,27 @@ export function FullPageDropZone({ onFiles, children, enabled }: FullPageDropZon
               <p className="mt-1 text-sm text-muted-foreground">
                 Release anywhere to add to your transfer
               </p>
+              {/* Floating file-type icons */}
+              <div className="mt-4 flex items-center justify-center gap-2">
+                {[
+                  { Icon: FileImage, delay: 0, color: 'text-purple-500' },
+                  { Icon: FileVideo, delay: 0.1, color: 'text-rose-500' },
+                  { Icon: FileAudio, delay: 0.2, color: 'text-amber-500' },
+                  { Icon: FileText, delay: 0.3, color: 'text-flux-600 dark:text-flux-400' },
+                  { Icon: FileArchive, delay: 0.4, color: 'text-orange-500' },
+                  { Icon: FileCode, delay: 0.5, color: 'text-cyan-500' },
+                ].map(({ Icon, delay, color }, i) => (
+                  <motion.div
+                    key={i}
+                    initial={{ opacity: 0, y: 8, scale: 0.8 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    transition={{ delay, duration: 0.3 }}
+                    className={`flex h-7 w-7 items-center justify-center rounded-md bg-card/60 ${color}`}
+                  >
+                    <Icon className="h-3.5 w-3.5" />
+                  </motion.div>
+                ))}
+              </div>
             </motion.div>
           </motion.div>
         )}

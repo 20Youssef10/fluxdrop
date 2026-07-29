@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { History, Trash2, ArrowUp, ArrowDown, CheckCircle2, AlertCircle, RotateCcw, Info } from 'lucide-react'
+import { History, Trash2, ArrowUp, ArrowDown, CheckCircle2, AlertCircle, RotateCcw, Info, Download } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -66,6 +66,25 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
         description: 'Partial transfer resume requires the original peer to be online.',
       })
     }
+  }
+
+  const handleRedownload = (rec: StoredTransfer) => {
+    if (rec.role !== 'receiver') {
+      toast.info('Re-download not available', {
+        description: 'Only received files can be re-downloaded.',
+      })
+      return
+    }
+    if (rec.status !== 'COMPLETE') {
+      toast.info('Transfer incomplete', {
+        description: 'Only completed transfers can be re-downloaded.',
+      })
+      return
+    }
+    // Chunks were cleared after assembly; we can only show a message
+    toast.info('Re-download requires the sender', {
+      description: 'Ask the sender to re-send the files, or check your downloads folder.',
+    })
   }
 
   if (records.length === 0) {
@@ -187,6 +206,18 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
                         title="Resume transfer"
                       >
                         <RotateCcw className="h-3.5 w-3.5" />
+                      </Button>
+                    )}
+                    {rec.role === 'receiver' && rec.status === 'COMPLETE' && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => handleRedownload(rec)}
+                        className="h-7 w-7 text-flux-600 dark:text-flux-400 hover:bg-flux-500/10"
+                        aria-label="Re-download"
+                        title="Re-download"
+                      >
+                        <Download className="h-3.5 w-3.5" />
                       </Button>
                     )}
                     <Button

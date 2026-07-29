@@ -13,8 +13,9 @@ import { useSessionStore } from '@/stores/session-store'
 import { useTransferStore } from '@/stores/transfer-store'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { formatBytes } from '@/lib/fluxdrop/format'
-import { FileIcon } from './file-icon'
+import { formatBytes, fileTypeCategory } from '@/lib/fluxdrop/format'
+import { FileIcon, getFileCategoryColors } from './file-icon'
+import { FilePreview } from './file-preview'
 
 interface SenderPanelProps {
   files: File[]
@@ -135,11 +136,17 @@ function Step({ n, text }: { n: number; text: string }) {
 }
 
 function QueuedFileRow({ file }: { file: File }) {
+  const isImage = fileTypeCategory(file.type, file.name) === 'image'
+  const colors = getFileCategoryColors(file.type, file.name)
   return (
     <div className="flex items-center gap-2.5 rounded-md border border-border/40 bg-card/40 p-2">
-      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded bg-muted text-muted-foreground">
-        <FileIcon mime={file.type} name={file.name} className="h-3.5 w-3.5" />
-      </div>
+      {isImage ? (
+        <FilePreview file={file} size={28} className="shrink-0 ring-1 ring-border/50" />
+      ) : (
+        <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded ${colors.bg} ${colors.text}`}>
+          <FileIcon mime={file.type} name={file.name} className="h-3.5 w-3.5" />
+        </div>
+      )}
       <div className="min-w-0 flex-1">
         <p className="truncate text-xs font-medium">{file.name}</p>
         <p className="text-[10px] text-muted-foreground">{formatBytes(file.size)}</p>

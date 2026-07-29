@@ -504,3 +504,75 @@ Task: QA test, fix onboarding blocking bug, add copy-button feedback, file previ
 4. **Connection state ripple animation**: Add a visual ripple/pulse effect when WebRTC connection establishes.
 5. **Drag-and-drop overlay enhancement**: Add file-type-specific icons in the full-page drop zone overlay.
 6. **Transfer history actions**: Add "re-download" action for received files in history.
+
+---
+
+Task ID: 7
+Agent: cron-review (round 6)
+Task: QA test, add connection ripple, drag-drop overlay enhancement, light mode refinement, re-download action, queued file thumbnails.
+
+## Current Project Status Assessment
+- FluxDrop was stable from rounds 1-6: 35+ features.
+- Lint was clean, no runtime errors.
+- No bugs found during QA.
+
+## Work Completed This Round
+
+### New Features (5)
+
+1. **Connection Ripple Animation** (`connection-ripple.tsx`)
+   - Full-screen overlay with 3 expanding ripple rings + center pulse dot.
+   - Triggers only on the `new → connected` WebRTC state transition.
+   - Rings expand with staggered delays (0, 0.25s, 0.5s) using ease-out curve.
+   - Auto-dismisses after 2s, pointer-events-none (doesn't block UI).
+   - Wired into main page.
+
+2. **Enhanced Drag-and-Drop Overlay** (enhanced `full-page-drop-zone.tsx`)
+   - Added 6 floating file-type icons below the drop zone card.
+   - Icons: image (purple), video (rose), audio (amber), document (teal), archive (orange), code (cyan).
+   - Staggered entrance animation with scale + fade.
+   - Visually communicates that all file types are supported.
+
+3. **Light Mode Refinement** (enhanced `particle-field.tsx`)
+   - Changed particle color from hardcoded oklch to `bg-flux-500` Tailwind class.
+   - Particles now adapt to theme via CSS variables (flux-500 is lighter in light mode, darker in dark mode).
+   - Better visibility in both themes.
+
+4. **Transfer History Re-download Action** (enhanced `transfer-history.tsx`)
+   - Re-download button (Download icon) on completed received transfers.
+   - Shows informative toast explaining that re-download requires the sender to re-send.
+   - Only appears for `role === 'receiver'` and `status === 'COMPLETE'`.
+   - Hover-revealed alongside resume and detail buttons.
+
+5. **Queued File Thumbnails in Sender Panel** (enhanced `sender-panel.tsx`)
+   - QueuedFileRow now uses FilePreview for image files (28px thumbnails with ring).
+   - Non-image files use colored category icons (matching FilePicker).
+   - Visual consistency across file picker, queued files, and transfer progress.
+
+### Styling Improvements
+- Connection ripple: expanding rings with staggered spring animation.
+- Drop zone: colorful file-type icon row with staggered entrance.
+- Queued files: image thumbnails + colored category icons.
+- Particle field: theme-adaptive color via CSS variables.
+
+### Verification Results
+- **Lint: clean (0 errors, 0 warnings)**
+- **No console errors**.
+- **Landing page** renders correctly with all features.
+- **Sender flow** works — FilePicker with Select files/folder buttons.
+- **Light mode** toggle works, screenshot captured.
+- **Keyboard shortcuts** verified: s → Sender mode.
+- **All features compile** without errors (HTTP 200, clean dev.log).
+
+## Unresolved Issues / Risks
+- **Multi-tab transfer test**: Still cannot test the full sender→receiver data path with agent-browser single-session. The connection ripple, file preview, and summary card are wired but only fully exercisable during an active transfer.
+- **Re-download limitation**: Received file chunks are cleared after assembly to free memory, so true re-download requires the sender to re-send. The toast communicates this clearly.
+- **Sandbox constraint**: Background processes killed when a Bash tool call ends.
+
+## Priority Recommendations for Next Phase
+1. **Multi-tab transfer test**: Use two agent-browser sessions to exercise the full P2P data path and verify connection ripple, file preview, and summary card during a real transfer.
+2. **Persistent received files**: Store assembled file blobs in IndexedDB for true re-download capability.
+3. **Full resume implementation**: Store file references for sender-side resume.
+4. **Transfer history filtering**: Add filter tabs (all/sent/received/complete/incomplete).
+5. **Batch actions**: Select multiple history records for bulk delete.
+6. **Export transfer log**: Download transfer history as JSON/CSV.

@@ -33,13 +33,12 @@ export function ParticleField({ count = 24, className }: ParticleFieldProps) {
       {particles.map((p) => (
         <motion.div
           key={p.id}
-          className="absolute rounded-full"
+          className="absolute rounded-full bg-flux-500"
           style={{
             width: p.size,
             height: p.size,
             left: `${p.x}%`,
             bottom: '-10px',
-            backgroundColor: 'oklch(0.70 0.15 170)',
             opacity: p.opacity,
           }}
           animate={{
