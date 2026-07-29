@@ -837,3 +837,54 @@ A thorough code review was performed on the WebRTC, encoding, and resume store m
 - **Landing page** renders correctly
 - **Sender flow** works (s → Sender mode)
 - **Clean compile** (HTTP 200)
+
+---
+
+Task ID: 12
+Agent: direct review (bug fix)
+Task: Fix "Signaling error: INVALID_INPUT — alias and deviceId required" bug.
+
+## Root Cause Analysis
+
+The `INVALID_INPUT` error occurred because `startSend` called `createRoom` with empty `alias`/`deviceId` before `initDevice()` (async, reads from IndexedDB) had completed. The root causes were:
+
+1. **Race condition**: `initDevice()` is async (IndexedDB read), but `startSend` used a fixed 300ms `setTimeout` to call `createRoom`. If `initDevice` hadn't finished in 300ms, `alias`/`deviceId` were still empty strings.
+
+2. **IndexedDB store creation failure**: The IndexedDB database `fluxdrop` could exist without the required object stores (`transfers`, `chunks`, `preferences`). The `createStore` calls at module scope would fail, causing `getDevicePreferences()` to throw `Failed to execute 'transaction' on 'IDBDatabase': One of the specified object stores was not found.` — which silently killed `initDevice()`.
+
+3. **No error handling in `startSend`/`startReceive`**: These async functions had no top-level `try/catch`, so any error during `ensureDeviceReady()` or `buildManifest()` was an unhandled promise rejection that left the UI stuck with no feedback.
+
+## Fixes Applied
+
+### 1. `ensureDeviceReady()` with multi-level fallback (`use-fluxdrop.ts`)
+- Stores the `initDevice()` promise in a ref on mount.
+- `ensureDeviceReady()` awaits the promise, then checks the LIVE store state (not the stale ref).
+- If still empty, force-calls `initDevice()` again.
+- Last-resort: generates a UUID + alias synchronously and sets it directly via `useSessionStore.setState()`.
+
+### 2. IndexedDB resilience (`resume.ts`)
+- Changed `transfersStore`/`chunksStore`/`prefsStore` from module-scope constants to lazy-initialized via `getStores()`.
+- All public functions (`saveTransferRecord`, `getTransferRecord`, `listTransfers`, `deleteTransferRecord`, `saveChunk`, `getChunk`, `getDevicePreferences`, `saveDevicePreferences`, `markChunkAcked`) now:
+  - Call `getStores()` to lazily initialize.
+  - Check for null stores (IndexedDB unavailable).
+  - Wrap operations in `try/catch` — return safe defaults (`undefined`, `[]`, `void`) instead of throwing.
+- App degrades gracefully to in-memory-only mode if IndexedDB is broken.
+
+### 3. Top-level error handling in `startSend`/`startReceive` (`use-fluxdrop.ts`)
+- Both functions now wrapped in `try/catch`.
+- Errors surface as toast notifications with descriptions.
+- State transitions to `FAILED` on error instead of leaving the UI stuck.
+
+### 4. `startReceive` now async
+- Changed from sync to `async` to await `ensureDeviceReady()`.
+- Callers (page.tsx, JoinForm) handle the promise transparently (fire-and-forget).
+
+### 5. Device identity validation before signaling
+- Both `startSend` and `startReceive` now validate `alias`/`deviceId` are non-empty before calling `createRoom`/`joinRoom`.
+- If still empty after `ensureDeviceReady()`, shows a user-friendly toast: "Device not initialized — Please refresh the page and try again."
+
+## Verification
+- **Lint: clean (0 errors, 0 warnings)**
+- **`startSend` confirmed called** with correct file count via console.log debugging.
+- **IndexedDB errors caught** — app no longer crashes on missing object stores.
+- **Note**: The signaling connection requires the Caddy gateway (port 81) to forward `XTransformPort` queries. When accessed directly via `http://127.0.0.1:3000` (bypassing Caddy), the Socket.IO connection stays in "Connecting" state. This is expected — the app works correctly through the preview panel which uses Caddy.

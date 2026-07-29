@@ -72,8 +72,38 @@ export function useFluxDrop() {
   }, [session.roomId])
 
   // ---- Init device identity on mount ----
+  const deviceInitPromiseRef = useRef<Promise<void> | null>(null)
   useEffect(() => {
-    void session.initDevice()
+    deviceInitPromiseRef.current = session.initDevice()
+  }, [])
+
+  /** Ensure device identity is initialized before proceeding. */
+  const ensureDeviceReady = useCallback(async (): Promise<void> => {
+    // Wait for the initial initDevice() call to complete.
+    if (deviceInitPromiseRef.current) {
+      try {
+        await deviceInitPromiseRef.current
+      } catch { /* ignore — we'll retry below */ }
+    }
+    // Check the LIVE store state (not the ref, which may be stale).
+    const state = useSessionStore.getState()
+    if (!state.deviceId || !state.alias) {
+      // Force-init if still empty.
+      await state.initDevice()
+    }
+    // Final check — if STILL empty, generate synchronously as a last resort.
+    const final = useSessionStore.getState()
+    if (!final.deviceId || !final.alias) {
+      const id = crypto.randomUUID()
+      const alias = 'FluxDevice-' + Math.floor(Math.random() * 1000)
+      final.setAlias(alias)
+      // setAlias doesn't set deviceId, so set it directly via localStorage + store
+      try {
+        localStorage.setItem('fluxdrop:device', JSON.stringify({ id, alias }))
+      } catch { /* ignore */ }
+      // Update store state directly
+      useSessionStore.setState({ deviceId: id, alias })
+    }
   }, [])
 
   // ---- Cleanup on unmount ----
@@ -667,61 +697,92 @@ export function useFluxDrop() {
 
   // ---- Public API: start a send session ----
   const startSend = useCallback(async (files: File[]) => {
-    const validation = validateFiles(files)
-    if (!validation.ok) {
-      toast.error('Cannot send files', { description: validation.errors.join(', ') })
-      return
-    }
-    filesRef.current = files
-    transferRef.current.setTransferState('VALIDATING')
-    toast.info('Hashing files...')
-    const m = await buildManifest(files)
-    manifestRef.current = m
-    slicePlanRef.current = buildSlicePlan(m)
-    transferRef.current.setManifest(m)
-    transferRef.current.resetProgress(m.totalChunks, m.totalSize)
-    transferRef.current.setTransferState('PAIRING')
-    // Prompt for notifications on first transfer (once per browser)
-    if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'default') {
-      try {
-        if (!localStorage.getItem('fluxdrop:notif-prompted')) {
-          setTimeout(() => {
-            Notification.requestPermission().then((result) => {
-              localStorage.setItem('fluxdrop:notif-prompted', '1')
-              if (result === 'granted') {
-                toast.success('Notifications enabled', {
-                  description: 'You\'ll be alerted when transfers complete in the background.',
-                })
-              }
-            })
-          }, 2000)
+    try {
+      const validation = validateFiles(files)
+      if (!validation.ok) {
+        toast.error('Cannot send files', { description: validation.errors.join(', ') })
+        return
+      }
+      filesRef.current = files
+      transferRef.current.setTransferState('VALIDATING')
+      toast.info('Hashing files...')
+      // Ensure device identity is ready BEFORE anything else.
+      await ensureDeviceReady()
+      const m = await buildManifest(files)
+      manifestRef.current = m
+      slicePlanRef.current = buildSlicePlan(m)
+      transferRef.current.setManifest(m)
+      transferRef.current.resetProgress(m.totalChunks, m.totalSize)
+      transferRef.current.setTransferState('PAIRING')
+      // Prompt for notifications on first transfer (once per browser)
+      if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'default') {
+        try {
+          if (!localStorage.getItem('fluxdrop:notif-prompted')) {
+            setTimeout(() => {
+              Notification.requestPermission().then((result) => {
+                localStorage.setItem('fluxdrop:notif-prompted', '1')
+                if (result === 'granted') {
+                  toast.success('Notifications enabled', {
+                    description: 'You\'ll be alerted when transfers complete in the background.',
+                  })
+                }
+              })
+            }, 2000)
+          }
+        } catch { /* ignore */ }
+      }
+      connect()
+      // Small delay to let the socket connect before emitting.
+      setTimeout(() => {
+        const alias = sessionRef.current.alias
+        const deviceId = sessionRef.current.deviceId
+        if (!alias || !deviceId) {
+          toast.error('Device not initialized', { description: 'Please refresh the page and try again.' })
+          transferRef.current.setTransferState('FAILED')
+          return
         }
-      } catch { /* ignore */ }
+        signalingRef.current?.createRoom({
+          alias,
+          deviceId,
+          role: 'sender',
+          withPin: true,
+        })
+      }, 300)
+    } catch (err: any) {
+      toast.error('Failed to start transfer', { description: err?.message ?? 'Unknown error' })
+      transferRef.current.setTransferState('FAILED')
+      transferRef.current.setError(err?.message ?? 'Unknown error')
     }
-    connect()
-    setTimeout(() => {
-      signalingRef.current?.createRoom({
-        alias: sessionRef.current.alias,
-        deviceId: sessionRef.current.deviceId,
-        role: 'sender',
-        withPin: true,
-      })
-    }, 300)
   }, [connect])
 
   // ---- Public API: join a room as receiver ----
-  const startReceive = useCallback((roomId: string, pin: string) => {
-    transferRef.current.setTransferState('PAIRING')
-    connect()
-    setTimeout(() => {
-      signalingRef.current?.joinRoom({
-        roomId: roomId.toUpperCase(),
-        pin: pin || undefined,
-        alias: sessionRef.current.alias,
-        deviceId: sessionRef.current.deviceId,
-        role: 'receiver',
-      })
-    }, 300)
+  const startReceive = useCallback(async (roomId: string, pin: string) => {
+    try {
+      transferRef.current.setTransferState('PAIRING')
+      // Ensure device identity is ready before connecting.
+      await ensureDeviceReady()
+      connect()
+      setTimeout(() => {
+        const alias = sessionRef.current.alias
+        const deviceId = sessionRef.current.deviceId
+        if (!alias || !deviceId) {
+          toast.error('Device not initialized', { description: 'Please refresh the page and try again.' })
+          transferRef.current.setTransferState('FAILED')
+          return
+        }
+        signalingRef.current?.joinRoom({
+          roomId: roomId.toUpperCase(),
+          pin: pin || undefined,
+          alias,
+          deviceId,
+          role: 'receiver',
+        })
+      }, 300)
+    } catch (err: any) {
+      toast.error('Failed to join room', { description: err?.message ?? 'Unknown error' })
+      transferRef.current.setTransferState('FAILED')
+      transferRef.current.setError(err?.message ?? 'Unknown error')
+    }
   }, [connect])
 
   // ---- Public API: cancel ----
