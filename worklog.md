@@ -179,3 +179,102 @@ Task: QA test existing app, then add new features + styling improvements.
 4. **Drag-and-drop anywhere**: Extend the sender page to accept file drops anywhere, not just in the FilePicker zone.
 5. **Transfer speed graph enhancement**: Add a "max speed" line and average speed stat.
 6. **Connection quality indicator**: Derive a "good/fair/poor" quality rating from RTT and packet loss.
+
+---
+
+Task ID: 3
+Agent: cron-review (round 2)
+Task: QA test existing app, then implement priority recommendations (resume UI, TURN config, quality indicator, sparkline enhancement, drag-anywhere, stats dashboard, detail dialog).
+
+## Current Project Status Assessment
+- FluxDrop was stable from rounds 1-2: 10 features added (diagnostics, sparkline, folder upload, keyboard shortcuts, animated numbers, retry, deep-link, celebration, connection viz, empty states).
+- Lint was clean, no runtime errors, VLM-verified design quality.
+- No bugs found during QA — the app was stable.
+- Proceeded to implement the 6 priority recommendations from the round 2 worklog.
+
+## Work Completed This Round
+
+### New Features (7)
+
+1. **TURN Server Config in Settings** (enhanced `flux-header.tsx` + `session-store.ts`)
+   - Settings dialog rebuilt with 3 tabs: Device, Network, Privacy.
+   - Network tab: "Custom ICE servers" toggle (Switch component).
+   - When enabled: dynamic server list with URL input, username/credential fields (password), add/remove buttons.
+   - TURN tip box explaining relay behavior.
+   - When disabled: info box showing default STUN servers (Google + Cloudflare).
+   - ICE config persisted to localStorage; loaded on init.
+   - Wired into WebRTC init via `getEffectiveIceServers()` helper in `use-fluxdrop.ts`.
+   - VLM-verified: "all expected elements present, consistent teal theme, professional dark-mode aesthetic".
+
+2. **Connection Quality Indicator** (`connection-quality.tsx`)
+   - Derives quality level (excellent/good/fair/poor/unknown) from RTT.
+   - Thresholds: <50ms excellent, <150ms good, <400ms fair, ≥400ms poor.
+   - `QualityBars` component: 4-bar signal-strength visualization with color coding.
+   - Integrated into DiagnosticsPanel header as a badge with bars + label.
+   - Color-coded: teal (excellent/good), amber (fair), red (poor).
+
+3. **Enhanced Speed Sparkline** (enhanced `speed-sparkline.tsx`)
+   - Added dashed average-speed line (cyan, `oklch(0.72 0.14 200)`).
+   - Added max-speed marker dot (amber, `oklch(0.78 0.16 85)`) with pulsing ring animation.
+   - Updated sparkline header in TransferProgress: avg + peak stats with colored legend dots.
+   - Configurable via `showAverage` / `showMax` props.
+
+4. **Full-Page Drag-and-Drop Zone** (`full-page-drop-zone.tsx`)
+   - Wraps the sender panel; accepts file drops anywhere on the page.
+   - Full-screen overlay with animated drop zone card when dragging.
+   - Drag counter to handle nested drag enter/leave events correctly.
+   - Only files are accepted (checks `dataTransfer.types`).
+   - Enabled only in sender view before transfer starts (disabled during transfer).
+   - Merges dropped files into existing file list.
+
+5. **Landing Page Stats Dashboard** (`stats-dashboard.tsx`)
+   - Aggregates transfer history from IndexedDB.
+   - 4 stat tiles: Total transfers, Files sent, Files received, Data transferred.
+   - Animated number counters.
+   - Sublabels: completed count, "as sender", "as receiver", avg size/transfer.
+   - Only renders when there are transfer records (returns null if empty — clean empty state).
+
+6. **Transfer Detail Dialog** (`transfer-detail-dialog.tsx`)
+   - Click any transfer history row to open a detailed dialog.
+   - Shows: status banner (complete/failed/incomplete with checksum verified badge), meta grid (total size, started time, total chunks, chunks acked), peer info, full file list with per-file checksums.
+   - Scrollable file list with FileIcon component.
+
+7. **Resume UI in Transfer History** (enhanced `transfer-history.tsx`)
+   - Resume button (RotateCcw icon) on incomplete transfers.
+   - Progress bar + percentage on incomplete records.
+   - Detail button (Info icon) on all records.
+   - Hover-revealed action buttons (resume, details, delete).
+   - `onResume` callback prop wired to page-level handler.
+   - Row click also opens detail dialog.
+
+### Styling Improvements
+- Settings dialog: 3-tab layout with icons (User, Server, Shield).
+- Network tab: toggle card, server list with bordered cards, amber tip box.
+- Privacy tab: structured "what the server sees / what stays on device / what is never stored" with separators.
+- Diagnostics panel: quality badge with signal bars.
+- Sparkline: dual-color legend dots for avg/peak.
+- Transfer history: progress bars on incomplete records, hover action buttons.
+- Stats dashboard: 4-tile grid with animated counters.
+
+### Verification Results
+- **Lint: clean (0 errors, 0 warnings)**
+- **No console errors** in agent-browser console.
+- **Settings dialog tabs** verified via snapshot: Device, Network, Privacy tabs all present.
+- **Network tab TURN config** VLM-verified: "Server URL input, username/credential fields, Add button, delete button, TURN tip box, consistent teal theme" ✓
+- **Network tab toggle** verified via snapshot: switch toggles, server list with input fields appears.
+- **Landing page** VLM-verified: "Recent transfers section visible, How It Works section visible" ✓
+- **All features compile** without errors (HTTP 200, no dev.log errors).
+
+## Unresolved Issues / Risks
+- **Multi-tab transfer test**: Still cannot test the full sender→receiver data path with agent-browser (single session). The connection quality indicator and enhanced sparkline are wired but only fully exercisable during an active transfer.
+- **Resume flow**: The resume button triggers a toast and switches to sender mode, but full resume (re-establishing connection with the original peer and requesting resume from last chunk) requires the original peer to be online — this is a peer coordination challenge.
+- **Stats dashboard**: Only renders when transfer records exist (correct behavior, but means it's not visible in a fresh browser session).
+- **Sandbox constraint**: Background processes are killed when a Bash tool call ends. All server-dependent tests must run within a single long-running command.
+
+## Priority Recommendations for Next Phase
+1. **Multi-tab transfer test**: Use two agent-browser sessions to exercise the full P2P data path and verify the connection quality indicator + enhanced sparkline during a real transfer.
+2. **Full resume implementation**: Store file references (not just manifests) for sender-side resume; re-create room and wait for the same peer.
+3. **Toast notification improvements**: Add action buttons to toasts (e.g. "View details" on transfer complete).
+4. **Accessibility audit**: Add ARIA labels, keyboard navigation for transfer history rows, screen reader announcements for state changes.
+5. **Performance optimization**: Memoize expensive computations in the sparkline and chunk grid.
+6. **PWA support**: Add a service worker for offline landing page + installable app manifest.

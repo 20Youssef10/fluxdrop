@@ -15,12 +15,24 @@ export interface PeerDevice {
   role: DeviceRole
 }
 
+export interface IceServerConfig {
+  urls: string
+  username?: string
+  credential?: string
+}
+
 interface SessionState {
   // Device identity
   deviceId: string
   alias: string
   setAlias: (alias: string) => void
   initDevice: () => Promise<void>
+
+  // ICE server config (TURN/STUN)
+  customIceServers: IceServerConfig[]
+  useCustomIce: boolean
+  setCustomIceServers: (servers: IceServerConfig[]) => void
+  setUseCustomIce: (v: boolean) => void
 
   // View / mode
   view: SessionView
@@ -72,6 +84,8 @@ interface SessionState {
   // Reset everything
   resetSession: () => void
 }
+
+const ICE_STORAGE_KEY = 'fluxdrop:ice-servers'
 
 export interface WebRtcDiagnostics {
   selectedPair?: {
@@ -135,11 +149,23 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify({ id: stored.deviceId, alias: stored.alias }))
       } catch { /* ignore */ }
-      return
+    } else {
+      const { id, alias } = loadOrCreateDevice()
+      set({ deviceId: id, alias })
+      await saveDevicePreferences({ deviceId: id, alias, createdAt: Date.now(), lastSeen: Date.now() })
     }
-    const { id, alias } = loadOrCreateDevice()
-    set({ deviceId: id, alias })
-    await saveDevicePreferences({ deviceId: id, alias, createdAt: Date.now(), lastSeen: Date.now() })
+    // Load ICE server config from localStorage
+    try {
+      const iceRaw = localStorage.getItem(ICE_STORAGE_KEY)
+      if (iceRaw) {
+        const parsed = JSON.parse(iceRaw) as IceServerConfig[]
+        if (Array.isArray(parsed)) set({ customIceServers: parsed })
+      }
+      const useIceRaw = localStorage.getItem('fluxdrop:use-custom-ice')
+      if (useIceRaw) {
+        set({ useCustomIce: JSON.parse(useIceRaw) === true })
+      }
+    } catch { /* ignore */ }
   },
 
   view: 'landing',
@@ -202,6 +228,25 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   retryCount: 0,
   setRetryCount: (n) => set({ retryCount: n }),
+
+  customIceServers: [],
+  useCustomIce: false,
+  setCustomIceServers: (servers) => {
+    set({ customIceServers: servers })
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(ICE_STORAGE_KEY, JSON.stringify(servers))
+      } catch { /* ignore */ }
+    }
+  },
+  setUseCustomIce: (v) => {
+    set({ useCustomIce: v })
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('fluxdrop:use-custom-ice', JSON.stringify(v))
+      } catch { /* ignore */ }
+    }
+  },
 
   resetSession: () =>
     set({

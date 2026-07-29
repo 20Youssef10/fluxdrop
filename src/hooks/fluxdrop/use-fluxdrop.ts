@@ -264,11 +264,25 @@ export function useFluxDrop() {
     }, delay)
   }, [])
 
+  // ---- Helper: get effective ICE servers ----
+  const getEffectiveIceServers = useCallback((): RTCIceServer[] | undefined => {
+    const s = sessionRef.current
+    if (s.useCustomIce && s.customIceServers.length > 0) {
+      return s.customIceServers.map((srv) => ({
+        urls: srv.urls,
+        username: srv.username || undefined,
+        credential: srv.credential || undefined,
+      }))
+    }
+    return undefined // use defaults
+  }, [])
+
   // ---- Sender: initiate WebRTC as the offerer ----
   const initiateWebRTCAsSender = useCallback(async () => {
     if (webrtcRef.current) webrtcRef.current.close()
     const rtc = new FluxDropWebRTC(
       {
+        iceServers: getEffectiveIceServers(),
         onIceCandidate: (candidate) => {
           signalingRef.current?.sendIce({
             roomId: sessionRef.current.roomId!,
@@ -340,6 +354,7 @@ export function useFluxDrop() {
     if (webrtcRef.current) webrtcRef.current.close()
     const rtc = new FluxDropWebRTC(
       {
+        iceServers: getEffectiveIceServers(),
         onIceCandidate: (candidate) => {
           signalingRef.current?.sendIce({
             roomId: sessionRef.current.roomId!,

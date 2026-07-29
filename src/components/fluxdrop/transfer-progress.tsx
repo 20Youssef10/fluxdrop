@@ -114,9 +114,16 @@ export function TransferProgress({ onCancel, onDone }: TransferProgressProps) {
                 <TrendingUp className="h-3 w-3" />
                 Speed history
               </div>
-              <span className="text-[10px] text-muted-foreground">
-                peak {formatSpeed(Math.max(...t.speedHistory, 0))}
-              </span>
+              <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
+                <span className="flex items-center gap-1">
+                  <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ backgroundColor: 'oklch(0.72 0.14 200)' }} />
+                  avg {formatSpeed(t.speedHistory.reduce((s, v) => s + v, 0) / t.speedHistory.length)}
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ backgroundColor: 'oklch(0.78 0.16 85)' }} />
+                  peak {formatSpeed(Math.max(...t.speedHistory, 0))}
+                </span>
+              </div>
             </div>
             <SpeedSparkline data={t.speedHistory} width={520} height={48} className="w-full h-12" />
           </div>

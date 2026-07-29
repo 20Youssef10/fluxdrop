@@ -17,6 +17,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useSessionStore } from '@/stores/session-store'
 import { formatBytes } from '@/lib/fluxdrop/format'
+import { deriveQuality, QualityBars } from './connection-quality'
 
 export function DiagnosticsPanel() {
   const [open, setOpen] = useState(false)
@@ -38,6 +39,7 @@ export function DiagnosticsPanel() {
 
   const pair = diagnostics?.selectedPair
   const rtt = pair?.currentRoundTripTime != null ? (pair.currentRoundTripTime * 1000).toFixed(0) : null
+  const quality = deriveQuality(diagnostics)
 
   return (
     <Card className="flux-glass overflow-hidden">
@@ -58,6 +60,13 @@ export function DiagnosticsPanel() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {/* Quality bars + label */}
+          {dataChannelOpen && (
+            <div className={`flex items-center gap-1.5 rounded-full border px-2 py-0.5 ${quality.borderColor} ${quality.bgColor}`}>
+              <QualityBars level={quality.level} className="h-3.5" />
+              <span className={`text-[10px] font-medium ${quality.color}`}>{quality.label}</span>
+            </div>
+          )}
           {pair && (
             <Badge variant="outline" className="text-[10px] border-flux-500/40 bg-flux-500/10 text-flux-700 dark:text-flux-300">
               {pair.localCandidateType ?? '?'} → {pair.remoteCandidateType ?? '?'}
