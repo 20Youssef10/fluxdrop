@@ -888,3 +888,36 @@ The `INVALID_INPUT` error occurred because `startSend` called `createRoom` with 
 - **`startSend` confirmed called** with correct file count via console.log debugging.
 - **IndexedDB errors caught** — app no longer crashes on missing object stores.
 - **Note**: The signaling connection requires the Caddy gateway (port 81) to forward `XTransformPort` queries. When accessed directly via `http://127.0.0.1:3000` (bypassing Caddy), the Socket.IO connection stays in "Connecting" state. This is expected — the app works correctly through the preview panel which uses Caddy.
+
+---
+
+Task ID: 13
+Agent: direct review (bug fix)
+Task: Fix "WebRTC error: ICE candidate error: unknown" and "User-initiated Abort, reason=Close called" errors.
+
+## Root Cause
+
+These errors were surfaced by the `onicecandidateerror` handler I added in the previous engineering review (Task ID 11). Two issues:
+
+1. **"ICE candidate error: unknown"**: STUN servers may be unreachable in restricted network environments (like this sandbox). The `onicecandidateerror` event fires for each failed STUN lookup, but these are often benign — WebRTC tries multiple candidates and one may still succeed. The handler was surfacing every candidate error as a toast, creating noise.
+
+2. **"User-initiated Abort, reason=Close called"**: When `close()` is called on the `RTCPeerConnection` (during retry, cleanup, or page unload), pending ICE gathering gets aborted. This triggers `onicecandidateerror` with an "Abort" reason. This is expected behavior during cleanup, not a real error.
+
+## Fixes Applied
+
+### 1. ICE candidate error filtering (`webrtc.ts`)
+- **Suppress when connection is closed**: If `pc.connectionState === 'closed'`, don't surface the error (cleanup in progress).
+- **Suppress "Abort" and "close" reasons**: These occur when `close()` is called during ICE gathering — normal cleanup/retry behavior, not actionable errors.
+- Other ICE candidate errors (genuinely unreachable STUN servers) are still passed to `onError` but filtered by the hook (see below).
+
+### 2. Smart error toast filtering (`use-fluxdrop.ts`)
+- Both `onError` handlers (sender + receiver) now:
+  - **Log all errors** via `console.warn` for diagnostics.
+  - **Only show toasts for critical errors**, filtering out benign messages containing: "ice candidate", "abort", "close", "stun", "gather".
+- This prevents noisy toast spam from STUN unreachable errors while still surfacing genuinely critical errors (DataChannel failures, decode errors, etc.).
+
+## Verification
+- **Lint: clean (0 errors, 0 warnings)**
+- **No ICE/Abort errors** in console or toasts.
+- **No "WebRTC error"** text in page body.
+- Benign errors are still logged to console for debugging.

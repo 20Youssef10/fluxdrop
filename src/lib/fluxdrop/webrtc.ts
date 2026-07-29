@@ -74,9 +74,18 @@ export class FluxDropWebRTC {
     }
 
     // Surface ICE candidate gathering errors (e.g. STUN unreachable).
+    // Note: Some ICE candidate errors are benign (e.g. a STUN server is
+    // unreachable but another candidate succeeds). Only surface genuinely
+    // actionable errors, and suppress errors that occur after close().
     this.pc.onicecandidateerror = (event: any) => {
+      // Suppress if the connection is already closed (cleanup in progress).
+      if (this.pc.connectionState === 'closed') return
       const err = event?.error ?? event
-      this.config.onError(new Error(`ICE candidate error: ${err?.message ?? err?.errorCodeText ?? 'unknown'}`))
+      const reason = err?.message ?? err?.errorCodeText ?? 'unknown'
+      // Don't surface "User-initiated Abort" — this happens when close() is
+      // called during ICE gathering (normal cleanup/retry).
+      if (reason.includes('Abort') || reason.includes('close')) return
+      this.config.onError(new Error(`ICE candidate error: ${reason}`))
     }
 
     this.pc.ondatachannel = (event) => {

@@ -388,7 +388,21 @@ export function useFluxDrop() {
           }
         },
         onDataChannelMessage: (msg) => handleDataChannelMessage(msg),
-        onError: (err) => toast.error('WebRTC error', { description: err.message }),
+        onError: (err) => {
+          // Log all WebRTC errors for diagnostics.
+          console.warn('[FluxDrop] WebRTC error:', err.message)
+          // Only show a toast for critical errors, not benign ICE candidate failures.
+          const msg = err.message.toLowerCase()
+          const isBenign =
+            msg.includes('ice candidate') ||
+            msg.includes('abort') ||
+            msg.includes('close') ||
+            msg.includes('stun') ||
+            msg.includes('gather')
+          if (!isBenign) {
+            toast.error('WebRTC error', { description: err.message })
+          }
+        },
       },
       true
     )
@@ -447,7 +461,21 @@ export function useFluxDrop() {
           stopDiagnosticsPolling()
         },
         onDataChannelMessage: (msg) => handleDataChannelMessage(msg),
-        onError: (err) => toast.error('WebRTC error', { description: err.message }),
+        onError: (err) => {
+          // Log all WebRTC errors for diagnostics.
+          console.warn('[FluxDrop] WebRTC error:', err.message)
+          // Only show a toast for critical errors, not benign ICE candidate failures.
+          const msg = err.message.toLowerCase()
+          const isBenign =
+            msg.includes('ice candidate') ||
+            msg.includes('abort') ||
+            msg.includes('close') ||
+            msg.includes('stun') ||
+            msg.includes('gather')
+          if (!isBenign) {
+            toast.error('WebRTC error', { description: err.message })
+          }
+        },
       },
       false
     )
