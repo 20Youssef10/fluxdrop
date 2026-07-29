@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo } from 'react'
+import { memo, useMemo } from 'react'
 
 interface SpeedSparklineProps {
   data: number[]      // speed samples in bytes/sec
@@ -17,7 +17,7 @@ interface SpeedSparklineProps {
  * Fills the area under the curve with a gradient.
  * Optionally draws a dashed average line and a max-speed marker.
  */
-export function SpeedSparkline({
+export const SpeedSparkline = memo(function SpeedSparkline({
   data,
   max,
   width = 280,
@@ -141,4 +141,4 @@ export function SpeedSparkline({
       })()}
     </svg>
   )
-}
+})

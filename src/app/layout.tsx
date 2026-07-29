@@ -1,8 +1,9 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
 import { ThemeProvider } from "@/components/fluxdrop/theme-provider";
+import { ServiceWorkerRegister } from "@/components/fluxdrop/sw-register";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -27,8 +28,15 @@ export const metadata: Metadata = {
     "no cloud",
   ],
   authors: [{ name: "FluxDrop" }],
+  manifest: "/manifest.json",
   icons: {
     icon: "/logo.svg",
+    apple: "/logo.svg",
+  },
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "FluxDrop",
   },
   openGraph: {
     title: "FluxDrop — Peer-to-Peer File Transfer",
@@ -40,6 +48,16 @@ export const metadata: Metadata = {
     title: "FluxDrop",
     description: "Direct, encrypted, serverless file transfer between devices.",
   },
+};
+
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
+    { media: "(prefers-color-scheme: dark)", color: "#0a0f0d" },
+  ],
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 5,
 };
 
 export default function RootLayout({
@@ -60,6 +78,7 @@ export default function RootLayout({
         >
           {children}
           <Toaster richColors position="bottom-right" />
+          <ServiceWorkerRegister />
         </ThemeProvider>
       </body>
     </html>

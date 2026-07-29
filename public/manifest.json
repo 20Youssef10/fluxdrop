@@ -1,0 +1,19 @@
+{
+  "name": "FluxDrop — Peer-to-Peer File Transfer",
+  "short_name": "FluxDrop",
+  "description": "Send files directly between devices over WebRTC. No cloud, no servers, no storage. End-to-end encrypted.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0f0d",
+  "theme_color": "#0d6e6e",
+  "orientation": "any",
+  "categories": ["productivity", "utilities"],
+  "icons": [
+    {
+      "src": "/logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -13,7 +13,7 @@ import { AnimatedNumber } from './animated-number'
 import { SpeedSparkline } from './speed-sparkline'
 import { Celebration } from './celebration'
 import { ConnectionViz } from './connection-viz'
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, memo } from 'react'
 
 interface TransferProgressProps {
   onCancel: () => void
@@ -241,7 +241,7 @@ function StatCard({ icon, label, value }: { icon: React.ReactNode; label: string
   )
 }
 
-function ChunkGrid({ total, acked, complete }: { total: number; acked: number; complete: boolean }) {
+const ChunkGrid = memo(function ChunkGrid({ total, acked, complete }: { total: number; acked: number; complete: boolean }) {
   const cols = total > 200 ? 40 : total > 100 ? 32 : total > 50 ? 24 : 16
   return (
     <div className="mt-5">
@@ -276,4 +276,4 @@ function ChunkGrid({ total, acked, complete }: { total: number; acked: number; c
       </div>
     </div>
   )
-}
+})

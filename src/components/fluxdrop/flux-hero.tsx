@@ -1,20 +1,23 @@
 'use client'
 
 import { motion } from 'framer-motion'
-import { Upload, Download, Shield, Zap, ArrowRight, Lock, Wifi } from 'lucide-react'
+import { Upload, Download, Shield, Zap, ArrowRight, Lock, HelpCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { FluxLogo } from './flux-logo'
+import { ParticleField } from './particle-field'
 
 interface FluxHeroProps {
   onSend: () => void
   onReceive: () => void
+  onHelp?: () => void
 }
 
-export function FluxHero({ onSend, onReceive }: FluxHeroProps) {
+export function FluxHero({ onSend, onReceive, onHelp }: FluxHeroProps) {
   return (
     <section className="flux-mesh-bg flux-grid-overlay relative overflow-hidden">
+      <ParticleField count={20} />
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-16 sm:py-24 lg:py-28">
         {/* Hero copy */}
         <div className="mx-auto max-w-3xl text-center">
@@ -90,6 +93,24 @@ export function FluxHero({ onSend, onReceive }: FluxHeroProps) {
               Receive files
             </Button>
           </motion.div>
+
+          {/* Help link */}
+          {onHelp && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.5, delay: 0.6 }}
+              className="mt-6"
+            >
+              <button
+                onClick={onHelp}
+                className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-flux-600 dark:hover:text-flux-400 transition-colors"
+              >
+                <HelpCircle className="h-3.5 w-3.5" />
+                How does it work? Privacy & limitations
+              </button>
+            </motion.div>
+          )}
         </div>
 
         {/* Feature cards */}
