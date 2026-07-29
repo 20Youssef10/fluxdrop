@@ -13,7 +13,7 @@ export function DeviceList() {
   const alias = useSessionStore((s) => s.alias)
 
   return (
-    <Card className="flux-glass p-5">
+    <Card className="flux-hover-border flux-glass p-5">
       <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4">
         Devices in room
       </h3>

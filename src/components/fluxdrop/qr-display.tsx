@@ -42,7 +42,7 @@ export function QRDisplay() {
   if (!roomId) return null
 
   return (
-    <Card className="flux-glass overflow-hidden">
+    <Card className="flux-hover-border flux-glass overflow-hidden">
       <div className="p-6 sm:p-8">
         <div className="flex flex-col items-center text-center">
           <Badge variant="outline" className="mb-4 border-flux-500/40 bg-flux-500/10 text-flux-700 dark:text-flux-300">

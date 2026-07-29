@@ -53,7 +53,7 @@ export function StatsDashboard() {
   if (!stats || stats.totalTransfers === 0) return null
 
   return (
-    <Card className="flux-glass p-5">
+    <Card className="flux-hover-border flux-glass p-5">
       <div className="flex items-center gap-2 mb-4">
         <TrendingUp className="h-4 w-4 text-muted-foreground" />
         <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">

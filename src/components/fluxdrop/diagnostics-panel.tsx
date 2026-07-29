@@ -42,7 +42,7 @@ export function DiagnosticsPanel() {
   const quality = deriveQuality(diagnostics)
 
   return (
-    <Card className="flux-glass overflow-hidden">
+    <Card className="flux-hover-border flux-glass overflow-hidden">
       <button
         onClick={() => setOpen((v) => !v)}
         className="flex w-full items-center justify-between gap-3 p-4 text-left hover:bg-muted/30 transition-colors"

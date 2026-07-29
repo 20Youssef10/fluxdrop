@@ -1,10 +1,11 @@
 'use client'
 
 import { useEffect, useState, useMemo, useCallback } from 'react'
-import { History, Trash2, ArrowUp, ArrowDown, CheckCircle2, AlertCircle, RotateCcw, Info, Download, FileJson, CheckSquare, Square } from 'lucide-react'
+import { History, Trash2, ArrowUp, ArrowDown, CheckCircle2, AlertCircle, RotateCcw, Info, Download, FileJson, CheckSquare, Square, Search, X } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { listTransfers, deleteTransferRecord, type StoredTransfer } from '@/lib/fluxdrop/resume'
 import { formatBytes } from '@/lib/fluxdrop/format'
@@ -25,6 +26,7 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
   const [activeFilter, setActiveFilter] = useState<FilterTab>('all')
   const [selectMode, setSelectMode] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [searchQuery, setSearchQuery] = useState('')
 
   const loadRefresh = useCallback(async () => {
     try {
@@ -54,14 +56,25 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
   }, [])
 
   const filteredRecords = useMemo(() => {
+    let result = records
+    // Apply tab filter
     switch (activeFilter) {
-      case 'sent': return records.filter((r) => r.role === 'sender')
-      case 'received': return records.filter((r) => r.role === 'receiver')
-      case 'complete': return records.filter((r) => r.status === 'COMPLETE')
-      case 'incomplete': return records.filter((r) => r.status !== 'COMPLETE' && r.status !== 'CANCELLED')
-      default: return records
+      case 'sent': result = result.filter((r) => r.role === 'sender'); break
+      case 'received': result = result.filter((r) => r.role === 'receiver'); break
+      case 'complete': result = result.filter((r) => r.status === 'COMPLETE'); break
+      case 'incomplete': result = result.filter((r) => r.status !== 'COMPLETE' && r.status !== 'CANCELLED'); break
     }
-  }, [records, activeFilter])
+    // Apply search query
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim()
+      result = result.filter((r) =>
+        r.manifest.files.some((f) => f.name.toLowerCase().includes(q)) ||
+        r.peerAlias.toLowerCase().includes(q) ||
+        r.transferId.toLowerCase().includes(q)
+      )
+    }
+    return result
+  }, [records, activeFilter, searchQuery])
 
   const filterCounts = useMemo(() => ({
     all: records.length,
@@ -234,26 +247,47 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
           </div>
         </div>
 
-        {/* Filter tabs */}
-        <div className="flex items-center gap-1 mb-3 overflow-x-auto flux-scroll pb-1">
-          {FILTER_TABS.map((tab) => {
-            const count = filterCounts[tab.key]
-            if (count === 0 && tab.key !== 'all') return null
-            return (
+        {/* Filter tabs + search */}
+        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 mb-3">
+          <div className="flex items-center gap-1 overflow-x-auto flux-scroll pb-1 flex-1">
+            {FILTER_TABS.map((tab) => {
+              const count = filterCounts[tab.key]
+              if (count === 0 && tab.key !== 'all') return null
+              return (
+                <button
+                  key={tab.key}
+                  onClick={() => setActiveFilter(tab.key)}
+                  className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-all ${
+                    activeFilter === tab.key
+                      ? 'bg-flux-500/15 text-flux-600 dark:text-flux-400 border border-flux-500/30'
+                      : 'bg-muted/40 text-muted-foreground border border-transparent hover:bg-muted/60'
+                  }`}
+                >
+                  {tab.label}
+                  <span className="ml-1 opacity-60">{count}</span>
+                </button>
+              )
+            })}
+          </div>
+          {/* Search input */}
+          <div className="relative shrink-0 w-full sm:w-48">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+            <Input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search files…"
+              className="h-8 pl-8 pr-7 text-xs"
+            />
+            {searchQuery && (
               <button
-                key={tab.key}
-                onClick={() => setActiveFilter(tab.key)}
-                className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-all ${
-                  activeFilter === tab.key
-                    ? 'bg-flux-500/15 text-flux-600 dark:text-flux-400 border border-flux-500/30'
-                    : 'bg-muted/40 text-muted-foreground border border-transparent hover:bg-muted/60'
-                }`}
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                aria-label="Clear search"
               >
-                {tab.label}
-                <span className="ml-1 opacity-60">{count}</span>
+                <X className="h-3.5 w-3.5" />
               </button>
-            )
-          })}
+            )}
+          </div>
         </div>
 
         {/* Batch action bar */}
@@ -305,7 +339,11 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
           <div className="space-y-2 pr-2">
             {filteredRecords.length === 0 ? (
               <div className="rounded-lg border border-dashed border-border/60 p-6 text-center">
-                <p className="text-xs text-muted-foreground">No records match this filter</p>
+                <p className="text-xs text-muted-foreground">
+                  {searchQuery
+                    ? `No records match "${searchQuery}"`
+                    : 'No records match this filter'}
+                </p>
               </div>
             ) : (
               filteredRecords.map((rec) => {

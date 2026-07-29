@@ -57,7 +57,7 @@ export function FilePicker({ files, onFilesChange, onSend, disabled }: FilePicke
   return (
     <div className="space-y-4">
       <Card
-        className={`relative overflow-hidden border-2 border-dashed transition-all ${
+        className={`flux-hover-border relative overflow-hidden border-2 border-dashed transition-all ${
           isDragging
             ? 'border-flux-500 bg-flux-500/5 scale-[1.01]'
             : 'border-border hover:border-flux-500/50 hover:bg-flux-500/[0.02]'

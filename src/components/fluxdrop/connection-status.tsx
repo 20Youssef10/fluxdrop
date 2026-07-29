@@ -30,7 +30,7 @@ export function ConnectionStatus({ transferState }: { transferState: TransferSta
   const meta = STATE_LABELS[transferState] ?? STATE_LABELS.IDLE
 
   return (
-    <Card className="flux-glass p-4">
+    <Card className="flux-hover-border flux-glass p-4">
       <div className="flex items-center gap-4">
         <div className="relative">
           <div className={`flex h-12 w-12 items-center justify-center rounded-xl bg-flux-500/10 ${meta.color}`}>

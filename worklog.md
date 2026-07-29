@@ -702,3 +702,61 @@ Task: QA test, add connection state badge, tips banner, gradient hover borders, 
 4. **Full resume implementation**: Store file references for sender-side resume.
 5. **Empty-state illustrations**: Add decorative SVG illustrations for sender/receiver panels.
 6. **Custom favicon**: Generate a FluxDrop-branded favicon from the logo SVG.
+
+---
+
+Task ID: 10
+Agent: cron-review (round 9)
+Task: QA test, apply gradient hover borders, add transfer history search, styling improvements.
+
+## Current Project Status Assessment
+- FluxDrop was stable from rounds 1-9: 46+ features.
+- Lint was clean, no runtime errors.
+- No bugs found during QA.
+
+## Work Completed This Round
+
+### New Features (2)
+
+1. **Gradient Hover Borders Applied** (enhanced multiple components)
+   - Applied `.flux-hover-border` class to key cards across the app:
+     - FilePicker drop zone
+     - QRDisplay card
+     - ConnectionStatus card
+     - DeviceList card
+     - DiagnosticsPanel card
+     - StatsDashboard card
+   - Creates a subtle gradient border (teal → cyan → green) on hover using mask-composite technique.
+   - Smooth 0.25s opacity transition.
+
+2. **Transfer History Search** (enhanced `transfer-history.tsx`)
+   - Search input with Search icon + clear button.
+   - Searches across: file names, peer alias, transfer ID.
+   - Case-insensitive substring matching.
+   - Works in combination with filter tabs (both filters apply).
+   - Search-aware empty state: "No records match "query"" when search yields no results.
+   - Responsive layout: filter tabs + search side-by-side on desktop, stacked on mobile.
+
+### Styling Improvements
+- Gradient hover borders on 6 key card components for visual polish.
+- Search input with icon, clear button, responsive layout.
+- Search-aware empty state messaging.
+
+### Verification Results
+- **Lint: clean (0 errors, 0 warnings)**
+- **No console errors**.
+- **Landing page** renders correctly with all features.
+- **Sender flow** works — 's' shortcut → Sender mode.
+- **All features compile** without errors (HTTP 200, clean dev.log).
+
+## Unresolved Issues / Risks
+- **Multi-tab transfer test**: Still cannot test the full sender→receiver data path with agent-browser single-session.
+- **Sandbox constraint**: Background processes killed when a Bash tool call ends.
+
+## Priority Recommendations for Next Phase
+1. **Multi-tab transfer test**: Use two agent-browser sessions to exercise the full P2P data path.
+2. **Persistent received files**: Store assembled file blobs in IndexedDB for true re-download.
+3. **Full resume implementation**: Store file references for sender-side resume.
+4. **Empty-state illustrations**: Add decorative SVG illustrations for sender/receiver panels.
+5. **Custom favicon**: Generate a FluxDrop-branded favicon.
+6. **Transfer history sorting**: Add sort options (date, size, name).
