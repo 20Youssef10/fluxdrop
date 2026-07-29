@@ -21,6 +21,7 @@ import {
   markChunkAcked,
   saveChunk,
   getChunk,
+  flushAllPendingAcks,
   type StoredTransfer,
 } from '@/lib/fluxdrop/resume'
 import { assembleBlob, saveBlobWithPicker } from '@/lib/fluxdrop/file-io'
@@ -77,7 +78,12 @@ export function useFluxDrop() {
 
   // ---- Cleanup on unmount ----
   useEffect(() => {
+    // Flush pending IndexedDB writes on page unload.
+    const onBeforeUnload = () => { void flushAllPendingAcks() }
+    window.addEventListener('beforeunload', onBeforeUnload)
     return () => {
+      window.removeEventListener('beforeunload', onBeforeUnload)
+      void flushAllPendingAcks()
       webrtcRef.current?.close()
       signalingRef.current?.disconnect()
     }
@@ -640,7 +646,13 @@ export function useFluxDrop() {
         if (!file) continue
         const slice = file.slice(resolved.localStart, resolved.localEnd)
         const buf = await slice.arrayBuffer()
-        rtc.sendChunkData(m.transferId, i, buf)
+        const sent = rtc.sendChunkData(m.transferId, i, buf)
+        if (!sent) {
+          // Channel closed mid-send — enter resume state.
+          transferRef.current.setTransferState('RESUMING')
+          sendingRef.current = false
+          return
+        }
       }
       const combined = m.files.map((f) => f.checksum).join('')
       rtc.sendTransferComplete(m.transferId, combined)
@@ -734,6 +746,8 @@ export function useFluxDrop() {
     signalingRef.current?.leaveRoom()
     signalingRef.current?.disconnect()
     signalingRef.current = null
+    // Flush any pending IndexedDB ack writes before resetting state.
+    void flushAllPendingAcks()
     sessionRef.current.resetSession()
     transferRef.current.resetTransfer()
     manifestRef.current = null

@@ -43,6 +43,9 @@ export class FluxDropWebRTC {
   private channel: RTCDataChannel | null = null
   private config: WebRTCConfig
   private isInitiator: boolean
+  /** Queue of ICE candidates that arrived before setRemoteDescription. */
+  private pendingCandidates: RTCIceCandidateInit[] = []
+  private remoteDescriptionSet = false
 
   constructor(config: WebRTCConfig, isInitiator: boolean) {
     this.config = config
@@ -70,6 +73,12 @@ export class FluxDropWebRTC {
       this.config.onConnectionStateChange(this.pc.connectionState)
     }
 
+    // Surface ICE candidate gathering errors (e.g. STUN unreachable).
+    this.pc.onicecandidateerror = (event: any) => {
+      const err = event?.error ?? event
+      this.config.onError(new Error(`ICE candidate error: ${err?.message ?? err?.errorCodeText ?? 'unknown'}`))
+    }
+
     this.pc.ondatachannel = (event) => {
       // Non-initiator receives the data channel created by the initiator.
       this.bindChannel(event.channel)
@@ -92,11 +101,24 @@ export class FluxDropWebRTC {
 
     channel.onopen = () => this.config.onDataChannelOpen()
     channel.onclose = () => this.config.onDataChannelClose()
-    channel.onerror = (e: any) => this.config.onError(new Error(e?.message ?? 'DataChannel error'))
+    channel.onerror = (e: any) => {
+      // RTCErrorEvent stores the actual Error on `e.error`, not `e.message`.
+      const err = e?.error ?? e
+      this.config.onError(new Error(err?.message ?? 'DataChannel error'))
+    }
     channel.onmessage = (event) => {
-      const data = event.data as ArrayBuffer
-      const msg = decodeMessage(data)
-      this.config.onDataChannelMessage(msg)
+      // Guard against non-ArrayBuffer messages (strings, Blobs).
+      if (!(event.data instanceof ArrayBuffer)) {
+        this.config.onError(new Error(`Unexpected DataChannel message type: ${typeof event.data}`))
+        return
+      }
+      // Wrap decode in try/catch so a malformed frame doesn't kill the channel.
+      try {
+        const msg = decodeMessage(event.data)
+        this.config.onDataChannelMessage(msg)
+      } catch (err: any) {
+        this.config.onError(new Error(`Failed to decode message: ${err.message}`))
+      }
     }
   }
 
@@ -109,6 +131,9 @@ export class FluxDropWebRTC {
 
   async createAnswer(offer: RTCSessionDescriptionInit): Promise<RTCSessionDescriptionInit> {
     await this.pc.setRemoteDescription(offer)
+    this.remoteDescriptionSet = true
+    // Flush any ICE candidates that arrived before the offer.
+    await this.flushPendingCandidates()
     const answer = await this.pc.createAnswer()
     await this.pc.setLocalDescription(answer)
     return answer
@@ -116,112 +141,140 @@ export class FluxDropWebRTC {
 
   async acceptAnswer(answer: RTCSessionDescriptionInit): Promise<void> {
     await this.pc.setRemoteDescription(answer)
+    this.remoteDescriptionSet = true
+    await this.flushPendingCandidates()
+  }
+
+  /** Apply any ICE candidates that were queued before setRemoteDescription. */
+  private async flushPendingCandidates(): Promise<void> {
+    if (this.pendingCandidates.length === 0) return
+    const queued = this.pendingCandidates.splice(0)
+    for (const candidate of queued) {
+      try {
+        await this.pc.addIceCandidate(candidate)
+      } catch (err: any) {
+        this.config.onError(new Error(`Failed to apply queued ICE candidate: ${err.message}`))
+      }
+    }
   }
 
   async addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
+    // If remote description isn't set yet, queue the candidate for later.
+    if (!this.remoteDescriptionSet) {
+      this.pendingCandidates.push(candidate)
+      return
+    }
     try {
       await this.pc.addIceCandidate(candidate)
-    } catch (err) {
-      // Ignore errors from out-of-order candidates; common during aggressive ICE.
+    } catch (err: any) {
+      // Distinguish "no remote description" (shouldn't happen due to queue) from genuine errors.
+      if (err?.name === 'InvalidStateError') {
+        this.pendingCandidates.push(candidate)
+      } else {
+        this.config.onError(new Error(`Failed to add ICE candidate: ${err.message}`))
+      }
     }
   }
 
   // === Backpressure-aware chunk sending ===
   canSend(): boolean {
     if (!this.channel) return false
-    return this.channel.bufferedAmount < CONSTANTS.TARGET_BUFFERED_BYTES
+    // Target: soft threshold for flow control.
+    // Hard guard: never exceed MAX_BUFFERED_BYTES to avoid unbounded buffering.
+    return (
+      this.channel.bufferedAmount < CONSTANTS.TARGET_BUFFERED_BYTES &&
+      this.channel.bufferedAmount < CONSTANTS.MAX_BUFFERED_BYTES
+    )
   }
 
   async waitForDrain(): Promise<void> {
-    if (!this.channel) return
     const channel = this.channel
+    if (!channel) return
     if (channel.bufferedAmount < CONSTANTS.TARGET_BUFFERED_BYTES) return
     await new Promise<void>((resolve) => {
-      const onLow = () => {
+      let resolved = false
+      const cleanup = () => {
+        if (resolved) return
+        resolved = true
         channel.removeEventListener('bufferedamountlow', onLow)
+        channel.removeEventListener('close', onClose)
+        if (timerId) clearTimeout(timerId)
         resolve()
       }
+      const onLow = () => cleanup()
+      const onClose = () => cleanup()
       channel.addEventListener('bufferedamountlow', onLow)
-      // Safety timeout in case the event never fires
-      setTimeout(() => {
-        channel.removeEventListener('bufferedamountlow', onLow)
-        resolve()
-      }, 2000)
+      channel.addEventListener('close', onClose)
+      // Safety timeout in case the event never fires.
+      const timerId = setTimeout(cleanup, 2000)
     })
   }
 
-  sendChunkData(transferId: string, chunkIndex: number, payload: ArrayBuffer): void {
-    if (!this.channel) throw new Error('DataChannel not open')
-    const msg = encodeChunkData(transferId, chunkIndex, payload)
-    this.channel.send(msg)
+  /**
+   * Send a chunk. Returns true on success, false if the channel is closed
+   * or the send throws (e.g. buffer overflow).
+   */
+  sendChunkData(transferId: string, chunkIndex: number, payload: ArrayBuffer): boolean {
+    if (!this.channel || this.channel.readyState !== 'open') return false
+    try {
+      const msg = encodeChunkData(transferId, chunkIndex, payload)
+      this.channel.send(msg)
+      return true
+    } catch (err: any) {
+      this.config.onError(new Error(`Failed to send chunk ${chunkIndex}: ${err.message}`))
+      return false
+    }
+  }
+
+  /**
+   * Safely send a control message. Silently returns if the channel is not open.
+   */
+  private sendControl(type: number, transferId: string, chunkIndex: number, body: unknown): void {
+    if (!this.channel || this.channel.readyState !== 'open') return
+    try {
+      const msg = encodeControlMessage(type, transferId, chunkIndex, body)
+      this.channel.send(msg)
+    } catch (err: any) {
+      this.config.onError(new Error(`Failed to send control message (type ${type}): ${err.message}`))
+    }
   }
 
   sendChunkAck(transferId: string, chunkIndex: number, ok: boolean): void {
-    if (!this.channel) return
-    const msg = encodeChunkAck(transferId, chunkIndex, ok)
-    this.channel.send(msg)
+    if (!this.channel || this.channel.readyState !== 'open') return
+    try {
+      const msg = encodeChunkAck(transferId, chunkIndex, ok)
+      this.channel.send(msg)
+    } catch (err: any) {
+      this.config.onError(new Error(`Failed to send chunk ack: ${err.message}`))
+    }
   }
 
   sendManifest(transferId: string, manifest: unknown): void {
-    if (!this.channel) return
-    const msg = encodeControlMessage(MessageType.MANIFEST, transferId, 0, manifest)
-    this.channel.send(msg)
+    this.sendControl(MessageType.MANIFEST, transferId, 0, manifest)
   }
 
   sendManifestAck(transferId: string, accepted: boolean, reason?: string): void {
-    if (!this.channel) return
-    const msg = encodeControlMessage(
-      MessageType.MANIFEST_ACK,
-      transferId,
-      0,
-      { accepted, reason }
-    )
-    this.channel.send(msg)
+    this.sendControl(MessageType.MANIFEST_ACK, transferId, 0, { accepted, reason })
   }
 
   sendTransferComplete(transferId: string, finalChecksum: string): void {
-    if (!this.channel) return
-    const msg = encodeControlMessage(
-      MessageType.TRANSFER_COMPLETE,
-      transferId,
-      0,
-      { finalChecksum }
-    )
-    this.channel.send(msg)
+    this.sendControl(MessageType.TRANSFER_COMPLETE, transferId, 0, { finalChecksum })
   }
 
   sendTransferCompleteAck(transferId: string, verified: boolean): void {
-    if (!this.channel) return
-    const msg = encodeControlMessage(
-      MessageType.TRANSFER_COMPLETE_ACK,
-      transferId,
-      0,
-      { verified }
-    )
-    this.channel.send(msg)
+    this.sendControl(MessageType.TRANSFER_COMPLETE_ACK, transferId, 0, { verified })
   }
 
   sendCancel(transferId: string, reason: string): void {
-    if (!this.channel) return
-    const msg = encodeControlMessage(MessageType.TRANSFER_CANCEL, transferId, 0, { reason })
-    this.channel.send(msg)
+    this.sendControl(MessageType.TRANSFER_CANCEL, transferId, 0, { reason })
   }
 
   sendResumeRequest(transferId: string, lastChunkIndex: number): void {
-    if (!this.channel) return
-    const msg = encodeControlMessage(MessageType.RESUME_REQUEST, transferId, lastChunkIndex, { lastChunkIndex })
-    this.channel.send(msg)
+    this.sendControl(MessageType.RESUME_REQUEST, transferId, lastChunkIndex, { lastChunkIndex })
   }
 
   sendResumeResponse(transferId: string, accepted: boolean, fromChunkIndex: number): void {
-    if (!this.channel) return
-    const msg = encodeControlMessage(
-      MessageType.RESUME_RESPONSE,
-      transferId,
-      fromChunkIndex,
-      { accepted, fromChunkIndex }
-    )
-    this.channel.send(msg)
+    this.sendControl(MessageType.RESUME_RESPONSE, transferId, fromChunkIndex, { accepted, fromChunkIndex })
   }
 
   get bufferedAmount(): number {
@@ -242,36 +295,6 @@ export class FluxDropWebRTC {
 
   get isOpen(): boolean {
     return this.channel?.readyState === 'open'
-  }
-
-  /** Get local ICE candidates (for diagnostics). */
-  getLocalCandidates(): RTCIceCandidate[] {
-    try {
-      const stats = this.pc.getLocalStats?.() as any
-      if (!stats) return []
-      const out: RTCIceCandidate[] = []
-      stats.forEach((report: any) => {
-        if (report.type === 'local-candidate' && report.candidateType) {
-          out.push({
-            candidate: '',
-            sdpMid: report.id,
-            sdpMLineIndex: 0,
-            component: report.component,
-            foundation: report.foundation,
-            address: report.address,
-            priority: report.priority,
-            protocol: report.protocol,
-            relatedAddress: report.relatedAddress,
-            relatedPort: report.relatedPort,
-            tcpType: report.tcpType,
-            type: report.candidateType,
-          } as any)
-        }
-      })
-      return out
-    } catch {
-      return []
-    }
   }
 
   /** Fetch the selected candidate pair + transport stats. */
@@ -333,8 +356,22 @@ export class FluxDropWebRTC {
   }
 
   close(): void {
-    try { this.channel?.close() } catch { /* noop */ }
+    // Null out handlers to prevent stale callbacks during retry/reconnect.
+    if (this.channel) {
+      this.channel.onopen = null
+      this.channel.onclose = null
+      this.channel.onerror = null
+      this.channel.onmessage = null
+      try { this.channel.close() } catch { /* noop */ }
+      this.channel = null
+    }
+    this.pc.onicecandidate = null
+    this.pc.onicegatheringstatechange = null
+    this.pc.oniceconnectionstatechange = null
+    this.pc.onconnectionstatechange = null
+    this.pc.onicecandidateerror = null
+    this.pc.ondatachannel = null
     try { this.pc.close() } catch { /* noop */ }
-    this.channel = null
+    this.pendingCandidates = []
   }
 }

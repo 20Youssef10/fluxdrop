@@ -760,3 +760,80 @@ Task: QA test, apply gradient hover borders, add transfer history search, stylin
 4. **Empty-state illustrations**: Add decorative SVG illustrations for sender/receiver panels.
 5. **Custom favicon**: Generate a FluxDrop-branded favicon.
 6. **Transfer history sorting**: Add sort options (date, size, name).
+
+---
+
+Task ID: 11
+Agent: direct review
+Task: Code review and engineering improvements — fix critical bugs, performance issues, and error handling gaps.
+
+## Code Review Findings
+
+A thorough code review was performed on the WebRTC, encoding, and resume store modules. The following issues were identified and fixed:
+
+### Critical Fixes
+
+1. **`decodeMessage` bounds checking** (`encoding.ts`)
+   - **Before**: No bounds check before reading `view.getUint8(0)`, `new Uint8Array(data, 1, 4)`, and `readU32BE(view, 5)`. A malformed/truncated message (< 9 bytes) would throw `RangeError` and silently kill the DataChannel `onmessage` handler.
+   - **After**: Added `if (data.byteLength < HEADER_SIZE) throw new Error(...)` at the top. The caller (`webrtc.ts`) now wraps `decodeMessage` in `try/catch` and routes errors to `onError`.
+
+2. **`onmessage` error handling** (`webrtc.ts`)
+   - **Before**: `const data = event.data as ArrayBuffer` — unchecked cast. Non-ArrayBuffer messages (strings, Blobs) would crash `decodeMessage`. No `try/catch` around decode.
+   - **After**: Added `instanceof ArrayBuffer` check + `try/catch` around `decodeMessage`. Errors are routed to `config.onError` instead of silently killing the message loop.
+
+### High-Severity Fixes
+
+3. **ICE candidate queuing** (`webrtc.ts`)
+   - **Before**: `addIceCandidate` silently swallowed ALL errors with `catch {}`. Candidates arriving before `setRemoteDescription` (common during aggressive ICE) were dropped, causing flaky pairing.
+   - **After**: Added `pendingCandidates` queue. Candidates received before `remoteDescriptionSet` are buffered and flushed after `createAnswer`/`acceptAnswer` calls `setRemoteDescription`. Genuine candidate errors are routed to `onError` instead of being swallowed.
+
+4. **`sendChunkData` error handling** (`webrtc.ts`)
+   - **Before**: Threw synchronously if channel was closed or buffer overflowed, with no caller contract. All other `send*` methods had the same issue.
+   - **After**: `sendChunkData` now returns `boolean` (true = sent, false = channel closed). Added `sendControl` private helper with `try/catch` for all control message sends. Callers in `use-fluxdrop.ts` handle the boolean return and enter `RESUMING` state on failure.
+
+5. **`waitForDrain` timer + listener leak** (`webrtc.ts`)
+   - **Before**: The 2s safety `setTimeout` kept running after `bufferedamountlow` fired. Channel `close` during drain wasn't detected — sender stalled for 2s.
+   - **After**: Single `cleanup` function that clears timer + removes both `bufferedamountlow` and `close` listeners. Uses a `resolved` flag to prevent double-resolution.
+
+### Medium-Severity Fixes
+
+6. **`channel.onerror` wrong property** (`webrtc.ts`)
+   - **Before**: `e?.message` — `RTCErrorEvent` stores the Error on `e.error`, not `e.message`. All DataChannel errors were reported as "DataChannel error" with no diagnostic.
+   - **After**: `e?.error ?? e` — reads the actual `RTCError` object for proper error messages.
+
+7. **Missing `onicecandidateerror` handler** (`webrtc.ts`)
+   - **Before**: STUN/TURN gathering failures were invisible — manifested as "connection never opens" with no diagnostic.
+   - **After**: Added `pc.onicecandidateerror` handler that routes to `onError` with the error message.
+
+8. **`close()` doesn't null handlers** (`webrtc.ts`)
+   - **Before**: `on*` handlers still referenced closures after `close()`, relying on GC. Problematic during retry/reconnect cycles.
+   - **After**: Explicitly nulls `channel.onopen/onclose/onerror/onmessage` and `pc.onicecandidate/onicegatheringstatechange/oniceconnectionstatechange/onconnectionstatechange/onicecandidateerror/ondatachannel` before closing. Clears `pendingCandidates` array.
+
+9. **TextEncoder/TextDecoder per-call allocation** (`encoding.ts`)
+   - **Before**: `new TextEncoder()` and `new TextDecoder()` allocated on every control message encode/decode.
+   - **After**: Hoisted to module scope as `textEncoder` / `textDecoder` constants.
+
+10. **`transferIdToBytes` used deprecated `substr`** (`encoding.ts`)
+    - **Before**: `hex.substr(i * 2, 2)` — deprecated API. Also, malformed input (short hex) produced `NaN` bytes silently written as `0`.
+    - **After**: Uses `slice()`. Pads hex to 8 chars with `padEnd` before parsing. `|| 0` fallback for `NaN`.
+
+11. **Removed dead `getLocalCandidates` method** (`webrtc.ts`)
+    - **Before**: Used non-standard `pc.getLocalStats?.()` which doesn't exist on standard `RTCPeerConnection`. Fabricated invalid `RTCIceCandidate` objects. The diagnostics feature was effectively dead code.
+    - **After**: Removed entirely. The `getStats()` method already provides candidate pair info via the standard async API.
+
+12. **`MAX_BUFFERED_BYTES` wired as hard guard** (`webrtc.ts`)
+    - **Before**: `CONSTANTS.MAX_BUFFERED_BYTES` (16MB) was defined but unused — `canSend()` only checked `TARGET_BUFFERED_BYTES` (4MB).
+    - **After**: `canSend()` now checks both: soft target (4MB) for flow control AND hard limit (16MB) to prevent unbounded buffering.
+
+### Performance Fix
+
+13. **`markChunkAcked` O(n²) sort eliminated** (`resume.ts`)
+    - **Before**: On every chunk ACK: IndexedDB read → `array.includes()` O(n) → `array.push()` → `array.sort()` O(n log n) → IndexedDB write. For a 1000-chunk transfer, this was 1000 reads + 1000 growing sorts + 1000 writes = O(n² log n) total.
+    - **After**: In-memory `Set<number>` cache for O(1) deduplication. Debounced IndexedDB writes (flush every 2s or every 50 chunks). Sort only happens once per flush. Added `flushAllPendingAcks()` for cleanup. Wired into `beforeunload` handler and `cleanup()` function.
+
+### Verification
+- **Lint: clean (0 errors, 0 warnings)**
+- **No console errors** after fixes
+- **Landing page** renders correctly
+- **Sender flow** works (s → Sender mode)
+- **Clean compile** (HTTP 200)

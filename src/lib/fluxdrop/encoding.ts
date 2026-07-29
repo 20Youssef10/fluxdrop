@@ -7,13 +7,32 @@
 
 import { MessageType, HEADER_SIZE, TRANSFER_ID_BYTES } from './protocol'
 
+// Hoist TextEncoder/TextDecoder to module scope (avoid per-call allocation).
+const textEncoder = new TextEncoder()
+const textDecoder = new TextDecoder()
+
+// Set of message types that carry JSON bodies (control messages).
+const CONTROL_TYPES = new Set<number>([
+  MessageType.MANIFEST,
+  MessageType.MANIFEST_ACK,
+  MessageType.TRANSFER_COMPLETE,
+  MessageType.TRANSFER_COMPLETE_ACK,
+  MessageType.TRANSFER_CANCEL,
+  MessageType.RESUME_REQUEST,
+  MessageType.RESUME_RESPONSE,
+  MessageType.PAUSE,
+  MessageType.RESUME_STREAM,
+])
+
 // --- Transfer ID helpers: convert a UUID string <-> 4-byte truncated id ---
 export function transferIdToBytes(uuid: string): Uint8Array {
   // Use first 8 hex chars of the UUID (no dashes) -> 4 bytes.
   const hex = uuid.replace(/-/g, '').slice(0, TRANSFER_ID_BYTES * 2)
   const bytes = new Uint8Array(TRANSFER_ID_BYTES)
+  // Pad with zeros if hex is too short (malformed input safety).
+  const padded = hex.padEnd(TRANSFER_ID_BYTES * 2, '0')
   for (let i = 0; i < TRANSFER_ID_BYTES; i++) {
-    bytes[i] = parseInt(hex.substr(i * 2, 2), 16)
+    bytes[i] = parseInt(padded.slice(i * 2, i * 2 + 2), 16) || 0
   }
   return bytes
 }
@@ -69,7 +88,7 @@ export function encodeControlMessage(
   body: unknown
 ): ArrayBuffer {
   const idBytes = transferIdToBytes(transferId)
-  const jsonBytes = new TextEncoder().encode(JSON.stringify(body ?? {}))
+  const jsonBytes = textEncoder.encode(JSON.stringify(body ?? {}))
   const buffer = new ArrayBuffer(HEADER_SIZE + jsonBytes.byteLength)
   const view = new DataView(buffer)
   const bytes = new Uint8Array(buffer)
@@ -89,30 +108,36 @@ export interface DecodedMessage {
   body?: unknown            // parsed JSON (for control messages)
 }
 
+/**
+ * Decode a binary DataChannel message.
+ * Throws if the message is too short (malformed/truncated).
+ * The caller MUST wrap this in try/catch and route errors to onError.
+ */
 export function decodeMessage(data: ArrayBuffer): DecodedMessage {
+  if (data.byteLength < HEADER_SIZE) {
+    throw new Error(`Malformed message: ${data.byteLength} bytes (minimum ${HEADER_SIZE} required)`)
+  }
+
   const view = new DataView(data)
   const type = view.getUint8(0)
   const idBytes = new Uint8Array(data, 1, TRANSFER_ID_BYTES)
   const transferId = bytesToTransferId(idBytes)
   const chunkIndex = readU32BE(view, 5)
-  const payload = data.slice(HEADER_SIZE)
+
+  // Zero-copy: use a view into the original buffer instead of slicing.
+  // Callers that need to retain the payload across GCs should copy it.
+  const payloadByteLength = data.byteLength - HEADER_SIZE
+  const payload =
+    payloadByteLength > 0
+      ? data.slice(HEADER_SIZE)
+      : new ArrayBuffer(0)
 
   const result: DecodedMessage = { type, transferId, chunkIndex, payload }
 
   // Control messages carry JSON bodies
-  if (
-    type === MessageType.MANIFEST ||
-    type === MessageType.MANIFEST_ACK ||
-    type === MessageType.TRANSFER_COMPLETE ||
-    type === MessageType.TRANSFER_COMPLETE_ACK ||
-    type === MessageType.TRANSFER_CANCEL ||
-    type === MessageType.RESUME_REQUEST ||
-    type === MessageType.RESUME_RESPONSE ||
-    type === MessageType.PAUSE ||
-    type === MessageType.RESUME_STREAM
-  ) {
+  if (CONTROL_TYPES.has(type)) {
     try {
-      result.body = JSON.parse(new TextDecoder().decode(payload))
+      result.body = JSON.parse(textDecoder.decode(payload))
     } catch {
       result.body = {}
     }
