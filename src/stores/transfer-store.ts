@@ -37,6 +37,7 @@ interface TransferStoreState {
   tickSpeed: (now: number) => void
   _lastSpeedSampleAt: number | null
   _lastSpeedSampleBytes: number | null
+  speedHistory: number[]   // last N speed samples for sparkline
 
   // File-level progress (receiver)
   files: LiveFileProgress[]
@@ -92,6 +93,7 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
       speedBps: 0,
       _lastSpeedSampleAt: null,
       _lastSpeedSampleBytes: null,
+      speedHistory: [],
       checksumVerified: null,
     }),
 
@@ -106,15 +108,16 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
     if (dt < 500) return // sample at most every 500ms
     const dBytes = s.bytesTransferred - (s._lastSpeedSampleBytes ?? 0)
     const speed = (dBytes / dt) * 1000
+    const history = [...s.speedHistory, speed].slice(-40) // keep last 40 samples
     set({
       speedBps: speed,
       elapsedMs: now - s.startedAt,
       _lastSpeedSampleAt: now,
       _lastSpeedSampleBytes: s.bytesTransferred,
+      speedHistory: history,
     })
   },
-  _lastSpeedSampleAt: null,
-  _lastSpeedSampleBytes: null,
+  speedHistory: [],
 
   files: [],
   initFiles: (entries) =>
@@ -154,6 +157,7 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
       speedBps: 0,
       _lastSpeedSampleAt: null,
       _lastSpeedSampleBytes: null,
+      speedHistory: [],
       files: [],
       error: null,
       checksumVerified: null,

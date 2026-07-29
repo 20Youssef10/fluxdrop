@@ -1,7 +1,7 @@
 'use client'
 
 import { motion, AnimatePresence } from 'framer-motion'
-import { Gauge, Timer, Hash, CheckCircle2, AlertTriangle, Loader2, ShieldCheck } from 'lucide-react'
+import { Gauge, Timer, Hash, CheckCircle2, AlertTriangle, Loader2, ShieldCheck, TrendingUp } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
@@ -9,6 +9,11 @@ import { Button } from '@/components/ui/button'
 import { useTransferStore } from '@/stores/transfer-store'
 import { formatBytes, formatSpeed, formatEta, formatDuration } from '@/lib/fluxdrop/format'
 import { FileIcon } from './file-icon'
+import { AnimatedNumber } from './animated-number'
+import { SpeedSparkline } from './speed-sparkline'
+import { Celebration } from './celebration'
+import { ConnectionViz } from './connection-viz'
+import { useState, useEffect, useRef } from 'react'
 
 interface TransferProgressProps {
   onCancel: () => void
@@ -22,12 +27,35 @@ export function TransferProgress({ onCancel, onDone }: TransferProgressProps) {
   const isComplete = t.transferState === 'COMPLETE'
   const isError = t.transferState === 'FAILED' || t.transferState === 'ERROR'
   const isCancelled = t.transferState === 'CANCELLED'
+  const isTransferring = t.transferState === 'TRANSFERRING'
+
+  // Trigger celebration exactly once when transfer completes
+  const [celebrate, setCelebrate] = useState(false)
+  const celebratedRef = useRef(false)
+  useEffect(() => {
+    if (isComplete && !celebratedRef.current) {
+      celebratedRef.current = true
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setCelebrate(true)
+    }
+  }, [isComplete])
 
   return (
     <div className="space-y-4">
+      <Celebration trigger={celebrate} onComplete={() => setCelebrate(false)} />
+
+      {/* Connection viz strip */}
+      <Card className="flux-glass px-5 py-3">
+        <ConnectionViz />
+      </Card>
+
       {/* Big progress card */}
-      <Card className="flux-glass p-6">
-        <div className="flex items-start justify-between gap-4">
+      <Card className="flux-glass p-6 relative overflow-hidden">
+        {/* Decorative glow when transferring */}
+        {isTransferring && (
+          <div className="pointer-events-none absolute -top-20 left-1/2 -translate-x-1/2 h-40 w-80 rounded-full bg-flux-500/10 blur-3xl" />
+        )}
+        <div className="relative flex items-start justify-between gap-4">
           <div className="min-w-0">
             <div className="flex items-center gap-2 mb-1">
               <h3 className="text-lg font-semibold">
@@ -46,7 +74,11 @@ export function TransferProgress({ onCancel, onDone }: TransferProgressProps) {
             </p>
           </div>
           <div className="text-right shrink-0">
-            <div className="text-3xl font-bold tabular-nums">{pct.toFixed(1)}%</div>
+            <AnimatedNumber
+              value={pct}
+              format={(n) => `${n.toFixed(1)}%`}
+              className="text-3xl font-bold tabular-nums"
+            />
             <p className="text-xs text-muted-foreground">
               {formatBytes(t.bytesTransferred)} / {formatBytes(t.totalBytes)}
             </p>
@@ -62,14 +94,60 @@ export function TransferProgress({ onCancel, onDone }: TransferProgressProps) {
           {!isComplete && !isError && !isCancelled && pct > 0 && (
             <div className="absolute inset-0 flux-shimmer rounded-full pointer-events-none" />
           )}
+          {/* Milestone markers at 25/50/75% */}
+          <div className="absolute inset-0 flex pointer-events-none">
+            {[25, 50, 75].map((m) => (
+              <div
+                key={m}
+                className="h-full w-px bg-border/60"
+                style={{ marginLeft: `${m}%` }}
+              />
+            ))}
+          </div>
         </div>
+
+        {/* Speed sparkline */}
+        {isTransferring && t.speedHistory.length >= 2 && (
+          <div className="mt-4 rounded-lg border border-border/50 bg-card/40 p-3">
+            <div className="flex items-center justify-between mb-1.5">
+              <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                <TrendingUp className="h-3 w-3" />
+                Speed history
+              </div>
+              <span className="text-[10px] text-muted-foreground">
+                peak {formatSpeed(Math.max(...t.speedHistory, 0))}
+              </span>
+            </div>
+            <SpeedSparkline data={t.speedHistory} width={520} height={48} className="w-full h-12" />
+          </div>
+        )}
 
         {/* Stats grid */}
         <div className="mt-5 grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <StatCard icon={<Gauge className="h-4 w-4" />} label="Speed" value={formatSpeed(t.speedBps)} />
-          <StatCard icon={<Timer className="h-4 w-4" />} label="ETA" value={formatEta(remaining, t.speedBps)} />
-          <StatCard icon={<Hash className="h-4 w-4" />} label="Chunks" value={`${t.chunksAcked} / ${t.totalChunks}`} />
-          <StatCard icon={<Timer className="h-4 w-4" />} label="Elapsed" value={formatDuration(t.elapsedMs)} />
+          <StatCard
+            icon={<Gauge className="h-4 w-4" />}
+            label="Speed"
+            value={<AnimatedNumber value={t.speedBps} format={(n) => formatSpeed(n)} />}
+          />
+          <StatCard
+            icon={<Timer className="h-4 w-4" />}
+            label="ETA"
+            value={formatEta(remaining, t.speedBps)}
+          />
+          <StatCard
+            icon={<Hash className="h-4 w-4" />}
+            label="Chunks"
+            value={
+              <span>
+                <AnimatedNumber value={t.chunksAcked} /> / {t.totalChunks}
+              </span>
+            }
+          />
+          <StatCard
+            icon={<Timer className="h-4 w-4" />}
+            label="Elapsed"
+            value={formatDuration(t.elapsedMs)}
+          />
         </div>
 
         {/* Chunk grid visualizer */}
@@ -144,7 +222,7 @@ export function TransferProgress({ onCancel, onDone }: TransferProgressProps) {
   )
 }
 
-function StatCard({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
+function StatCard({ icon, label, value }: { icon: React.ReactNode; label: string; value: React.ReactNode }) {
   return (
     <div className="rounded-lg border border-border/50 bg-card/40 p-3">
       <div className="flex items-center gap-1.5 text-muted-foreground">
@@ -157,7 +235,6 @@ function StatCard({ icon, label, value }: { icon: React.ReactNode; label: string
 }
 
 function ChunkGrid({ total, acked, complete }: { total: number; acked: number; complete: boolean }) {
-  // Render a grid of small cells; the most recent cells flash.
   const cols = total > 200 ? 40 : total > 100 ? 32 : total > 50 ? 24 : 16
   return (
     <div className="mt-5">

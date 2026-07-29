@@ -22,6 +22,8 @@ export interface WebRTCConfig {
   onIceCandidate: IceCandidateHandler
   onRemoteSdp?: SdpHandler
   onConnectionStateChange: StateHandler
+  onIceGatheringStateChange?: (state: RTCIceGatheringState) => void
+  onIceConnectionStateChange?: (state: RTCIceConnectionState) => void
   onDataChannelOpen: () => void
   onDataChannelClose: () => void
   onDataChannelMessage: MessageHandler
@@ -54,6 +56,14 @@ export class FluxDropWebRTC {
       if (event.candidate) {
         this.config.onIceCandidate(event.candidate.toJSON())
       }
+    }
+
+    this.pc.onicegatheringstatechange = () => {
+      this.config.onIceGatheringStateChange?.(this.pc.iceGatheringState)
+    }
+
+    this.pc.oniceconnectionstatechange = () => {
+      this.config.onIceConnectionStateChange?.(this.pc.iceConnectionState)
     }
 
     this.pc.onconnectionstatechange = () => {
@@ -222,8 +232,104 @@ export class FluxDropWebRTC {
     return this.pc.connectionState
   }
 
+  get iceGatheringState(): RTCIceGatheringState {
+    return this.pc.iceGatheringState
+  }
+
+  get iceConnectionState(): RTCIceConnectionState {
+    return this.pc.iceConnectionState
+  }
+
   get isOpen(): boolean {
     return this.channel?.readyState === 'open'
+  }
+
+  /** Get local ICE candidates (for diagnostics). */
+  getLocalCandidates(): RTCIceCandidate[] {
+    try {
+      const stats = this.pc.getLocalStats?.() as any
+      if (!stats) return []
+      const out: RTCIceCandidate[] = []
+      stats.forEach((report: any) => {
+        if (report.type === 'local-candidate' && report.candidateType) {
+          out.push({
+            candidate: '',
+            sdpMid: report.id,
+            sdpMLineIndex: 0,
+            component: report.component,
+            foundation: report.foundation,
+            address: report.address,
+            priority: report.priority,
+            protocol: report.protocol,
+            relatedAddress: report.relatedAddress,
+            relatedPort: report.relatedPort,
+            tcpType: report.tcpType,
+            type: report.candidateType,
+          } as any)
+        }
+      })
+      return out
+    } catch {
+      return []
+    }
+  }
+
+  /** Fetch the selected candidate pair + transport stats. */
+  async getStats(): Promise<{
+    selectedPair?: {
+      localCandidateType?: string
+      localAddress?: string
+      localPort?: number
+      remoteCandidateType?: string
+      remoteAddress?: string
+      remotePort?: number
+      protocol?: string
+      currentRoundTripTime?: number
+      bytesSent?: number
+      bytesReceived?: number
+      requestsSent?: number
+      requestsReceived?: number
+      nominated?: boolean
+    }
+    bytesSent: number
+    bytesReceived: number
+  }> {
+    try {
+      const rawStats = await this.pc.getStats()
+      let bytesSent = 0
+      let bytesReceived = 0
+      let selectedPair: any = undefined
+
+      rawStats.forEach((report: any) => {
+        if (report.type === 'transport' && report.bytesSent != null) {
+          bytesSent = report.bytesSent ?? 0
+          bytesReceived = report.bytesReceived ?? 0
+        }
+        if (report.type === 'candidate-pair' && (report.selected === true || report.nominated === true)) {
+          const local = rawStats.get(report.localCandidateId)
+          const remote = rawStats.get(report.remoteCandidateId)
+          selectedPair = {
+            localCandidateType: local?.candidateType,
+            localAddress: local?.address,
+            localPort: local?.port,
+            remoteCandidateType: remote?.candidateType,
+            remoteAddress: remote?.address,
+            remotePort: remote?.port,
+            protocol: local?.protocol,
+            currentRoundTripTime: report.currentRoundTripTime,
+            bytesSent: report.bytesSent,
+            bytesReceived: report.bytesReceived,
+            requestsSent: report.requestsSent,
+            requestsReceived: report.requestsReceived,
+            nominated: report.nominated,
+          }
+        }
+      })
+
+      return { selectedPair, bytesSent, bytesReceived }
+    } catch {
+      return { bytesSent: 0, bytesReceived: 0 }
+    }
   }
 
   close(): void {

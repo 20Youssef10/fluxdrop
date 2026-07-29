@@ -7,6 +7,7 @@ import { JoinForm } from './join-form'
 import { DeviceList } from './device-list'
 import { ConnectionStatus } from './connection-status'
 import { TransferProgress } from './transfer-progress'
+import { DiagnosticsPanel } from './diagnostics-panel'
 import { Card } from '@/components/ui/card'
 import { useSessionStore } from '@/stores/session-store'
 import { useTransferStore } from '@/stores/transfer-store'
@@ -86,6 +87,7 @@ export function ReceiverPanel({ onJoin, onCancel, onDone, onBack }: ReceiverPane
               </div>
             </Card>
             <ConnectionStatus transferState={transfer.transferState} />
+            <DiagnosticsPanel />
           </div>
           <div className="lg:col-span-2 space-y-4">
             <DeviceList />

@@ -1,10 +1,10 @@
 'use client'
 
 import { useCallback, useRef, useState } from 'react'
-import { UploadCloud, X } from 'lucide-react'
+import { UploadCloud, FolderOpen, X, FilePlus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import { formatBytes, validateFiles } from '@/lib/fluxdrop/format'
+import { formatBytes, validateFiles, fileTypeCategory } from '@/lib/fluxdrop/format'
 import { CONSTANTS } from '@/lib/fluxdrop/protocol'
 import { FileIcon } from './file-icon'
 
@@ -18,6 +18,7 @@ interface FilePickerProps {
 export function FilePicker({ files, onFilesChange, onSend, disabled }: FilePickerProps) {
   const [isDragging, setIsDragging] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+  const folderInputRef = useRef<HTMLInputElement>(null)
 
   const handleFiles = useCallback(
     (incoming: FileList | null) => {
@@ -45,17 +46,26 @@ export function FilePicker({ files, onFilesChange, onSend, disabled }: FilePicke
   const totalSize = files.reduce((s, f) => s + f.size, 0)
   const validation = validateFiles(files)
 
+  // Category breakdown for the summary chips
+  const categoryCounts = files.reduce<Record<string, number>>((acc, f) => {
+    const cat = fileTypeCategory(f.type, f.name)
+    acc[cat] = (acc[cat] ?? 0) + 1
+    return acc
+  }, {})
+
   return (
     <div className="space-y-4">
       <Card
         className={`relative overflow-hidden border-2 border-dashed transition-all ${
           isDragging
-            ? 'border-flux-500 bg-flux-500/5'
+            ? 'border-flux-500 bg-flux-500/5 scale-[1.01]'
             : 'border-border hover:border-flux-500/50 hover:bg-flux-500/[0.02]'
         }`}
       >
+        {/* Decorative gradient corner */}
+        <div className="pointer-events-none absolute -top-12 -right-12 h-32 w-32 rounded-full bg-flux-500/10 blur-2xl" />
         <div
-          className="flex flex-col items-center justify-center px-6 py-12 text-center cursor-pointer"
+          className="relative flex flex-col items-center justify-center px-6 py-12 text-center cursor-pointer"
           onClick={() => inputRef.current?.click()}
           onDragOver={(e) => {
             e.preventDefault()
@@ -64,7 +74,7 @@ export function FilePicker({ files, onFilesChange, onSend, disabled }: FilePicke
           onDragLeave={() => setIsDragging(false)}
           onDrop={handleDrop}
         >
-          <div className={`mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-flux-500/10 text-flux-600 dark:text-flux-400 transition-transform ${isDragging ? 'scale-110' : ''}`}>
+          <div className={`mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-flux-500/10 text-flux-600 dark:text-flux-400 transition-all ${isDragging ? 'scale-110 -translate-y-1' : ''}`}>
             <UploadCloud className="h-8 w-8" />
           </div>
           <p className="text-base font-medium">
@@ -86,6 +96,47 @@ export function FilePicker({ files, onFilesChange, onSend, disabled }: FilePicke
               e.target.value = ''
             }}
           />
+          <input
+            ref={folderInputRef}
+            type="file"
+            multiple
+            // @ts-expect-error webkitdirectory is a non-standard but widely-supported attribute
+            webkitdirectory=""
+            directory=""
+            className="hidden"
+            onChange={(e) => {
+              handleFiles(e.target.files)
+              e.target.value = ''
+            }}
+          />
+        </div>
+        {/* Quick-action buttons row */}
+        <div className="relative flex items-center justify-center gap-2 border-t border-border/50 px-4 py-2.5 bg-muted/20">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={(e) => {
+              e.stopPropagation()
+              inputRef.current?.click()
+            }}
+            className="h-7 text-xs text-muted-foreground hover:text-flux-600 dark:hover:text-flux-400"
+          >
+            <FilePlus className="mr-1.5 h-3.5 w-3.5" />
+            Select files
+          </Button>
+          <div className="h-3 w-px bg-border" />
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={(e) => {
+              e.stopPropagation()
+              folderInputRef.current?.click()
+            }}
+            className="h-7 text-xs text-muted-foreground hover:text-flux-600 dark:hover:text-flux-400"
+          >
+            <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
+            Select folder
+          </Button>
         </div>
       </Card>
 
@@ -106,6 +157,21 @@ export function FilePicker({ files, onFilesChange, onSend, disabled }: FilePicke
               Clear all
             </Button>
           </div>
+
+          {/* Category chips */}
+          {Object.keys(categoryCounts).length > 1 && (
+            <div className="flex flex-wrap gap-1.5">
+              {Object.entries(categoryCounts).map(([cat, count]) => (
+                <span
+                  key={cat}
+                  className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-card/60 px-2 py-0.5 text-[10px] text-muted-foreground"
+                >
+                  <span className="font-medium text-foreground">{count}</span>
+                  {cat}
+                </span>
+              ))}
+            </div>
+          )}
 
           <div className="max-h-72 overflow-y-auto flux-scroll space-y-2 pr-1">
             {files.map((file, idx) => (
@@ -136,13 +202,15 @@ export function FilePicker({ files, onFilesChange, onSend, disabled }: FilePicke
 }
 
 function FileRow({ file, onRemove }: { file: File; onRemove: () => void }) {
+  const relPath = (file as any).webkitRelativePath as string | undefined
+  const displayName = relPath && relPath.includes('/') ? relPath : file.name
   return (
-    <div className="group flex items-center gap-3 rounded-lg border border-border/50 bg-card/60 p-3 transition-colors hover:bg-card">
-      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+    <div className="group flex items-center gap-3 rounded-lg border border-border/50 bg-card/60 p-3 transition-colors hover:bg-card hover:border-flux-500/30">
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground group-hover:bg-flux-500/10 group-hover:text-flux-600 dark:group-hover:text-flux-400 transition-colors">
         <FileIcon mime={file.type} name={file.name} className="h-4 w-4" />
       </div>
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium">{file.name}</p>
+        <p className="truncate text-sm font-medium" title={displayName}>{displayName}</p>
         <p className="text-xs text-muted-foreground">
           {formatBytes(file.size)} · {file.type || 'unknown type'}
         </p>

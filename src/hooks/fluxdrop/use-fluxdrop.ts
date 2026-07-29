@@ -24,7 +24,7 @@ import {
   type StoredTransfer,
 } from '@/lib/fluxdrop/resume'
 import { assembleBlob, saveBlobWithPicker } from '@/lib/fluxdrop/file-io'
-import { MessageType, type TransferManifest, type TransferSummary } from '@/lib/fluxdrop/protocol'
+import { MessageType, CONSTANTS, type TransferManifest, type TransferSummary } from '@/lib/fluxdrop/protocol'
 import { toast } from 'sonner'
 
 export function useFluxDrop() {
@@ -217,6 +217,53 @@ export function useFluxDrop() {
     signalingRef.current = sig
   }, [])
 
+  // ---- Diagnostics polling (ICE candidate pair + bytes) ----
+  const diagnosticsRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const startDiagnosticsPolling = useCallback(() => {
+    if (diagnosticsRef.current) clearInterval(diagnosticsRef.current)
+    diagnosticsRef.current = setInterval(async () => {
+      const rtc = webrtcRef.current
+      if (!rtc) return
+      const stats = await rtc.getStats()
+      sessionRef.current.setDiagnostics(stats)
+    }, 2000)
+  }, [])
+  const stopDiagnosticsPolling = useCallback(() => {
+    if (diagnosticsRef.current) {
+      clearInterval(diagnosticsRef.current)
+      diagnosticsRef.current = null
+    }
+    sessionRef.current.setDiagnostics(null)
+  }, [])
+
+  // ---- Connection failure → retry with exponential backoff ----
+  const handleConnectionFailure = useCallback((role: 'sender' | 'receiver') => {
+    const currentRetry = sessionRef.current.retryCount
+    if (currentRetry >= CONSTANTS.CONNECT_RETRY_MAX) {
+      transferRef.current.setTransferState('FAILED')
+      transferRef.current.setError(`Connection failed after ${CONSTANTS.CONNECT_RETRY_MAX} retries`)
+      toast.error('Connection failed permanently', {
+        description: `Exceeded ${CONSTANTS.CONNECT_RETRY_MAX} retry attempts`,
+      })
+      return
+    }
+    const delay = CONSTANTS.CONNECT_RETRY_BASE_MS * Math.pow(2, currentRetry)
+    sessionRef.current.setRetryCount(currentRetry + 1)
+    transferRef.current.setTransferState('RETRYING')
+    toast.warning(`Connection retry ${currentRetry + 1}/${CONSTANTS.CONNECT_RETRY_MAX}`, {
+      description: `Waiting ${(delay / 1000).toFixed(1)}s before retry…`,
+    })
+    setTimeout(() => {
+      if (role === 'sender') {
+        initiateWebRTCAsSender()
+      }
+      // Receiver can't re-initiate (waits for sender offer); just reset state.
+      else {
+        transferRef.current.setTransferState('CONNECTING')
+      }
+    }, delay)
+  }, [])
+
   // ---- Sender: initiate WebRTC as the offerer ----
   const initiateWebRTCAsSender = useCallback(async () => {
     if (webrtcRef.current) webrtcRef.current.close()
@@ -230,17 +277,24 @@ export function useFluxDrop() {
             candidate,
           })
         },
+        onIceGatheringStateChange: (state) => {
+          sessionRef.current.setIceGatheringState(state)
+        },
+        onIceConnectionStateChange: (state) => {
+          sessionRef.current.setIceConnectionState(state)
+        },
         onConnectionStateChange: (state) => {
           sessionRef.current.setRtcState(state)
-          if (state === 'connected') toast.success('Peer connection established')
-          else if (state === 'failed') {
-            transferRef.current.setTransferState('FAILED')
-            transferRef.current.setError('WebRTC connection failed')
-            toast.error('Connection failed')
+          if (state === 'connected') {
+            toast.success('Peer connection established')
+            startDiagnosticsPolling()
+          } else if (state === 'failed') {
+            handleConnectionFailure('sender')
           }
         },
         onDataChannelOpen: () => {
           sessionRef.current.setDataChannelOpen(true)
+          sessionRef.current.setRetryCount(0)
           transferRef.current.setTransferState('MANIFEST_EXCHANGE')
           const m = manifestRef.current
           if (m) {
@@ -255,6 +309,7 @@ export function useFluxDrop() {
         },
         onDataChannelClose: () => {
           sessionRef.current.setDataChannelOpen(false)
+          stopDiagnosticsPolling()
           if (transferRef.current.transferState === 'TRANSFERRING') {
             transferRef.current.setTransferState('RESUMING')
           }
@@ -293,16 +348,30 @@ export function useFluxDrop() {
             candidate,
           })
         },
+        onIceGatheringStateChange: (state) => {
+          sessionRef.current.setIceGatheringState(state)
+        },
+        onIceConnectionStateChange: (state) => {
+          sessionRef.current.setIceConnectionState(state)
+        },
         onConnectionStateChange: (state) => {
           sessionRef.current.setRtcState(state)
-          if (state === 'connected') toast.success('Peer connection established')
+          if (state === 'connected') {
+            toast.success('Peer connection established')
+            startDiagnosticsPolling()
+          }
           if (state === 'failed') {
-            transferRef.current.setTransferState('FAILED')
-            transferRef.current.setError('WebRTC connection failed')
+            handleConnectionFailure('receiver')
           }
         },
-        onDataChannelOpen: () => sessionRef.current.setDataChannelOpen(true),
-        onDataChannelClose: () => sessionRef.current.setDataChannelOpen(false),
+        onDataChannelOpen: () => {
+          sessionRef.current.setDataChannelOpen(true)
+          sessionRef.current.setRetryCount(0)
+        },
+        onDataChannelClose: () => {
+          sessionRef.current.setDataChannelOpen(false)
+          stopDiagnosticsPolling()
+        },
         onDataChannelMessage: (msg) => handleDataChannelMessage(msg),
         onError: (err) => toast.error('WebRTC error', { description: err.message }),
       },
@@ -602,6 +671,7 @@ export function useFluxDrop() {
 
   // ---- Public API: leave room / reset ----
   const cleanup = useCallback(() => {
+    stopDiagnosticsPolling()
     webrtcRef.current?.close()
     webrtcRef.current = null
     signalingRef.current?.leaveRoom()

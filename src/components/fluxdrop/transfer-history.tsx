@@ -55,11 +55,21 @@ export function TransferHistory() {
             Recent transfers
           </h3>
         </div>
-        <div className="rounded-lg border border-dashed border-border/60 p-8 text-center">
-          <p className="text-sm text-muted-foreground">No transfers yet</p>
-          <p className="text-xs text-muted-foreground mt-1">
-            Your transfer history will appear here, stored locally in your browser.
-          </p>
+        <div className="relative overflow-hidden rounded-lg border border-dashed border-border/60 p-8 text-center">
+          {/* Decorative background icon */}
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center opacity-[0.04]">
+            <ArrowUp className="h-24 w-24 rotate-45" />
+          </div>
+          <div className="relative">
+            <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-flux-500/10 text-flux-600 dark:text-flux-400">
+              <History className="h-6 w-6" />
+            </div>
+            <p className="text-sm font-medium">No transfers yet</p>
+            <p className="text-xs text-muted-foreground mt-1 max-w-xs mx-auto">
+              Your transfer history will appear here, stored locally in your browser via IndexedDB.
+              Start by sending or receiving a file.
+            </p>
+          </div>
         </div>
       </Card>
     )

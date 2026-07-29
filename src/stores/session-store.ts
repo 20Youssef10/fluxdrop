@@ -57,8 +57,36 @@ interface SessionState {
   dataChannelOpen: boolean
   setDataChannelOpen: (v: boolean) => void
 
+  // WebRTC diagnostics
+  iceGatheringState: string
+  setIceGatheringState: (s: string) => void
+  iceConnectionState: string
+  setIceConnectionState: (s: string) => void
+  diagnostics: WebRtcDiagnostics | null
+  setDiagnostics: (d: WebRtcDiagnostics | null) => void
+
+  // Retry tracking
+  retryCount: number
+  setRetryCount: (n: number) => void
+
   // Reset everything
   resetSession: () => void
+}
+
+export interface WebRtcDiagnostics {
+  selectedPair?: {
+    localCandidateType?: string
+    localAddress?: string
+    localPort?: number
+    remoteCandidateType?: string
+    remoteAddress?: string
+    remotePort?: number
+    protocol?: string
+    currentRoundTripTime?: number
+    nominated?: boolean
+  }
+  bytesSent: number
+  bytesReceived: number
 }
 
 const STORAGE_KEY = 'fluxdrop:device'
@@ -165,6 +193,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   dataChannelOpen: false,
   setDataChannelOpen: (v) => set({ dataChannelOpen: v }),
 
+  iceGatheringState: 'new',
+  setIceGatheringState: (s) => set({ iceGatheringState: s }),
+  iceConnectionState: 'new',
+  setIceConnectionState: (s) => set({ iceConnectionState: s }),
+  diagnostics: null,
+  setDiagnostics: (d) => set({ diagnostics: d }),
+
+  retryCount: 0,
+  setRetryCount: (n) => set({ retryCount: n }),
+
   resetSession: () =>
     set({
       view: 'landing',
@@ -178,5 +216,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       pairingAccepted: null,
       rtcState: 'new',
       dataChannelOpen: false,
+      iceGatheringState: 'new',
+      iceConnectionState: 'new',
+      diagnostics: null,
+      retryCount: 0,
     }),
 }))

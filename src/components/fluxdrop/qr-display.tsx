@@ -1,7 +1,7 @@
 'use client'
 
 import { QRCodeSVG } from 'qrcode.react'
-import { Copy, RefreshCw, Share2, KeyRound, Clock } from 'lucide-react'
+import { Copy, RefreshCw, Share2, KeyRound, Clock, Link2 } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -46,6 +46,12 @@ export function QRDisplay() {
     const text = `FluxDrop — Room: ${roomId} · PIN: ${pin}`
     const ok = await copyToClipboard(text)
     toast[ok ? 'success' : 'error'](ok ? 'Transfer details copied' : 'Copy failed')
+  }
+  const copyLink = async () => {
+    if (!roomId || !pin) return
+    const url = `${window.location.origin}/#join=${roomId}&pin=${pin}`
+    const ok = await copyToClipboard(url)
+    toast[ok ? 'success' : 'error'](ok ? 'Share link copied' : 'Copy failed')
   }
 
   if (!roomId) return null
@@ -105,14 +111,24 @@ export function QRDisplay() {
             )}
           </div>
 
-          <Button
-            variant="outline"
-            onClick={copyAll}
-            className="mt-4 w-full border-flux-500/40 hover:bg-flux-500/10"
-          >
-            <Share2 className="mr-2 h-4 w-4" />
-            Copy transfer details
-          </Button>
+          <div className="mt-4 grid grid-cols-2 gap-2 w-full">
+            <Button
+              variant="outline"
+              onClick={copyAll}
+              className="border-flux-500/40 hover:bg-flux-500/10"
+            >
+              <Share2 className="mr-1.5 h-3.5 w-3.5" />
+              Copy details
+            </Button>
+            <Button
+              variant="outline"
+              onClick={copyLink}
+              className="border-flux-500/40 hover:bg-flux-500/10"
+            >
+              <Link2 className="mr-1.5 h-3.5 w-3.5" />
+              Copy link
+            </Button>
+          </div>
 
           <p className="mt-4 text-xs text-muted-foreground">
             Waiting for a receiver to join…

@@ -8,6 +8,7 @@ import { QRDisplay } from './qr-display'
 import { DeviceList } from './device-list'
 import { ConnectionStatus } from './connection-status'
 import { TransferProgress } from './transfer-progress'
+import { DiagnosticsPanel } from './diagnostics-panel'
 import { useSessionStore } from '@/stores/session-store'
 import { useTransferStore } from '@/stores/transfer-store'
 import { Card } from '@/components/ui/card'
@@ -88,6 +89,7 @@ export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, on
           </div>
           <div className="lg:col-span-2 space-y-4">
             <ConnectionStatus transferState={transfer.transferState} />
+            <DiagnosticsPanel />
             <DeviceList />
             {files.length > 0 && (
               <Card className="flux-glass p-5">
