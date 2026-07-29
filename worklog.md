@@ -576,3 +576,69 @@ Task: QA test, add connection ripple, drag-drop overlay enhancement, light mode 
 4. **Transfer history filtering**: Add filter tabs (all/sent/received/complete/incomplete).
 5. **Batch actions**: Select multiple history records for bulk delete.
 6. **Export transfer log**: Download transfer history as JSON/CSV.
+
+---
+
+Task ID: 8
+Agent: cron-review (round 7)
+Task: QA test, add transfer history filtering, batch actions, export, and styling improvements.
+
+## Current Project Status Assessment
+- FluxDrop was stable from rounds 1-7: 40+ features.
+- Lint was clean, no runtime errors.
+- No bugs found during QA.
+
+## Work Completed This Round
+
+### New Features (3)
+
+1. **Transfer History Filtering** (enhanced `transfer-history.tsx`)
+   - 5 filter tabs: All, Sent, Received, Complete, Incomplete.
+   - Each tab shows count badge; tabs with 0 records are hidden (except "All").
+   - Active filter highlighted with flux color border.
+   - Filtered count shown in header badge (e.g., "3/15").
+   - "No records match this filter" empty state.
+   - Horizontal scroll for narrow viewports.
+
+2. **Batch Select + Bulk Delete** (enhanced `transfer-history.tsx`)
+   - "Select" toggle button in header to enter select mode.
+   - Checkbox per record (CheckSquare/Square icons).
+   - Selected records highlighted with flux border + bg.
+   - Animated batch action bar with count + "Select all" / "Clear" / "Delete" buttons.
+   - Bulk delete with confirmation toast.
+   - Exit select mode clears selection.
+   - Row click in select mode toggles selection instead of opening detail.
+
+3. **Export Transfer History as JSON** (enhanced `transfer-history.tsx`)
+   - "Export" button in header (FileJson icon).
+   - Downloads all records as `fluxdrop-history-YYYY-MM-DD.json`.
+   - Export data: transferId, role, status, peerAlias, timestamps, totalSize, fileCount, files (name/size/type), checksumVerified.
+   - Blob + URL.createObjectURL download approach.
+   - Toast confirmation with record count.
+
+### Styling Improvements
+- Filter tabs: pill-style with flux highlight, counts, horizontal scroll.
+- Batch action bar: animated height transition, flux-themed border + bg.
+- Selected records: flux border + bg tint.
+- Export/Select buttons: ghost buttons with icons, hidden labels on mobile.
+- Empty state for filtered results.
+
+### Verification Results
+- **Lint: clean (0 errors, 0 warnings)**
+- **No console errors**.
+- **Landing page** renders correctly with all features.
+- **Keyboard shortcuts** verified: s → Sender mode.
+- **All features compile** without errors (HTTP 200, clean dev.log).
+
+## Unresolved Issues / Risks
+- **Multi-tab transfer test**: Still cannot test the full sender→receiver data path with agent-browser single-session.
+- **Re-download limitation**: Received file chunks are cleared after assembly; true re-download requires sender to re-send.
+- **Sandbox constraint**: Background processes killed when a Bash tool call ends.
+
+## Priority Recommendations for Next Phase
+1. **Multi-tab transfer test**: Use two agent-browser sessions to exercise the full P2P data path.
+2. **Persistent received files**: Store assembled file blobs in IndexedDB for true re-download.
+3. **Full resume implementation**: Store file references for sender-side resume.
+4. **Connection state badge**: Animated pulse indicator in header showing WebRTC connection state.
+5. **Empty-state illustrations**: Add decorative illustrations for sender/receiver panels.
+6. **Gradient hover borders**: Subtle gradient borders on card hover for visual polish.
