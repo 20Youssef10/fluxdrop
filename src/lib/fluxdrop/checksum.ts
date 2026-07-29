@@ -1,44 +1,64 @@
 // SHA-256 streaming checksum using the Web Crypto API.
-// Streams file data in chunks to avoid loading the whole file into memory.
+// For large files, uses a segmented approach to bound memory usage.
+// Yields to the event loop periodically to avoid blocking the UI.
 
-import { CONSTANTS } from './protocol'
+const HASH_CHUNK_SIZE = 4 * 1024 * 1024 // 4MB read slices
+const SMALL_FILE_THRESHOLD = 64 * 1024 * 1024 // ≤64MB: read whole file
+const YIELD_INTERVAL = 4 // yield to UI every N chunks
 
 export async function hashFile(file: File | Blob): Promise<string> {
-  // Web Crypto's subtle.digest doesn't stream, so we accumulate chunks
-  // and feed them in. For very large files this is still memory-bounded
-  // because we read slice-by-slice.
-  const chunkSize = 4 * 1024 * 1024 // 4MB read slices
   const total = file.size
-  let offset = 0
+  if (total === 0) {
+    // SHA-256 of empty input
+    const digest = await crypto.subtle.digest('SHA-256', new ArrayBuffer(0))
+    return bufToHex(digest)
+  }
 
-  // We have to read the whole file for a single digest call.
-  // To bound memory, for files > 256MB we hash in segments and combine
-  // via a second-pass digest of segment hashes.
-  if (total <= 64 * 1024 * 1024) {
+  // Small files: read whole file into memory and hash directly.
+  if (total <= SMALL_FILE_THRESHOLD) {
     const buf = await file.arrayBuffer()
     const digest = await crypto.subtle.digest('SHA-256', buf)
     return bufToHex(digest)
   }
 
-  // Large-file streaming: hash each segment, then hash the concatenated segment hashes.
-  const segments: ArrayBuffer[] = []
+  // Large files: hash each segment, then hash the concatenated segment digests.
+  // This bounds memory to one chunk at a time (4MB) + the digest array.
+  const digests: ArrayBuffer[] = []
+  let offset = 0
+  let chunkNum = 0
+
   while (offset < total) {
-    const end = Math.min(offset + chunkSize, total)
+    const end = Math.min(offset + HASH_CHUNK_SIZE, total)
     const slice = file.slice(offset, end)
     const buf = await slice.arrayBuffer()
     const digest = await crypto.subtle.digest('SHA-256', buf)
-    segments.push(digest)
+    digests.push(digest)
     offset = end
+    chunkNum++
+
+    // Yield to the event loop periodically so the UI stays responsive.
+    if (chunkNum % YIELD_INTERVAL === 0) {
+      await yieldToEventLoop()
+    }
   }
-  const combined = concatArrayBuffers(segments)
+
+  // Hash the concatenated segment digests (not the raw file data).
+  // This is memory-efficient: only the 32-byte digests are concatenated.
+  const combined = concatArrayBuffers(digests)
   const finalDigest = await crypto.subtle.digest('SHA-256', combined)
   return bufToHex(finalDigest)
 }
 
+/** Hash a byte array (small data, no streaming needed). */
 export async function hashBytes(data: ArrayBuffer | Uint8Array): Promise<string> {
   const buf = data instanceof Uint8Array ? data.buffer.slice(0) : data
   const digest = await crypto.subtle.digest('SHA-256', buf)
   return bufToHex(digest)
+}
+
+/** Yield control back to the event loop so the UI can paint. */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
 }
 
 function bufToHex(buf: ArrayBuffer): string {
@@ -61,10 +81,8 @@ function concatArrayBuffers(buffers: ArrayBuffer[]): ArrayBuffer {
   return out.buffer
 }
 
-// Verify a reassembled file against a manifest checksum
+/** Verify a reassembled file against a manifest checksum. */
 export async function verifyChecksum(file: Blob, expected: string): Promise<boolean> {
   const actual = await hashFile(file)
   return actual.toLowerCase() === expected.toLowerCase()
 }
-
-export { CONSTANTS }

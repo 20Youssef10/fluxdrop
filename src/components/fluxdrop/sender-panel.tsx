@@ -16,6 +16,7 @@ import { Badge } from '@/components/ui/badge'
 import { formatBytes, fileTypeCategory } from '@/lib/fluxdrop/format'
 import { FileIcon, getFileCategoryColors } from './file-icon'
 import { FilePreview } from './file-preview'
+import { HashingProgress } from './hashing-progress'
 
 interface SenderPanelProps {
   files: File[]
@@ -32,6 +33,7 @@ export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, on
   const [showFiles, setShowFiles] = useState(false)
 
   const hasRoom = !!session.roomId
+  const isValidating = transfer.transferState === 'VALIDATING'
   const isTransferring =
     transfer.transferState === 'TRANSFERRING' ||
     transfer.transferState === 'VERIFYING' ||
@@ -56,8 +58,13 @@ export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, on
         </Badge>
       </div>
 
+      {/* Hashing progress (during VALIDATING state) */}
+      {isValidating && (
+        <HashingProgress />
+      )}
+
       {/* Pre-room: file picker */}
-      {!hasRoom && !isTransferring && !isDone && (
+      {!hasRoom && !isValidating && !isTransferring && !isDone && (
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
           <div className="lg:col-span-3">
             <FilePicker files={files} onFilesChange={setFiles} onSend={() => onStartSend(files)} />

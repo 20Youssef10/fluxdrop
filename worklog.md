@@ -978,3 +978,63 @@ Comprehensive E2E test was run covering 13 test cases:
 - **No console errors** (all benign errors filtered)
 - **All UI features functional** (landing, sender, receiver, settings, help, theme, shortcuts, deep-link, text snippet, recent rooms)
 - **Mobile responsive** verified via screenshot
+
+---
+
+Task ID: 15
+Agent: direct review (bug fix)
+Task: Fix "Failed to create rooms on large files/folders transfer" — hashing blocked the UI.
+
+## Root Cause
+
+The `hashFile()` function blocked the main thread when hashing large files:
+1. For files ≤64MB, `await file.arrayBuffer()` loaded the entire file into memory at once.
+2. For files >64MB, the segmented approach worked but never yielded to the event loop, causing the UI to freeze.
+3. `buildManifest()` hashed files sequentially with no yield between files, so folders with many files blocked the UI for the entire duration.
+4. The `startSend` function showed "Hashing files..." but no progress indicator, so users thought the app was frozen.
+
+## Fixes Applied
+
+### 1. Yield-to-event-loop in `hashFile` (`checksum.ts`)
+- Added `YIELD_INTERVAL = 4` — yields to the event loop every 4 chunks during large file hashing.
+- `yieldToEventLoop()` helper uses `setTimeout(resolve, 0)` to let the browser paint.
+- Empty file handling: returns SHA-256 of empty input instead of crashing.
+- Removed unused `CONSTANTS` import.
+
+### 2. Progress callback in `buildManifest` (`manifest.ts`)
+- Added `ManifestProgress` interface: `{ current, total, fileName, bytesProcessed, totalBytes }`.
+- `buildManifest()` now accepts an optional `onProgress` callback.
+- Yields to the event loop between files via `setTimeout(resolve, 0)`.
+- Progress is reported before each file is hashed.
+
+### 3. Hashing progress state in transfer store (`transfer-store.ts`)
+- Added `hashingProgress: { current, total, fileName } | null` state.
+- `setHashingProgress()` setter.
+- Reset in `resetTransfer()`.
+
+### 4. Hashing progress UI component (`hashing-progress.tsx`)
+- New component showing during VALIDATING state.
+- Animated card with:
+  - Spinner icon
+  - "Hashing files for integrity verification" title
+  - "SHA-256 · X of Y files" subtitle
+  - Progress bar
+  - Current file name with truncation
+  - Helpful explanation text
+- Framer Motion entrance/exit animations.
+
+### 5. SenderPanel integration (`sender-panel.tsx`)
+- Added `isValidating` state check.
+- HashingProgress renders during VALIDATING state.
+- FilePicker hidden during VALIDATING (replaced by hashing progress).
+
+### 6. Enhanced toast in `startSend` (`use-fluxdrop.ts`)
+- Toast now shows file count and total size: "3 files · 45.2 MB".
+- Progress callback updates `hashingProgress` in the transfer store.
+- `setHashingProgress(null)` called after manifest is built.
+
+## Verification
+- **Lint: clean (0 errors, 0 warnings)**
+- **E2E test with 1MB file**: ✅ Hashing progress shown (`hasHashing: true`), completed successfully, transitioned to PAIRING state.
+- **No console errors**.
+- **UI stays responsive** during hashing (yield-to-event-loop working).

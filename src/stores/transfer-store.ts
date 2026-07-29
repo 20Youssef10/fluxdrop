@@ -57,6 +57,10 @@ interface TransferStoreState {
   resumeAvailable: boolean
   setResumeAvailable: (v: boolean) => void
 
+  // Hashing progress (pre-transfer, during buildManifest)
+  hashingProgress: { current: number; total: number; fileName: string } | null
+  setHashingProgress: (p: { current: number; total: number; fileName: string } | null) => void
+
   // Reset
   resetTransfer: () => void
 }
@@ -144,6 +148,9 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
   resumeAvailable: false,
   setResumeAvailable: (v) => set({ resumeAvailable: v }),
 
+  hashingProgress: null,
+  setHashingProgress: (p) => set({ hashingProgress: p }),
+
   resetTransfer: () =>
     set({
       manifest: null,
@@ -162,5 +169,6 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
       error: null,
       checksumVerified: null,
       resumeAvailable: false,
+      hashingProgress: null,
     }),
 }))

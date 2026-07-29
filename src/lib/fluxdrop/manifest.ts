@@ -5,11 +5,38 @@ import { CONSTANTS } from './protocol'
 import { computeTotalChunks } from './format'
 import { hashFile } from './checksum'
 
-export async function buildManifest(files: File[]): Promise<TransferManifest> {
+export interface ManifestProgress {
+  current: number
+  total: number
+  fileName: string
+  bytesProcessed: number
+  totalBytes: number
+}
+
+/**
+ * Build a transfer manifest from a list of files.
+ * Hashes each file with SHA-256 and yields to the event loop between files
+ * to keep the UI responsive. Accepts an optional progress callback.
+ */
+export async function buildManifest(
+  files: File[],
+  onProgress?: (progress: ManifestProgress) => void
+): Promise<TransferManifest> {
   const entries: FileManifestEntry[] = []
   let totalSize = 0
+  const totalBytes = files.reduce((s, f) => s + f.size, 0)
+  let bytesProcessed = 0
 
-  for (const file of files) {
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i]
+    onProgress?.({
+      current: i + 1,
+      total: files.length,
+      fileName: file.name,
+      bytesProcessed,
+      totalBytes,
+    })
+
     const checksum = await hashFile(file)
     entries.push({
       name: file.name,
@@ -20,6 +47,10 @@ export async function buildManifest(files: File[]): Promise<TransferManifest> {
       relativePath: (file as any).webkitRelativePath || file.name,
     })
     totalSize += file.size
+    bytesProcessed += file.size
+
+    // Yield to the event loop between files so the UI can update.
+    await new Promise((resolve) => setTimeout(resolve, 0))
   }
 
   const now = Date.now()

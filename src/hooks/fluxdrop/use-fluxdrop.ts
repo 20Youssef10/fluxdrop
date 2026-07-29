@@ -737,10 +737,22 @@ export function useFluxDrop() {
       }
       filesRef.current = files
       transferRef.current.setTransferState('VALIDATING')
-      toast.info('Hashing files...')
+      const totalBytes = files.reduce((s, f) => s + f.size, 0)
+      const totalMB = (totalBytes / (1024 * 1024)).toFixed(1)
+      toast.info('Hashing files...', {
+        description: `${files.length} file${files.length > 1 ? 's' : ''} · ${totalMB} MB`,
+      })
       // Ensure device identity is ready BEFORE anything else.
       await ensureDeviceReady()
-      const m = await buildManifest(files)
+      // Build manifest with progress updates.
+      const m = await buildManifest(files, (progress) => {
+        transferRef.current.setHashingProgress({
+          current: progress.current,
+          total: progress.total,
+          fileName: progress.fileName,
+        })
+      })
+      transferRef.current.setHashingProgress(null)
       manifestRef.current = m
       slicePlanRef.current = buildSlicePlan(m)
       transferRef.current.setManifest(m)
