@@ -65,6 +65,33 @@ export function OnboardingTour() {
 
   const skip = close
 
+  // Keyboard dismissal: Escape, Enter (next), and shortcut keys (s, r) close the tour
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        close()
+      } else if (e.key === 'Enter') {
+        e.preventDefault()
+        e.stopPropagation()
+        next()
+      } else if (e.key === 's' || e.key === 'S' || e.key === 'r' || e.key === 'R') {
+        // Dismiss onboarding and let the shortcut propagate to the page.
+        // We stopPropagation in capture phase, then re-dispatch after a tick
+        // so the page-level shortcut handler picks it up.
+        e.stopPropagation()
+        close()
+        setTimeout(() => {
+          window.dispatchEvent(new KeyboardEvent('keydown', { key: e.key, bubbles: true }))
+        }, 100)
+      }
+    }
+    window.addEventListener('keydown', onKey, true) // capture phase to intercept before page
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [open, step])
+
   const current = STEPS[step]
   const isLast = step === STEPS.length - 1
 

@@ -1,15 +1,16 @@
 'use client'
 
 import { QRCodeSVG } from 'qrcode.react'
-import { Copy, RefreshCw, Share2, KeyRound, Clock, Link2 } from 'lucide-react'
+import { RefreshCw, Share2, KeyRound, Clock, Link2 } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import { useSessionStore } from '@/stores/session-store'
-import { copyToClipboard, shortId } from '@/lib/fluxdrop/format'
+import { shortId } from '@/lib/fluxdrop/format'
 import { toast } from 'sonner'
 import { useEffect, useState } from 'react'
+import { CopyButton } from './copy-button'
 
 export function QRDisplay() {
   const roomId = useSessionStore((s) => s.roomId)
@@ -31,28 +32,12 @@ export function QRDisplay() {
   const mm = String(Math.floor(remainingSec / 60)).padStart(2, '0')
   const ss = String(remainingSec % 60).padStart(2, '0')
 
-  const copyRoom = async () => {
-    if (!roomId) return
-    const ok = await copyToClipboard(roomId)
-    toast[ok ? 'success' : 'error'](ok ? 'Room ID copied' : 'Copy failed')
-  }
-  const copyPin = async () => {
-    if (!pin) return
-    const ok = await copyToClipboard(pin)
-    toast[ok ? 'success' : 'error'](ok ? 'PIN copied' : 'Copy failed')
-  }
-  const copyAll = async () => {
-    if (!roomId || !pin) return
-    const text = `FluxDrop — Room: ${roomId} · PIN: ${pin}`
-    const ok = await copyToClipboard(text)
-    toast[ok ? 'success' : 'error'](ok ? 'Transfer details copied' : 'Copy failed')
-  }
-  const copyLink = async () => {
-    if (!roomId || !pin) return
-    const url = `${window.location.origin}/#join=${roomId}&pin=${pin}`
-    const ok = await copyToClipboard(url)
-    toast[ok ? 'success' : 'error'](ok ? 'Share link copied' : 'Copy failed')
-  }
+  const shareLink = roomId && pin
+    ? `${window.location.origin}/#join=${roomId}&pin=${pin}`
+    : ''
+  const detailsText = roomId && pin
+    ? `FluxDrop — Room: ${roomId} · PIN: ${pin}`
+    : ''
 
   if (!roomId) return null
 
@@ -99,35 +84,29 @@ export function QRDisplay() {
               label="Room ID"
               value={roomId}
               hint={shortId(roomId, 6)}
-              onCopy={copyRoom}
             />
             {pin && (
               <CodeRow
                 label="PIN"
                 value={pin}
                 icon={<KeyRound className="h-3.5 w-3.5" />}
-                onCopy={copyPin}
               />
             )}
           </div>
 
           <div className="mt-4 grid grid-cols-2 gap-2 w-full">
-            <Button
+            <CopyButton
+              text={detailsText}
+              label="Copy details"
               variant="outline"
-              onClick={copyAll}
               className="border-flux-500/40 hover:bg-flux-500/10"
-            >
-              <Share2 className="mr-1.5 h-3.5 w-3.5" />
-              Copy details
-            </Button>
-            <Button
+            />
+            <CopyButton
+              text={shareLink}
+              label="Copy link"
               variant="outline"
-              onClick={copyLink}
               className="border-flux-500/40 hover:bg-flux-500/10"
-            >
-              <Link2 className="mr-1.5 h-3.5 w-3.5" />
-              Copy link
-            </Button>
+            />
           </div>
 
           <p className="mt-4 text-xs text-muted-foreground">
@@ -144,13 +123,11 @@ function CodeRow({
   value,
   hint,
   icon,
-  onCopy,
 }: {
   label: string
   value: string
   hint?: string
   icon?: React.ReactNode
-  onCopy: () => void
 }) {
   return (
     <div className="flex items-center justify-between gap-3 rounded-lg border border-border/50 bg-card/60 p-3">
@@ -160,9 +137,7 @@ function CodeRow({
       </div>
       <div className="flex items-center gap-2">
         <code className="font-mono text-base font-semibold tracking-wider">{value}</code>
-        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onCopy}>
-          <Copy className="h-3.5 w-3.5" />
-        </Button>
+        <CopyButton text={value} size="icon" variant="ghost" className="h-7 w-7" />
       </div>
     </div>
   )

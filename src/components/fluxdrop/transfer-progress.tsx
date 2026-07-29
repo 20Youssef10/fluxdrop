@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useTransferStore } from '@/stores/transfer-store'
 import { formatBytes, formatSpeed, formatEta, formatDuration } from '@/lib/fluxdrop/format'
-import { FileIcon } from './file-icon'
+import { FileIcon, getFileCategoryColors } from './file-icon'
 import { AnimatedNumber } from './animated-number'
 import { SpeedSparkline } from './speed-sparkline'
 import { Celebration } from './celebration'
@@ -191,10 +191,11 @@ export function TransferProgress({ onCancel, onDone }: TransferProgressProps) {
           <div className="max-h-64 overflow-y-auto flux-scroll space-y-2 pr-1">
             {t.files.map((f) => {
               const filePct = f.entry.size > 0 ? (f.receivedBytes / f.entry.size) * 100 : 0
+              const colors = getFileCategoryColors(f.entry.type, f.entry.name)
               return (
                 <div key={f.index} className="rounded-lg border border-border/50 bg-card/60 p-3">
                   <div className="flex items-center gap-3">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+                    <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${colors.bg} ${colors.text}`}>
                       <FileIcon mime={f.entry.type} name={f.entry.name} className="h-4 w-4" />
                     </div>
                     <div className="min-w-0 flex-1">
