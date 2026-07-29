@@ -1,7 +1,7 @@
 'use client'
 
 import { useTheme } from 'next-themes'
-import { Moon, Sun, Settings, Wifi, WifiOff, Plus, Trash2, Server, User, Shield } from 'lucide-react'
+import { Moon, Sun, Settings, Wifi, WifiOff, Plus, Trash2, Server, User, Shield, HelpCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -21,7 +21,7 @@ import { useState, useEffect } from 'react'
 import { useSessionStore, type IceServerConfig } from '@/stores/session-store'
 import { FluxLogo, FluxWordmark } from './flux-logo'
 
-export function FluxHeader({ onOpenSettings }: { onOpenSettings?: () => void }) {
+export function FluxHeader({ onOpenSettings, onOpenHelp }: { onOpenSettings?: () => void; onOpenHelp?: () => void }) {
   const { theme, setTheme } = useTheme()
   const [mounted, setMounted] = useState(false)
   const signalingConnected = useSessionStore((s) => s.signalingConnected)
@@ -84,6 +84,18 @@ export function FluxHeader({ onOpenSettings }: { onOpenSettings?: () => void }) 
               <Moon className="h-4 w-4" />
             )}
           </Button>
+
+          {onOpenHelp && (
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={onOpenHelp}
+              aria-label="Help"
+              className="h-9 w-9"
+            >
+              <HelpCircle className="h-4 w-4" />
+            </Button>
+          )}
 
           {onOpenSettings && (
             <Button

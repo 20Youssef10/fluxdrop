@@ -12,6 +12,7 @@ import { StatsDashboard } from '@/components/fluxdrop/stats-dashboard'
 import { ShortcutsHint } from '@/components/fluxdrop/shortcuts-hint'
 import { FullPageDropZone } from '@/components/fluxdrop/full-page-drop-zone'
 import { HelpDialog } from '@/components/fluxdrop/help-dialog'
+import { TransferAnnouncer } from '@/components/fluxdrop/transfer-announcer'
 import { useFluxDrop } from '@/hooks/fluxdrop/use-fluxdrop'
 import { useKeyboardShortcuts } from '@/hooks/fluxdrop/use-keyboard-shortcuts'
 import { useSessionStore } from '@/stores/session-store'
@@ -24,6 +25,7 @@ export default function Home() {
   const flux = useFluxDrop()
   const [files, setFiles] = useState<File[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [helpOpen, setHelpOpen] = useState(false)
   const view = useSessionStore((s) => s.view)
   const setView = useSessionStore((s) => s.setView)
   const transferState = useTransferStore((s) => s.transferState)
@@ -94,7 +96,7 @@ export default function Home() {
 
   return (
     <div className="flex min-h-screen flex-col">
-      <FluxHeader onOpenSettings={() => setSettingsOpen(true)} />
+      <FluxHeader onOpenSettings={() => setSettingsOpen(true)} onOpenHelp={() => setHelpOpen(true)} />
 
       <main className="flex-1">
         <AnimatePresence mode="wait">
@@ -106,7 +108,7 @@ export default function Home() {
               exit={{ opacity: 0, y: -8 }}
               transition={{ duration: 0.25 }}
             >
-              <FluxHero onSend={goSend} onReceive={goReceive} />
+              <FluxHero onSend={goSend} onReceive={goReceive} onHelp={() => setHelpOpen(true)} />
               <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 pb-16 space-y-6">
                 <StatsDashboard />
                 <TransferHistory onResume={handleResume} />
@@ -171,6 +173,8 @@ export default function Home() {
       <FluxFooter />
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <HelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
+      <TransferAnnouncer />
     </div>
   )
 }

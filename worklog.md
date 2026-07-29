@@ -278,3 +278,83 @@ Task: QA test existing app, then implement priority recommendations (resume UI, 
 4. **Accessibility audit**: Add ARIA labels, keyboard navigation for transfer history rows, screen reader announcements for state changes.
 5. **Performance optimization**: Memoize expensive computations in the sparkline and chunk grid.
 6. **PWA support**: Add a service worker for offline landing page + installable app manifest.
+
+---
+
+Task ID: 4
+Agent: cron-review (round 3)
+Task: QA test, then implement PWA support, Help/FAQ dialog, accessibility, performance, and toast improvements.
+
+## Current Project Status Assessment
+- FluxDrop was stable from rounds 1-3: 17 features across signaling, WebRTC, UI, diagnostics, TURN config, quality indicator, sparkline, drag-anywhere, stats dashboard, transfer details, resume UI.
+- Lint was clean, no runtime errors.
+- The previous round (round 4 attempt) was interrupted mid-implementation — it had created files (help-dialog, particle-field, sw-register, manifest.json, sw.js) but didn't finish wiring them into the page.
+- This round completed the wiring and added additional features.
+
+## Work Completed This Round
+
+### New Features (8)
+
+1. **PWA Support** (`manifest.json` + `sw.js` + `sw-register.tsx`)
+   - Web app manifest with standalone display, theme color, icons.
+   - Service worker: network-first for navigation, cache-first for static assets. Never caches file data (P2P only). Skips WebSocket/HMR.
+   - SW registration component (production-only to avoid dev HMR conflicts).
+   - Layout updated: manifest link, appleWebApp metadata, viewport themeColor.
+
+2. **Help/FAQ Dialog** (`help-dialog.tsx`)
+   - 8 expandable accordion items covering: how it works, security, size limits, cross-network, interruptions, browser support, PIN purpose, server storage.
+   - Quick-facts grid (encryption, max speed, NAT traversal, server storage).
+   - Limitation warning box about corporate firewalls / TURN.
+   - Accessible from both the hero ("How does it work?" link) and the header Help button.
+
+3. **Animated Hero Particles** (`particle-field.tsx`)
+   - 20 floating particle dots drifting upward with random sizes, positions, delays, and opacity.
+   - Purely decorative (aria-hidden, pointer-events-none).
+   - Integrated into FluxHero behind the content.
+
+4. **Performance Optimization** (enhanced `speed-sparkline.tsx` + `transfer-progress.tsx`)
+   - SpeedSparkline wrapped in `React.memo()` to prevent unnecessary re-renders.
+   - ChunkGrid wrapped in `React.memo()` — significant since it renders up to 400 cells.
+   - Both use `useMemo` for path/area computation.
+
+5. **Enhanced File Type Colors** (enhanced `file-icon.tsx` + `file-picker.tsx`)
+   - `getFileCategoryColors()` helper returns category-specific bg/text classes.
+   - Color mapping: image=purple, video=rose, audio=amber, document=teal, archive=orange, code=cyan, other=muted.
+   - FileRow in FilePicker now uses colored icon backgrounds instead of uniform muted.
+
+6. **Toast Action Buttons** (enhanced `use-fluxdrop.ts`)
+   - Connection failure toast now has a "Retry" action button that resets retry count and re-initiates WebRTC.
+   - Transfer complete toasts now show richer descriptions (file count, size, "SHA-256 ✓").
+   - Failure description includes TURN server suggestion.
+
+7. **Accessibility: ARIA Live Region** (`transfer-announcer.tsx`)
+   - Screen-reader-only live region announcing transfer state changes.
+   - Uses `aria-live="polite"` with `role="status"`.
+   - Announces state transitions + progress percentage during transfer.
+
+8. **Header Help Button** (enhanced `flux-header.tsx`)
+   - Help button (HelpCircle icon) added to the header, accessible from any view.
+   - `onOpenHelp` prop wired to the HelpDialog.
+
+### Verification Results
+- **Lint: clean (0 errors, 0 warnings)**
+- **No console errors** (hydration warning is a known next-themes dev-mode artifact, not a real error).
+- **Header Help button** verified: clicking opens "How FluxDrop works" dialog with 8 FAQ accordion items.
+- **Hero Help link** verified: "How does it work? Privacy & limitations" button present in landing snapshot.
+- **Keyboard shortcuts** verified: `s` → Sender mode, `Esc` → back/close dialog.
+- **Help dialog content** verified via snapshot: all 8 FAQ headings present (transfer, security, limits, networks, interruptions, browsers, PIN, storage).
+- **All features compile** without errors (HTTP 200, clean dev.log).
+
+## Unresolved Issues / Risks
+- **Hydration warning**: next-themes causes a harmless "attributes didn't match" warning in dev mode. The `suppressHydrationWarning` on `<html>` mitigates this; it's a known next-themes pattern and doesn't affect functionality.
+- **Multi-tab transfer test**: Still cannot test the full sender→receiver data path with agent-browser single-session. The toast action buttons, quality indicator, and enhanced sparkline are wired but only fully exercisable during an active transfer.
+- **PWA service worker**: Only registers in production (NODE_ENV=production) to avoid dev HMR conflicts. Not testable in the dev environment.
+- **Sandbox constraint**: Background processes killed when a Bash tool call ends.
+
+## Priority Recommendations for Next Phase
+1. **Multi-tab transfer test**: Use two agent-browser sessions to exercise the full P2P data path.
+2. **Full resume implementation**: Store file references for sender-side resume; re-create room and wait for peer.
+3. **Onboarding tour**: First-visit coach marks highlighting the send/receive flow.
+4. **Notification permissions**: Browser notifications for transfer complete when tab is in background.
+5. **File preview**: Thumbnail preview for images in the file picker and transfer progress.
+6. **Dark/light theme refinement**: Ensure all new components (help dialog, particle field) look good in light mode.

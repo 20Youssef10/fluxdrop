@@ -190,7 +190,12 @@ export function useFluxDrop() {
       },
       onTransferComplete: () => {
         transferRef.current.setTransferState('COMPLETE')
-        toast.success('Transfer complete!')
+        const m = manifestRef.current
+        toast.success('Transfer complete!', {
+          description: m
+            ? `${m.files.length} file${m.files.length > 1 ? 's' : ''} · ${formatBytes(m.totalSize)} verified`
+            : 'All files verified',
+        })
       },
       onTransferCancel: (payload) => {
         transferRef.current.setTransferState('CANCELLED')
@@ -243,7 +248,14 @@ export function useFluxDrop() {
       transferRef.current.setTransferState('FAILED')
       transferRef.current.setError(`Connection failed after ${CONSTANTS.CONNECT_RETRY_MAX} retries`)
       toast.error('Connection failed permanently', {
-        description: `Exceeded ${CONSTANTS.CONNECT_RETRY_MAX} retry attempts`,
+        description: `Exceeded ${CONSTANTS.CONNECT_RETRY_MAX} retry attempts. Check your network or configure a TURN server.`,
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            sessionRef.current.setRetryCount(0)
+            if (role === 'sender') initiateWebRTCAsSender()
+          },
+        },
       })
       return
     }
@@ -559,7 +571,9 @@ export function useFluxDrop() {
       transferRef.current.setChecksumVerified(true)
       transferRef.current.setTransferState('COMPLETE')
       webrtcRef.current?.sendTransferCompleteAck(m.transferId, true)
-      toast.success('All files received and verified!')
+      toast.success('All files received and verified!', {
+        description: `${m.files.length} file${m.files.length > 1 ? 's' : ''} saved · SHA-256 ✓`,
+      })
     } catch (err: any) {
       toast.error('Failed to save file', { description: err.message })
       transferRef.current.setTransferState('ERROR')

@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { formatBytes, validateFiles, fileTypeCategory } from '@/lib/fluxdrop/format'
 import { CONSTANTS } from '@/lib/fluxdrop/protocol'
-import { FileIcon } from './file-icon'
+import { FileIcon, getFileCategoryColors } from './file-icon'
 
 interface FilePickerProps {
   files: File[]
@@ -204,9 +204,10 @@ export function FilePicker({ files, onFilesChange, onSend, disabled }: FilePicke
 function FileRow({ file, onRemove }: { file: File; onRemove: () => void }) {
   const relPath = (file as any).webkitRelativePath as string | undefined
   const displayName = relPath && relPath.includes('/') ? relPath : file.name
+  const colors = getFileCategoryColors(file.type, file.name)
   return (
     <div className="group flex items-center gap-3 rounded-lg border border-border/50 bg-card/60 p-3 transition-colors hover:bg-card hover:border-flux-500/30">
-      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground group-hover:bg-flux-500/10 group-hover:text-flux-600 dark:group-hover:text-flux-400 transition-colors">
+      <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md ${colors.bg} ${colors.text} transition-colors`}>
         <FileIcon mime={file.type} name={file.name} className="h-4 w-4" />
       </div>
       <div className="min-w-0 flex-1">
