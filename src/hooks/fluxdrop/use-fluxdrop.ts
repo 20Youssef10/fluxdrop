@@ -25,6 +25,7 @@ import {
   type StoredTransfer,
 } from '@/lib/fluxdrop/resume'
 import { assembleBlob, saveBlobWithPicker } from '@/lib/fluxdrop/file-io'
+import { addRecentRoom } from '@/lib/fluxdrop/recent-rooms'
 import { MessageType, CONSTANTS, type TransferManifest, type TransferSummary } from '@/lib/fluxdrop/protocol'
 import { toast } from 'sonner'
 
@@ -153,6 +154,9 @@ export function useFluxDrop() {
           qrData: null,
         })
         sig.setRoomId(payload.roomId)
+        // Save to recent rooms for quick-join next time.
+        const peerAlias = payload.peers?.[0]?.alias ?? 'Unknown'
+        addRecentRoom({ roomId: payload.roomId, peerAlias, joinedAt: Date.now() })
         if (payload.peers?.length) {
           for (const p of payload.peers) {
             sessionRef.current.addPeer({ id: p.id, alias: p.alias, role: p.role })

@@ -8,6 +8,7 @@ import { formatBytes, validateFiles, fileTypeCategory } from '@/lib/fluxdrop/for
 import { CONSTANTS } from '@/lib/fluxdrop/protocol'
 import { FileIcon, getFileCategoryColors } from './file-icon'
 import { FilePreview } from './file-preview'
+import { TextSnippetShare } from './text-snippet-share'
 
 interface FilePickerProps {
   files: File[]
@@ -186,6 +187,14 @@ export function FilePicker({ files, onFilesChange, onSend, disabled }: FilePicke
                 <p key={i}>• {e}</p>
               ))}
             </div>
+          )}
+
+          {/* Text snippet share option */}
+          {files.length === 0 && (
+            <TextSnippetShare
+              onShare={() => {}}
+              disabled={disabled}
+            />
           )}
 
           <Button

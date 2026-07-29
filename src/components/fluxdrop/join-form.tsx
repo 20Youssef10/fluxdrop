@@ -1,13 +1,14 @@
 'use client'
 
-import { useState } from 'react'
-import { LogIn, ArrowLeft, KeyRound, Hash } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { LogIn, ArrowLeft, KeyRound, Hash, Clock, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { InputOTP, InputOTPGroup, InputOTPSlot } from '@/components/ui/input-otp'
 import { toast } from 'sonner'
+import { getRecentRooms, clearRecentRooms, type RecentRoom } from '@/lib/fluxdrop/recent-rooms'
 
 interface JoinFormProps {
   onJoin: (roomId: string, pin: string) => void
@@ -17,6 +18,12 @@ interface JoinFormProps {
 export function JoinForm({ onJoin, onBack }: JoinFormProps) {
   const [roomId, setRoomId] = useState('')
   const [pin, setPin] = useState('')
+  const [recentRooms, setRecentRooms] = useState<RecentRoom[]>([])
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setRecentRooms(getRecentRooms())
+  }, [])
 
   const handleJoin = () => {
     const cleaned = roomId.trim().toUpperCase().replace(/\s/g, '')
@@ -103,8 +110,54 @@ export function JoinForm({ onJoin, onBack }: JoinFormProps) {
             <LogIn className="mr-2 h-5 w-5" />
             Join room
           </Button>
+
+          {/* Recent rooms */}
+          {recentRooms.length > 0 && (
+            <div className="pt-4 border-t border-border/50">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs uppercase tracking-wider text-muted-foreground font-medium flex items-center gap-1">
+                  <Clock className="h-3 w-3" />
+                  Recent rooms
+                </span>
+                <button
+                  onClick={() => { clearRecentRooms(); setRecentRooms([]) }}
+                  className="text-xs text-muted-foreground hover:text-destructive transition-colors"
+                >
+                  Clear
+                </button>
+              </div>
+              <div className="space-y-1.5">
+                {recentRooms.map((room) => (
+                  <button
+                    key={room.roomId}
+                    onClick={() => setRoomId(room.roomId)}
+                    className="flex w-full items-center justify-between rounded-lg border border-border/40 bg-card/40 px-3 py-2 text-left hover:border-flux-500/30 hover:bg-flux-500/5 transition-colors"
+                  >
+                    <div className="flex items-center gap-2">
+                      <code className="font-mono text-sm font-semibold tracking-wider">{room.roomId}</code>
+                      <span className="text-xs text-muted-foreground">{room.peerAlias}</span>
+                    </div>
+                    <span className="text-[10px] text-muted-foreground">
+                      {formatRelative(room.joinedAt)}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </Card>
   )
+}
+
+function formatRelative(ts: number): string {
+  const diff = Date.now() - ts
+  const sec = Math.floor(diff / 1000)
+  if (sec < 60) return 'just now'
+  const min = Math.floor(sec / 60)
+  if (min < 60) return `${min}m ago`
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return `${hr}h ago`
+  return `${Math.floor(hr / 24)}d ago`
 }
