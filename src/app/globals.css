@@ -301,3 +301,35 @@
 .flux-beam {
   animation: flux-beam 2.5s linear infinite;
 }
+
+/* Gradient hover border for cards */
+.flux-hover-border {
+  position: relative;
+  transition: border-color 0.25s ease;
+}
+.flux-hover-border::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg, oklch(0.62 0.16 172 / 0.4), oklch(0.72 0.14 200 / 0.3), oklch(0.76 0.18 145 / 0.4));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+  pointer-events: none;
+}
+.flux-hover-border:hover::before {
+  opacity: 1;
+}
+
+/* Gradient glow pulse for active elements */
+@keyframes flux-glow-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 oklch(0.62 0.16 172 / 0); }
+  50% { box-shadow: 0 0 20px 4px oklch(0.62 0.16 172 / 0.15); }
+}
+.flux-glow-pulse {
+  animation: flux-glow-pulse 3s ease-in-out infinite;
+}

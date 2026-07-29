@@ -15,6 +15,7 @@ import { HelpDialog } from '@/components/fluxdrop/help-dialog'
 import { TransferAnnouncer } from '@/components/fluxdrop/transfer-announcer'
 import { OnboardingTour } from '@/components/fluxdrop/onboarding-tour'
 import { ConnectionRipple } from '@/components/fluxdrop/connection-ripple'
+import { TipsBanner } from '@/components/fluxdrop/tips-banner'
 import { useFluxDrop } from '@/hooks/fluxdrop/use-fluxdrop'
 import { useKeyboardShortcuts } from '@/hooks/fluxdrop/use-keyboard-shortcuts'
 import { useSessionStore } from '@/stores/session-store'
@@ -112,6 +113,7 @@ export default function Home() {
             >
               <FluxHero onSend={goSend} onReceive={goReceive} onHelp={() => setHelpOpen(true)} />
               <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 pb-16 space-y-6">
+                <TipsBanner />
                 <StatsDashboard />
                 <TransferHistory onResume={handleResume} />
                 <div className="flex justify-center">

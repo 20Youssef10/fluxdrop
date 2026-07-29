@@ -25,6 +25,8 @@ export function FluxHeader({ onOpenSettings, onOpenHelp }: { onOpenSettings?: ()
   const { theme, setTheme } = useTheme()
   const [mounted, setMounted] = useState(false)
   const signalingConnected = useSessionStore((s) => s.signalingConnected)
+  const rtcState = useSessionStore((s) => s.rtcState)
+  const dataChannelOpen = useSessionStore((s) => s.dataChannelOpen)
 
   // Mounted flag is the canonical next-themes pattern for avoiding hydration mismatch.
   useEffect(() => {
@@ -49,13 +51,34 @@ export function FluxHeader({ onOpenSettings, onOpenHelp }: { onOpenSettings?: ()
           {/* Connection status badge */}
           <Badge
             variant="outline"
-            className={`hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 ${
-              signalingConnected
+            className={`hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 transition-colors ${
+              dataChannelOpen
+                ? 'border-flux-500/50 bg-flux-500/15 text-flux-700 dark:text-flux-300'
+                : rtcState === 'connecting' || rtcState === 'new'
+                ? 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400'
+                : signalingConnected
                 ? 'border-flux-500/40 bg-flux-500/10 text-flux-700 dark:text-flux-300'
                 : 'border-border bg-muted/50 text-muted-foreground'
             }`}
+            title={`Signaling: ${signalingConnected ? 'connected' : 'disconnected'} · WebRTC: ${rtcState} · DataChannel: ${dataChannelOpen ? 'open' : 'closed'}`}
           >
-            {signalingConnected ? (
+            {dataChannelOpen ? (
+              <>
+                <span className="relative flex h-2 w-2">
+                  <span className="absolute inline-flex h-full w-full rounded-full bg-flux-500 opacity-75 flux-pulse-dot" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-flux-500" />
+                </span>
+                <span className="text-[11px] font-medium">P2P live</span>
+              </>
+            ) : rtcState === 'connecting' || rtcState === 'new' ? (
+              <>
+                <span className="relative flex h-2 w-2">
+                  <span className="absolute inline-flex h-full w-full rounded-full bg-amber-500 opacity-75 flux-pulse-dot" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-500" />
+                </span>
+                <span className="text-[11px] font-medium">Connecting</span>
+              </>
+            ) : signalingConnected ? (
               <>
                 <span className="relative flex h-2 w-2">
                   <span className="absolute inline-flex h-full w-full rounded-full bg-flux-500 opacity-75 flux-pulse-dot" />

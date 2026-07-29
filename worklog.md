@@ -642,3 +642,63 @@ Task: QA test, add transfer history filtering, batch actions, export, and stylin
 4. **Connection state badge**: Animated pulse indicator in header showing WebRTC connection state.
 5. **Empty-state illustrations**: Add decorative illustrations for sender/receiver panels.
 6. **Gradient hover borders**: Subtle gradient borders on card hover for visual polish.
+
+---
+
+Task ID: 9
+Agent: cron-review (round 8)
+Task: QA test, add connection state badge, tips banner, gradient hover borders, glow pulse.
+
+## Current Project Status Assessment
+- FluxDrop was stable from rounds 1-8: 43+ features.
+- Lint was clean, no runtime errors.
+- No bugs found during QA.
+
+## Work Completed This Round
+
+### New Features (3)
+
+1. **Enhanced Connection State Badge** (enhanced `flux-header.tsx`)
+   - Header badge now shows 4 states: Offline, Online (signaling connected), Connecting (WebRTC connecting/new, amber), P2P live (DataChannel open, flux green).
+   - Each state has its own color + pulse animation.
+   - Tooltip shows full state breakdown: "Signaling: connected · WebRTC: connecting · DataChannel: closed".
+   - **Verified via agent-browser**: badge shows "Connecting" with amber color during WebRTC negotiation.
+
+2. **Rotating Tips Banner** (`tips-banner.tsx`)
+   - 8 tips covering: keyboard shortcuts, shareable links, drag-anywhere, folder uploads, resume, TURN servers, checksum verification, diagnostics panel.
+   - Auto-rotates every 6 seconds with slide animation.
+   - Dot indicators for direct navigation.
+   - Dismissible (localStorage flag).
+   - Lightbulb icon with flux-themed accent.
+   - Wired into landing page above StatsDashboard.
+
+3. **Gradient Hover Border Utility** (enhanced `globals.css`)
+   - `.flux-hover-border` class: gradient border on hover using mask-composite technique.
+   - `.flux-glow-pulse` class: animated box-shadow glow for active elements.
+   - Available for use across all card components.
+
+### Styling Improvements
+- Header badge: 4-state color system (gray/teal/amber/teal-bright) with state-appropriate pulse.
+- Tips banner: animated slide transitions, dot indicators, dismissible.
+- CSS utilities: gradient hover border + glow pulse for future use.
+
+### Verification Results
+- **Lint: clean (0 errors, 0 warnings)**
+- **No console errors**.
+- **Landing page** renders correctly with all features.
+- **Connection state badge** verified: shows "Connecting" with amber color during WebRTC negotiation.
+- **Keyboard shortcuts** verified.
+- **All features compile** without errors (HTTP 200, clean dev.log).
+
+## Unresolved Issues / Risks
+- **Multi-tab transfer test**: Still cannot test the full sender→receiver data path with agent-browser single-session.
+- **Tips banner visibility**: Below the fold on landing (hero takes viewport); visible after scrolling. Correct behavior.
+- **Sandbox constraint**: Background processes killed when a Bash tool call ends.
+
+## Priority Recommendations for Next Phase
+1. **Multi-tab transfer test**: Use two agent-browser sessions to exercise the full P2P data path.
+2. **Apply gradient hover borders**: Add `.flux-hover-border` class to key cards (FilePicker, QRDisplay, DeviceList, etc.).
+3. **Persistent received files**: Store assembled file blobs in IndexedDB for true re-download.
+4. **Full resume implementation**: Store file references for sender-side resume.
+5. **Empty-state illustrations**: Add decorative SVG illustrations for sender/receiver panels.
+6. **Custom favicon**: Generate a FluxDrop-branded favicon from the logo SVG.
