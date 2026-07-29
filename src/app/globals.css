@@ -1,0 +1,303 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  /* FluxDrop brand colors */
+  --color-flux-50: oklch(0.97 0.03 165);
+  --color-flux-100: oklch(0.93 0.06 165);
+  --color-flux-200: oklch(0.86 0.10 165);
+  --color-flux-300: oklch(0.78 0.13 168);
+  --color-flux-400: oklch(0.70 0.15 170);
+  --color-flux-500: oklch(0.62 0.16 172);
+  --color-flux-600: oklch(0.54 0.15 174);
+  --color-flux-700: oklch(0.45 0.12 176);
+  --color-flux-800: oklch(0.36 0.08 176);
+  --color-flux-900: oklch(0.27 0.05 176);
+  --color-flux-950: oklch(0.18 0.03 176);
+}
+
+:root {
+  --radius: 0.75rem;
+  --background: oklch(0.99 0.005 165);
+  --foreground: oklch(0.18 0.02 176);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.18 0.02 176);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.18 0.02 176);
+  --primary: oklch(0.54 0.15 174);
+  --primary-foreground: oklch(0.99 0.005 165);
+  --secondary: oklch(0.96 0.01 170);
+  --secondary-foreground: oklch(0.25 0.03 176);
+  --muted: oklch(0.96 0.01 170);
+  --muted-foreground: oklch(0.50 0.02 176);
+  --accent: oklch(0.93 0.04 170);
+  --accent-foreground: oklch(0.25 0.03 176);
+  --destructive: oklch(0.58 0.22 25);
+  --border: oklch(0.90 0.01 170);
+  --input: oklch(0.92 0.01 170);
+  --ring: oklch(0.62 0.16 172);
+  --chart-1: oklch(0.62 0.16 172);
+  --chart-2: oklch(0.70 0.15 200);
+  --chart-3: oklch(0.76 0.18 145);
+  --chart-4: oklch(0.78 0.16 85);
+  --chart-5: oklch(0.65 0.20 20);
+  --sidebar: oklch(0.985 0.005 170);
+  --sidebar-foreground: oklch(0.18 0.02 176);
+  --sidebar-primary: oklch(0.54 0.15 174);
+  --sidebar-primary-foreground: oklch(0.99 0.005 165);
+  --sidebar-accent: oklch(0.93 0.04 170);
+  --sidebar-accent-foreground: oklch(0.25 0.03 176);
+  --sidebar-border: oklch(0.90 0.01 170);
+  --sidebar-ring: oklch(0.62 0.16 172);
+}
+
+.dark {
+  --background: oklch(0.16 0.02 176);
+  --foreground: oklch(0.96 0.01 170);
+  --card: oklch(0.21 0.025 176);
+  --card-foreground: oklch(0.96 0.01 170);
+  --popover: oklch(0.21 0.025 176);
+  --popover-foreground: oklch(0.96 0.01 170);
+  --primary: oklch(0.70 0.15 170);
+  --primary-foreground: oklch(0.16 0.02 176);
+  --secondary: oklch(0.27 0.03 176);
+  --secondary-foreground: oklch(0.96 0.01 170);
+  --muted: oklch(0.25 0.02 176);
+  --muted-foreground: oklch(0.68 0.02 170);
+  --accent: oklch(0.30 0.04 174);
+  --accent-foreground: oklch(0.96 0.01 170);
+  --destructive: oklch(0.70 0.19 22);
+  --border: oklch(1 0 0 / 8%);
+  --input: oklch(1 0 0 / 12%);
+  --ring: oklch(0.70 0.15 170);
+  --chart-1: oklch(0.70 0.15 170);
+  --chart-2: oklch(0.72 0.14 200);
+  --chart-3: oklch(0.76 0.18 145);
+  --chart-4: oklch(0.78 0.16 85);
+  --chart-5: oklch(0.65 0.20 20);
+  --sidebar: oklch(0.19 0.02 176);
+  --sidebar-foreground: oklch(0.96 0.01 170);
+  --sidebar-primary: oklch(0.70 0.15 170);
+  --sidebar-primary-foreground: oklch(0.16 0.02 176);
+  --sidebar-accent: oklch(0.27 0.03 176);
+  --sidebar-accent-foreground: oklch(0.96 0.01 170);
+  --sidebar-border: oklch(1 0 0 / 8%);
+  --sidebar-ring: oklch(0.70 0.15 170);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+/* === FluxDrop custom styling === */
+
+/* Gradient mesh background for hero / app backdrop */
+.flux-mesh-bg {
+  position: relative;
+  isolation: isolate;
+}
+.flux-mesh-bg::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(at 18% 12%, oklch(0.70 0.15 170 / 0.18) 0px, transparent 45%),
+    radial-gradient(at 82% 18%, oklch(0.72 0.14 200 / 0.16) 0px, transparent 45%),
+    radial-gradient(at 75% 78%, oklch(0.76 0.18 145 / 0.14) 0px, transparent 45%),
+    radial-gradient(at 25% 82%, oklch(0.70 0.15 170 / 0.12) 0px, transparent 45%);
+  pointer-events: none;
+}
+.dark .flux-mesh-bg::before {
+  background:
+    radial-gradient(at 18% 12%, oklch(0.70 0.15 170 / 0.22) 0px, transparent 45%),
+    radial-gradient(at 82% 18%, oklch(0.72 0.14 200 / 0.18) 0px, transparent 45%),
+    radial-gradient(at 75% 78%, oklch(0.76 0.18 145 / 0.16) 0px, transparent 45%),
+    radial-gradient(at 25% 82%, oklch(0.70 0.15 170 / 0.14) 0px, transparent 45%);
+}
+
+/* Animated grid overlay */
+.flux-grid-overlay::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-image:
+    linear-gradient(to right, oklch(0.5 0.05 170 / 0.06) 1px, transparent 1px),
+    linear-gradient(to bottom, oklch(0.5 0.05 170 / 0.06) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse at center, black 30%, transparent 75%);
+  pointer-events: none;
+}
+
+/* Glassmorphism card */
+.flux-glass {
+  background: oklch(1 0 0 / 0.65);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid oklch(1 0 0 / 0.5);
+}
+.dark .flux-glass {
+  background: oklch(0.21 0.025 176 / 0.55);
+  border: 1px solid oklch(1 0 0 / 0.08);
+}
+
+/* Gradient text */
+.flux-gradient-text {
+  background: linear-gradient(135deg, oklch(0.62 0.16 172) 0%, oklch(0.72 0.14 200) 50%, oklch(0.76 0.18 145) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+/* Animated logo orb */
+@keyframes flux-orb-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.9; }
+  50% { transform: scale(1.08); opacity: 1; }
+}
+@keyframes flux-orb-rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.flux-orb {
+  animation: flux-orb-pulse 4s ease-in-out infinite;
+}
+.flux-orb-ring {
+  animation: flux-orb-rotate 18s linear infinite;
+}
+
+/* Floating animation */
+@keyframes flux-float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-8px); }
+}
+.flux-float {
+  animation: flux-float 5s ease-in-out infinite;
+}
+
+/* Shimmer for progress bars */
+@keyframes flux-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.flux-shimmer {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    oklch(1 0 0 / 0.25) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: flux-shimmer 2s linear infinite;
+}
+
+/* Pulse dot for live indicators */
+@keyframes flux-pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 0 oklch(0.76 0.18 145 / 0.6); }
+  50% { box-shadow: 0 0 0 6px oklch(0.76 0.18 145 / 0); }
+}
+.flux-pulse-dot {
+  animation: flux-pulse-dot 1.8s ease-out infinite;
+}
+
+/* Custom scrollbar */
+.flux-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: oklch(0.62 0.16 172 / 0.4) transparent;
+}
+.flux-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.flux-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.flux-scroll::-webkit-scrollbar-thumb {
+  background-color: oklch(0.62 0.16 172 / 0.35);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.flux-scroll::-webkit-scrollbar-thumb:hover {
+  background-color: oklch(0.62 0.16 172 / 0.6);
+}
+
+/* Chunk grid visualizer cells */
+@keyframes flux-cell-flash {
+  0% { background-color: oklch(0.76 0.18 145 / 0.9); transform: scale(1.15); }
+  100% { background-color: oklch(0.62 0.16 172 / 0.5); transform: scale(1); }
+}
+.flux-cell-flash {
+  animation: flux-cell-flash 0.6s ease-out;
+}
+
+/* Slide / fade entrance */
+@keyframes flux-slide-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.flux-slide-up {
+  animation: flux-slide-up 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes flux-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.flux-fade-in {
+  animation: flux-fade-in 0.3s ease-out both;
+}
+
+/* Connection beam animation */
+@keyframes flux-beam {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+.flux-beam {
+  animation: flux-beam 2.5s linear infinite;
+}
