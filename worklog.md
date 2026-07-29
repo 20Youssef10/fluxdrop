@@ -358,3 +358,80 @@ Task: QA test, then implement PWA support, Help/FAQ dialog, accessibility, perfo
 4. **Notification permissions**: Browser notifications for transfer complete when tab is in background.
 5. **File preview**: Thumbnail preview for images in the file picker and transfer progress.
 6. **Dark/light theme refinement**: Ensure all new components (help dialog, particle field) look good in light mode.
+
+---
+
+Task ID: 5
+Agent: cron-review (round 4)
+Task: QA test, then implement file preview, notifications, onboarding, summary card, and styling improvements.
+
+## Current Project Status Assessment
+- FluxDrop was stable from rounds 1-4: 25+ features across signaling, WebRTC, UI, diagnostics, TURN config, quality indicator, sparkline, drag-anywhere, stats dashboard, transfer details, resume UI, PWA, help dialog, particles, performance optimization, file type colors, toast actions, ARIA live region, header help button.
+- Lint was clean, no runtime errors.
+- No bugs found during QA.
+
+## Work Completed This Round
+
+### New Features (5)
+
+1. **File Preview (Image Thumbnails)** (`file-preview.tsx`)
+   - Renders thumbnail previews for image files using `URL.createObjectURL`.
+   - Loading skeleton with pulse animation.
+   - Automatic URL revocation on unmount/change (memory-safe).
+   - Falls back to FileIcon for non-image files.
+   - Integrated into FilePicker's FileRow — images show actual thumbnails instead of generic icons.
+
+2. **Browser Notification Permissions** (`use-notifications.ts` + enhanced `use-fluxdrop.ts`)
+   - `useNotifications` hook: manages permission state, requestPermission, notify helper.
+   - `useNotificationPrompt` hook: prompts once per browser (localStorage flag).
+   - On `startSend`: prompts for notification permission after 2s delay (first transfer only).
+   - On transfer complete: fires a browser Notification if the tab is hidden and permission is granted.
+   - Notification includes title, body (file count + size), icon, auto-closes after 8s, focuses window on click.
+
+3. **First-Visit Onboarding Tour** (`onboarding-tour.tsx`)
+   - 5-step coach mark sequence: Welcome, Send files, Receive files, Keyboard shortcuts, Privacy.
+   - Animated card with spring physics, gradient header bar, step indicators.
+   - Accent badges per step, Skip/Next/Got it actions.
+   - Shows on first visit (localStorage flag), 1.2s delay after page load.
+   - Backdrop blur, click-outside-to-skip.
+
+4. **Transfer Complete Summary Card** (`transfer-summary-card.tsx`)
+   - Replaces the progress card when transfer is COMPLETE.
+   - Shows: animated check badge with spring + shadow glow, SHA-256 verified badge.
+   - Stats recap grid: Files count, Data transferred, Duration, Average speed.
+   - Peak speed note (from speed history).
+   - Compact file list summary.
+   - "Send another" + "Done" action buttons.
+   - Decorative gradient glow at top.
+
+5. **Enhanced Copy Feedback** (inherited from previous toast improvements)
+   - Transfer complete toasts now include file count + size in description.
+   - Connection failure toast has "Retry" action button.
+
+### Styling Improvements
+- File picker: image thumbnails with ring border, colored category icons.
+- Transfer summary: gradient glow, spring-animated check badge, verified badge.
+- Onboarding: gradient header bar, step progress dots, accent badges.
+- Summary card: stat tiles with flux-colored icons.
+
+### Verification Results
+- **Lint: clean (0 errors, 0 warnings)**
+- **No console errors**.
+- **Landing page** renders correctly with all features.
+- **Sender flow** works — FilePicker shows "Select files" and "Select folder" buttons.
+- **Onboarding** logic wired (localStorage flag check, 1.2s delay).
+- **All features compile** without errors (HTTP 200, clean dev.log).
+
+## Unresolved Issues / Risks
+- **Multi-tab transfer test**: Still cannot test the full sender→receiver data path with agent-browser single-session. The file preview, notification, and summary card are wired but only fully exercisable during an active transfer.
+- **Onboarding visibility**: The modal renders as a fixed overlay; agent-browser's `read` shows the page behind it. The screenshot captures the full view including the overlay.
+- **Notification permissions**: Can only be requested in response to a user gesture in some browsers; the 2s delay after `startSend` may be blocked by strict browsers. The implementation falls back gracefully.
+- **Sandbox constraint**: Background processes killed when a Bash tool call ends.
+
+## Priority Recommendations for Next Phase
+1. **Multi-tab transfer test**: Use two agent-browser sessions to exercise the full P2P data path and verify file preview, notifications, and summary card during a real transfer.
+2. **Full resume implementation**: Store file references for sender-side resume.
+3. **Light mode refinement**: Audit all new components (onboarding, summary card) in light mode.
+4. **File preview in transfer progress**: Show thumbnails for received image files in the per-file progress list.
+5. **Drag-and-drop visual feedback**: Enhance the full-page drop zone with file-type-specific icons in the overlay.
+6. **Connection state animated transitions**: Add ripple/pulse effects when WebRTC connection establishes.

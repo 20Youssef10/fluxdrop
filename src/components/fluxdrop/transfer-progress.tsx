@@ -13,6 +13,7 @@ import { AnimatedNumber } from './animated-number'
 import { SpeedSparkline } from './speed-sparkline'
 import { Celebration } from './celebration'
 import { ConnectionViz } from './connection-viz'
+import { TransferSummaryCard } from './transfer-summary-card'
 import { useState, useEffect, useRef, memo } from 'react'
 
 interface TransferProgressProps {
@@ -49,7 +50,12 @@ export function TransferProgress({ onCancel, onDone }: TransferProgressProps) {
         <ConnectionViz />
       </Card>
 
-      {/* Big progress card */}
+      {/* Summary card when complete (replaces progress card) */}
+      {isComplete ? (
+        <TransferSummaryCard onDone={onDone} onSendAnother={onDone} />
+      ) : (
+      /* Big progress card */
+      <>
       <Card className="flux-glass p-6 relative overflow-hidden">
         {/* Decorative glow when transferring */}
         {isTransferring && (
@@ -224,6 +230,8 @@ export function TransferProgress({ onCancel, onDone }: TransferProgressProps) {
             </div>
           </div>
         </Card>
+      )}
+      </>
       )}
     </div>
   )

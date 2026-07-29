@@ -196,6 +196,17 @@ export function useFluxDrop() {
             ? `${m.files.length} file${m.files.length > 1 ? 's' : ''} · ${formatBytes(m.totalSize)} verified`
             : 'All files verified',
         })
+        // Browser notification for background tabs
+        if (typeof document !== 'undefined' && document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+          try {
+            const n = new Notification('FluxDrop — Transfer complete', {
+              body: m ? `${m.files.length} file${m.files.length > 1 ? 's' : ''} · ${formatBytes(m.totalSize)} verified` : 'All files verified',
+              icon: '/logo.svg',
+            })
+            setTimeout(() => n.close(), 8000)
+            n.onclick = () => { window.focus(); n.close() }
+          } catch { /* ignore */ }
+        }
       },
       onTransferCancel: (payload) => {
         transferRef.current.setTransferState('CANCELLED')
@@ -658,6 +669,23 @@ export function useFluxDrop() {
     transferRef.current.setManifest(m)
     transferRef.current.resetProgress(m.totalChunks, m.totalSize)
     transferRef.current.setTransferState('PAIRING')
+    // Prompt for notifications on first transfer (once per browser)
+    if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'default') {
+      try {
+        if (!localStorage.getItem('fluxdrop:notif-prompted')) {
+          setTimeout(() => {
+            Notification.requestPermission().then((result) => {
+              localStorage.setItem('fluxdrop:notif-prompted', '1')
+              if (result === 'granted') {
+                toast.success('Notifications enabled', {
+                  description: 'You\'ll be alerted when transfers complete in the background.',
+                })
+              }
+            })
+          }, 2000)
+        }
+      } catch { /* ignore */ }
+    }
     connect()
     setTimeout(() => {
       signalingRef.current?.createRoom({

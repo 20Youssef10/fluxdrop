@@ -13,6 +13,7 @@ import { ShortcutsHint } from '@/components/fluxdrop/shortcuts-hint'
 import { FullPageDropZone } from '@/components/fluxdrop/full-page-drop-zone'
 import { HelpDialog } from '@/components/fluxdrop/help-dialog'
 import { TransferAnnouncer } from '@/components/fluxdrop/transfer-announcer'
+import { OnboardingTour } from '@/components/fluxdrop/onboarding-tour'
 import { useFluxDrop } from '@/hooks/fluxdrop/use-fluxdrop'
 import { useKeyboardShortcuts } from '@/hooks/fluxdrop/use-keyboard-shortcuts'
 import { useSessionStore } from '@/stores/session-store'
@@ -175,6 +176,7 @@ export default function Home() {
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
       <HelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
       <TransferAnnouncer />
+      <OnboardingTour />
     </div>
   )
 }

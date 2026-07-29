@@ -7,6 +7,7 @@ import { Card } from '@/components/ui/card'
 import { formatBytes, validateFiles, fileTypeCategory } from '@/lib/fluxdrop/format'
 import { CONSTANTS } from '@/lib/fluxdrop/protocol'
 import { FileIcon, getFileCategoryColors } from './file-icon'
+import { FilePreview } from './file-preview'
 
 interface FilePickerProps {
   files: File[]
@@ -205,11 +206,16 @@ function FileRow({ file, onRemove }: { file: File; onRemove: () => void }) {
   const relPath = (file as any).webkitRelativePath as string | undefined
   const displayName = relPath && relPath.includes('/') ? relPath : file.name
   const colors = getFileCategoryColors(file.type, file.name)
+  const isImage = fileTypeCategory(file.type, file.name) === 'image'
   return (
     <div className="group flex items-center gap-3 rounded-lg border border-border/50 bg-card/60 p-3 transition-colors hover:bg-card hover:border-flux-500/30">
-      <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md ${colors.bg} ${colors.text} transition-colors`}>
-        <FileIcon mime={file.type} name={file.name} className="h-4 w-4" />
-      </div>
+      {isImage ? (
+        <FilePreview file={file} size={36} className="shrink-0 ring-1 ring-border/50" />
+      ) : (
+        <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md ${colors.bg} ${colors.text} transition-colors`}>
+          <FileIcon mime={file.type} name={file.name} className="h-4 w-4" />
+        </div>
+      )}
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-medium" title={displayName}>{displayName}</p>
         <p className="text-xs text-muted-foreground">
