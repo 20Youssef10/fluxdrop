@@ -89,9 +89,8 @@ export function summarizeManifest(manifest: TransferManifest): ManifestSummary {
   }
 }
 
-// Convert a transfer manifest into a flat ordered byte range so we can chunk it
-// uniformly across multiple files. Returns the cumulative byte offsets per file
-// so the sender knows which slice of which file maps to chunk index N.
+// === Slice plan: maps global byte offsets to file boundaries ===
+
 export interface FileSlicePlan {
   fileIndex: number
   file: FileManifestEntry
@@ -109,20 +108,52 @@ export function buildSlicePlan(manifest: TransferManifest): FileSlicePlan[] {
   return plan
 }
 
-// Given a global chunk index, resolve which file + local offset it belongs to.
+/**
+ * A segment of a single file that contributes to a chunk.
+ */
+export interface ChunkSegment {
+  fileIndex: number
+  localStart: number
+  localEnd: number
+  length: number
+}
+
+/**
+ * Given a global chunk index, resolve ALL file segments that compose it.
+ * A chunk can span multiple files — e.g., if file 1 ends at byte 100,000
+ * and chunk size is 65,536, chunk 2 (bytes 131,072-196,608) spans into
+ * file 2 if file 1 is only 100,000 bytes.
+ *
+ * Returns null if the chunk is beyond the total data.
+ */
 export function resolveChunk(
   plan: FileSlicePlan[],
   chunkIndex: number,
   chunkSize: number
-): { fileIndex: number; localStart: number; localEnd: number; length: number } | null {
+): { segments: ChunkSegment[]; totalLength: number } | null {
   const globalStart = chunkIndex * chunkSize
+  const globalEnd = globalStart + chunkSize
+  const segments: ChunkSegment[] = []
+  let totalLength = 0
+
   for (const seg of plan) {
-    if (globalStart >= seg.startByte && globalStart < seg.endByte) {
-      const localStart = globalStart - seg.startByte
-      const remaining = seg.endByte - globalStart
-      const length = Math.min(chunkSize, remaining)
-      return { fileIndex: seg.fileIndex, localStart, localEnd: localStart + length, length }
+    // Check if this file segment overlaps with the chunk's global range.
+    if (seg.endByte <= globalStart) continue  // File is entirely before the chunk
+    if (seg.startByte >= globalEnd) break      // File is entirely after the chunk
+
+    // Calculate the overlap.
+    const overlapStart = Math.max(globalStart, seg.startByte)
+    const overlapEnd = Math.min(globalEnd, seg.endByte)
+    const localStart = overlapStart - seg.startByte
+    const localEnd = overlapEnd - seg.startByte
+    const length = overlapEnd - overlapStart
+
+    if (length > 0) {
+      segments.push({ fileIndex: seg.fileIndex, localStart, localEnd, length })
+      totalLength += length
     }
   }
-  return null
+
+  if (segments.length === 0) return null
+  return { segments, totalLength }
 }

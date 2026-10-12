@@ -36,12 +36,56 @@ const rooms = new Map<string, Room>()
 const socketToRoom = new Map<string, string>()   // socketId -> roomId
 const socketToDevice = new Map<string, string>() // socketId -> deviceId
 
+// Rate limiting: track failed PIN attempts per socket
+const pinAttempts = new Map<string, { count: number; lockedUntil: number }>()
+const MAX_PIN_ATTEMPTS = 5
+const PIN_LOCKOUT_MS = 60 * 1000 // 1 minute lockout after 5 failures
+
+/** Check if a socket is rate-limited for PIN attempts. */
+function isRateLimited(socketId: string): boolean {
+  const entry = pinAttempts.get(socketId)
+  if (!entry) return false
+  if (entry.lockedUntil > Date.now()) return true
+  if (entry.lockedUntil <= Date.now()) {
+    pinAttempts.delete(socketId) // Reset after lockout expires
+  }
+  return false
+}
+
+/** Record a failed PIN attempt. */
+function recordFailedPin(socketId: string): void {
+  const entry = pinAttempts.get(socketId) ?? { count: 0, lockedUntil: 0 }
+  entry.count++
+  if (entry.count >= MAX_PIN_ATTEMPTS) {
+    entry.lockedUntil = Date.now() + PIN_LOCKOUT_MS
+  }
+  pinAttempts.set(socketId, entry)
+}
+
+/** Verify that a socket is a member of the room before relaying events. */
+function verifyMembership(socketId: string, roomId: string): boolean {
+  const mappedRoom = socketToRoom.get(socketId)
+  if (!mappedRoom || mappedRoom !== roomId) return false
+  const room = rooms.get(roomId)
+  if (!room) return false
+  const deviceId = socketToDevice.get(socketId)
+  if (!deviceId || !room.devices.has(deviceId)) return false
+  return true
+}
+
 // --- Utilities ---
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' // no ambiguous chars
+
+/**
+ * Cryptographically secure random code generator.
+ * Uses crypto.getRandomValues instead of Math.random for security.
+ */
 function randomCode(len: number): string {
+  const buf = new Uint8Array(len)
+  crypto.getRandomValues(buf)
   let out = ''
   for (let i = 0; i < len; i++) {
-    out += ALPHABET[Math.floor(Math.random() * ALPHABET.length)]
+    out += ALPHABET[buf[i] % ALPHABET.length]
   }
   return out
 }
@@ -51,8 +95,10 @@ function generateRoomId(): string {
   return id
 }
 function generatePin(): string {
+  const buf = new Uint8Array(PIN_LENGTH)
+  crypto.getRandomValues(buf)
   let pin = ''
-  for (let i = 0; i < PIN_LENGTH; i++) pin += Math.floor(Math.random() * 10).toString()
+  for (let i = 0; i < PIN_LENGTH; i++) pin += (buf[i] % 10).toString()
   return pin
 }
 
@@ -176,9 +222,15 @@ io.on('connection', (socket) => {
         socket.emit('signaling-error', { code: 'ROOM_FULL', message: 'room already has 2 devices' })
         return
       }
+      // Rate limit check
+      if (isRateLimited(socket.id)) {
+        socket.emit('signaling-error', { code: 'RATE_LIMITED', message: 'Too many failed attempts. Try again in 1 minute.' })
+        return
+      }
       // PIN check
       if (room.pin) {
         if (payload.pin !== room.pin) {
+          recordFailedPin(socket.id)
           socket.emit('signaling-error', { code: 'INVALID_PIN', message: 'incorrect PIN' })
           return
         }
@@ -215,6 +267,7 @@ io.on('connection', (socket) => {
 
   // === Pairing handshake ===
   socket.on('pairing-request', (payload: { roomId: string; from: string; to: string; transferSummary?: { fileCount: number; totalSize: number; totalName: string } }) => {
+    if (!verifyMembership(socket.id, payload.roomId)) return socket.emit('signaling-error', { code: 'NOT_MEMBER', message: 'not a room member' })
     const room = rooms.get(payload.roomId)
     if (!room) return socket.emit('signaling-error', { code: 'ROOM_NOT_FOUND', message: 'room gone' })
     touchRoom(room)
@@ -223,6 +276,7 @@ io.on('connection', (socket) => {
   })
 
   socket.on('pairing-confirm', (payload: { roomId: string; from: string; to: string; accepted: boolean }) => {
+    if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
     touchRoom(room)
@@ -231,6 +285,7 @@ io.on('connection', (socket) => {
   })
 
   socket.on('pairing-reject', (payload: { roomId: string; from: string; to: string; reason?: string }) => {
+    if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
     socket.to(room.id).emit('pairing-reject', payload)
@@ -238,6 +293,7 @@ io.on('connection', (socket) => {
 
   // === WebRTC signaling relay (offer / answer / ICE) ===
   socket.on('webrtc-offer', (payload: { roomId: string; from: string; to: string; sdp: RTCSessionDescriptionInit }) => {
+    if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
     touchRoom(room)
@@ -245,6 +301,7 @@ io.on('connection', (socket) => {
   })
 
   socket.on('webrtc-answer', (payload: { roomId: string; from: string; to: string; sdp: RTCSessionDescriptionInit }) => {
+    if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
     touchRoom(room)
@@ -252,6 +309,7 @@ io.on('connection', (socket) => {
   })
 
   socket.on('webrtc-ice', (payload: { roomId: string; from: string; to: string; candidate: RTCIceCandidateInit }) => {
+    if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
     socket.to(room.id).emit('webrtc-ice', payload)
@@ -259,6 +317,7 @@ io.on('connection', (socket) => {
 
   // === Transfer lifecycle coordination (metadata only — no file data) ===
   socket.on('transfer-manifest', (payload: { roomId: string; from: string; to: string; manifest: any }) => {
+    if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
     touchRoom(room)
@@ -268,12 +327,14 @@ io.on('connection', (socket) => {
   })
 
   socket.on('transfer-accepted', (payload: { roomId: string; from: string; to: string; accepted: boolean; reason?: string }) => {
+    if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
     socket.to(room.id).emit('transfer-accepted', payload)
   })
 
   socket.on('transfer-complete', (payload: { roomId: string; from: string; to: string }) => {
+    if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
     touchRoom(room)
@@ -283,6 +344,7 @@ io.on('connection', (socket) => {
   })
 
   socket.on('transfer-cancel', (payload: { roomId: string; from: string; to: string; reason?: string }) => {
+    if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
     room.transferActive = false
@@ -291,12 +353,14 @@ io.on('connection', (socket) => {
 
   // === Resume coordination ===
   socket.on('resume-request', (payload: { roomId: string; from: string; to: string; transferId: string; lastChunkIndex: number }) => {
+    if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
     socket.to(room.id).emit('resume-request', payload)
   })
 
   socket.on('resume-response', (payload: { roomId: string; from: string; to: string; transferId: string; accepted: boolean; fromChunkIndex?: number }) => {
+    if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
     socket.to(room.id).emit('resume-response', payload)
@@ -338,6 +402,7 @@ function handleDisconnect(socket: any) {
   }
   socketToRoom.delete(socket.id)
   socketToDevice.delete(socket.id)
+  pinAttempts.delete(socket.id) // Clean up rate limiting state
 }
 
 httpServer.listen(PORT, () => {

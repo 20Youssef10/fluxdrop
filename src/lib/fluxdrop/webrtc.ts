@@ -186,9 +186,7 @@ export class FluxDropWebRTC {
   // === Backpressure-aware chunk sending ===
   canSend(): boolean {
     if (!this.channel) return false
-    // Use a conservative threshold: only send when buffer is below 2 MB.
-    // The SCTP send queue has its own internal limit (~256 messages),
-    // so we need to stay well below it to avoid "send queue is full".
+    // Only send when buffer is below the 8 MB target threshold.
     return this.channel.bufferedAmount < CONSTANTS.TARGET_BUFFERED_BYTES
   }
 
@@ -247,27 +245,27 @@ export class FluxDropWebRTC {
       return true
     } catch (err: any) {
       const errMsg = err.message || ''
-      // "send queue is full", "Failure to send data", buffer overflow —
-      // these are transient errors. Return false so the sender loop calls
-      // waitForDrain() and retries.
-      if (
-        errMsg.includes('send queue') ||
-        errMsg.includes('Failure to send') ||
-        errMsg.includes('buffer') ||
-        errMsg.includes('send')
-      ) {
-        console.warn(`[FluxDrop] Send failed for chunk ${chunkIndex}, will retry after drain: ${errMsg}`)
-        return false
-      }
-      // Max-message-size error — surface a clear message.
+      // Check max-message-size FIRST — Chrome's error message contains "send"
+      // ("Failed to execute 'send' on RTCDataChannel"), so the generic "send"
+      // check would swallow the real cause.
       if (errMsg.includes('max-message-size') || errMsg.includes('larger than')) {
         this.config.onError(new Error(
           `Chunk ${chunkIndex} (${msg.byteLength} bytes) exceeds max-message-size. ` +
           `Current CHUNK_SIZE: ${CONSTANTS.CHUNK_SIZE} bytes.`
         ))
-      } else {
-        console.warn(`[FluxDrop] Failed to send chunk ${chunkIndex}: ${errMsg}`)
+        return false
       }
+      // "send queue is full", "Failure to send data" — transient, retry after drain.
+      if (
+        errMsg.includes('send queue') ||
+        errMsg.includes('Failure to send') ||
+        errMsg.includes('buffer')
+      ) {
+        console.warn(`[FluxDrop] Send failed for chunk ${chunkIndex}, will retry after drain: ${errMsg}`)
+        return false
+      }
+      // Unknown error — log but don't spam the error log.
+      console.warn(`[FluxDrop] Failed to send chunk ${chunkIndex}: ${errMsg}`)
       return false
     }
   }

@@ -528,10 +528,14 @@ export function useFluxDrop() {
         webrtcRef.current?.sendChunkAck(m.transferId, msg.chunkIndex, true)
         const bytes = msg.payload.byteLength
         transferRef.current.ackChunk(bytes)
+        // Update per-file progress for ALL files this chunk spans.
         const resolved = resolveChunk(slicePlanRef.current, msg.chunkIndex, m.chunkSize)
-        if (resolved) transferRef.current.addFileBytes(resolved.fileIndex, bytes)
+        if (resolved) {
+          for (const seg of resolved.segments) {
+            transferRef.current.addFileBytes(seg.fileIndex, seg.length)
+          }
+        }
         // Track ack in memory (fast). IndexedDB flush is debounced.
-        // Don't await — fire and forget so we don't block the receive loop.
         void markChunkAcked(m.transferId, msg.chunkIndex)
         if (msg.chunkIndex === m.totalChunks - 1) {
           await finishReceiverTransfer()
@@ -541,7 +545,7 @@ export function useFluxDrop() {
       case MessageType.CHUNK_ACK: {
         if (!m) return
         const resolved = resolveChunk(slicePlanRef.current, msg.chunkIndex, m.chunkSize)
-        const bytes = resolved?.length ?? m.chunkSize
+        const bytes = resolved?.totalLength ?? m.chunkSize
         transferRef.current.ackChunk(bytes)
         break
       }
@@ -619,9 +623,14 @@ export function useFluxDrop() {
   }, [])
 
   // ---- Receiver: finish transfer (assemble + verify + save) ----
+  // This is called when the last chunk arrives. It assembles files, verifies
+  // checksums, saves them, and sends TRANSFER_COMPLETE_ACK to the sender.
+  // We wrap it in a promise ref so verifyReceiverTransfer can await it.
   const finishReceiverTransfer = useCallback(async () => {
     const m = manifestRef.current
     if (!m) return
+    // Create a verification promise so verifyReceiverTransfer can await it.
+    const verifyPromise = (async () => {
     transferRef.current.setTransferState('VERIFYING')
     try {
       for (let i = 0; i < m.files.length; i++) {
@@ -666,16 +675,31 @@ export function useFluxDrop() {
       toast.error('Failed to save file', { description: err.message })
       transferRef.current.setTransferState('ERROR')
       transferRef.current.setError(err.message)
+      return false
     }
+    })()
+    verificationPromiseRef.current = verifyPromise
+    await verifyPromise
   }, [])
 
   // ---- Receiver: verify final checksum ----
+  // This is called when the sender sends TRANSFER_COMPLETE.
+  // It must WAIT for finishReceiverTransfer to complete verification before
+  // sending the ack — otherwise the sender gets "verified: true" before
+  // the checksum check has finished.
+  const verificationPromiseRef = useRef<Promise<boolean> | null>(null)
+
   const verifyReceiverTransfer = useCallback(async () => {
     const m = manifestRef.current
     if (!m) return
-    const ok = checksumVerifiedRef.current ?? true
-    webrtcRef.current?.sendTransferCompleteAck(m.transferId, ok)
-    if (ok) transferRef.current.setTransferState('COMPLETE')
+    // Wait for the receiver's finishReceiverTransfer to complete.
+    // finishReceiverTransfer sets checksumVerifiedRef and sends the ack itself,
+    // so we don't need to send it again here. But if finishReceiverTransfer
+    // hasn't been called yet (race condition), we need to wait.
+    if (verificationPromiseRef.current) {
+      await verificationPromiseRef.current
+    }
+    // finishReceiverTransfer already sent the ack — nothing more to do.
   }, [])
 
   // ---- Sender: begin streaming chunks ----
@@ -693,18 +717,44 @@ export function useFluxDrop() {
 
     try {
       // Pipelined send loop: read the next chunk while sending the current one.
-      // This eliminates the "speed goes 0 between chunks" problem where
-      // await slice.arrayBuffer() creates gaps between sends.
+      // Each chunk may span multiple files (e.g., chunk N contains the end of
+      // file 1 and the start of file 2), so we compose the chunk from segments.
+
+      /**
+       * Read and compose a chunk from potentially multiple file segments.
+       */
+      const readChunk = async (chunkIndex: number): Promise<ArrayBuffer | null> => {
+        const resolved = resolveChunk(plan, chunkIndex, m.chunkSize)
+        if (!resolved || resolved.segments.length === 0) return null
+
+        // Single-segment chunk (common case — chunk fits in one file).
+        if (resolved.segments.length === 1) {
+          const seg = resolved.segments[0]
+          const file = files[seg.fileIndex]
+          if (!file) return null
+          return await file.slice(seg.localStart, seg.localEnd).arrayBuffer()
+        }
+
+        // Multi-segment chunk (chunk spans a file boundary).
+        // Concatenate bytes from each segment to compose the full chunk.
+        const parts: ArrayBuffer[] = []
+        for (const seg of resolved.segments) {
+          const file = files[seg.fileIndex]
+          if (!file) return null
+          parts.push(await file.slice(seg.localStart, seg.localEnd).arrayBuffer())
+        }
+        // Concatenate the parts into one buffer.
+        const combined = new Uint8Array(resolved.totalLength)
+        let offset = 0
+        for (const part of parts) {
+          combined.set(new Uint8Array(part), offset)
+          offset += part.byteLength
+        }
+        return combined.buffer
+      }
 
       // Pre-read the first chunk.
-      let nextResolved = resolveChunk(plan, resumeFrom, m.chunkSize)
-      let nextBuf: ArrayBuffer | null = null
-      if (nextResolved) {
-        const file = files[nextResolved.fileIndex]
-        if (file) {
-          nextBuf = await file.slice(nextResolved.localStart, nextResolved.localEnd).arrayBuffer()
-        }
-      }
+      let nextBuf: ArrayBuffer | null = await readChunk(resumeFrom)
 
       for (let i = resumeFrom; i < m.totalChunks; i++) {
         if (!rtc.isOpen) {
@@ -730,16 +780,7 @@ export function useFluxDrop() {
         if (!buf) { continue }
 
         // Pre-read the NEXT chunk while we send the current one.
-        // This is the key to keeping the pipeline full — no gaps between chunks.
-        const nextI = i + 1
-        const readNext = (async () => {
-          if (nextI >= m.totalChunks) return null
-          const r = resolveChunk(plan, nextI, m.chunkSize)
-          if (!r) return null
-          const f = files[r.fileIndex]
-          if (!f) return null
-          return await f.slice(r.localStart, r.localEnd).arrayBuffer()
-        })()
+        const readNext = readChunk(i + 1)
 
         // Backpressure: wait if buffer is full.
         if (!rtc.canSend()) await rtc.waitForDrain()
@@ -763,8 +804,7 @@ export function useFluxDrop() {
           }
         }
 
-        // Wait for the pre-read to complete (it's probably already done
-        // since we were sending while it was reading).
+        // Wait for the pre-read to complete.
         nextBuf = await readNext
 
         // Yield to event loop periodically so UI can update.
