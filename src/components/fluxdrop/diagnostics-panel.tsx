@@ -11,6 +11,7 @@ import {
   Clock,
   Server,
   Cpu,
+  Wifi,
 } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -41,6 +42,13 @@ export function DiagnosticsPanel() {
   const rtt = pair?.currentRoundTripTime != null ? (pair.currentRoundTripTime * 1000).toFixed(0) : null
   const quality = deriveQuality(diagnostics)
 
+  // Detect direct LAN connection (both candidates are "host" type = same local network)
+  const isDirectLAN =
+    pair?.localCandidateType === 'host' && pair?.remoteCandidateType === 'host'
+  // Detect TURN relay (traffic goes through a relay server = uses internet)
+  const isRelayed =
+    pair?.localCandidateType === 'relay' || pair?.remoteCandidateType === 'relay'
+
   return (
     <Card className="flux-hover-border flux-glass overflow-hidden">
       <button
@@ -68,9 +76,23 @@ export function DiagnosticsPanel() {
             </div>
           )}
           {pair && (
-            <Badge variant="outline" className="text-[10px] border-flux-500/40 bg-flux-500/10 text-flux-700 dark:text-flux-300">
-              {pair.localCandidateType ?? '?'} → {pair.remoteCandidateType ?? '?'}
-            </Badge>
+            <>
+              {/* LAN / relay indicator */}
+              {isDirectLAN && (
+                <Badge variant="outline" className="text-[10px] border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" title="Direct local network connection — no internet data used for file transfer">
+                  <Wifi className="mr-1 h-3 w-3" />
+                  Direct LAN
+                </Badge>
+              )}
+              {isRelayed && (
+                <Badge variant="outline" className="text-[10px] border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400" title="Traffic relayed through TURN server — uses internet data">
+                  Relay
+                </Badge>
+              )}
+              <Badge variant="outline" className="text-[10px] border-flux-500/40 bg-flux-500/10 text-flux-700 dark:text-flux-300">
+                {pair.localCandidateType ?? '?'} → {pair.remoteCandidateType ?? '?'}
+              </Badge>
+            </>
           )}
           <motion.div animate={{ rotate: open ? 180 : 0 }} transition={{ duration: 0.2 }}>
             <ChevronDown className="h-4 w-4 text-muted-foreground" />
@@ -155,6 +177,29 @@ export function DiagnosticsPanel() {
                   <span><code className="text-flux-600 dark:text-flux-400">relay</code> — via TURN server</span>
                 </div>
               </div>
+
+              {/* Data usage note */}
+              {isDirectLAN ? (
+                <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3 text-[11px] text-emerald-600 dark:text-emerald-400 flex items-start gap-2">
+                  <Wifi className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-medium">Direct LAN connection</p>
+                    <p className="text-muted-foreground mt-0.5">
+                      File data flows directly over your local network. No internet data is used for the transfer — only a few KB for initial signaling.
+                    </p>
+                  </div>
+                </div>
+              ) : isRelayed ? (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-[11px] text-amber-600 dark:text-amber-400 flex items-start gap-2">
+                  <Globe className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-medium">Relayed connection</p>
+                    <p className="text-muted-foreground mt-0.5">
+                      Traffic is relayed through a TURN server. This uses internet data for the file transfer. Still encrypted (DTLS).
+                    </p>
+                  </div>
+                </div>
+              ) : null}
             </div>
           </motion.div>
         )}

@@ -38,6 +38,10 @@ const FAQS = [
     a: 'Yes, in most cases. WebRTC uses STUN servers to discover your public IP and traverse NATs. This works for most home and mobile networks. However, some corporate firewalls block UDP traffic entirely — in those cases, you can configure a custom TURN server in Settings → Network, which relays traffic (still encrypted) when direct P2P fails.',
   },
   {
+    q: 'Does it use internet data if both devices are on the same LAN?',
+    a: 'No — the file transfer is 100% local. WebRTC detects "host" candidates (your LAN IP like 192.168.x.x) and establishes a direct local connection. File bytes never leave your network. Only a few KB of internet data is used for the initial signaling (room setup, SDP/ICE exchange via the signaling server) and STUN queries (~1-2 KB each). Once the DataChannel opens, all data flows over your LAN. Check the Diagnostics panel (⌘K) — it shows a green "Direct LAN" badge when this is the case.',
+  },
+  {
     q: 'What happens if the transfer is interrupted?',
     a: 'FluxDrop persists transfer state in your browser\'s IndexedDB. If a transfer is interrupted (network drop, tab close, device sleep), the receiver stores received chunks locally. The sender can resume from the last acknowledged chunk rather than restarting. Look for the resume button (↻) on incomplete transfers in your transfer history.',
   },

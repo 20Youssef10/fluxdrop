@@ -1038,3 +1038,34 @@ The `hashFile()` function blocked the main thread when hashing large files:
 - **E2E test with 1MB file**: ✅ Hashing progress shown (`hasHashing: true`), completed successfully, transitioned to PAIRING state.
 - **No console errors**.
 - **UI stays responsive** during hashing (yield-to-event-loop working).
+
+---
+
+Task ID: 16
+Agent: direct review
+Task: Answer "Does it consume data/Internet if both devices are on the same LAN?" + add LAN connection indicator.
+
+## Answer
+
+**No** — when both devices are on the same LAN, the file transfer is 100% local. Only a few KB of internet data is used for initial signaling (room setup, SDP/ICE exchange) and STUN queries (~1-2 KB each). Once the WebRTC DataChannel opens with "host" candidates, all file bytes flow directly over the local network.
+
+## Features Added (3)
+
+### 1. Direct LAN connection indicator (`diagnostics-panel.tsx`)
+- Detects when both local and remote candidate types are "host" (same LAN).
+- Shows a green "Direct LAN" badge with Wifi icon in the diagnostics panel header.
+- Shows a "Relay" badge (amber) when traffic goes through a TURN server.
+- Tooltips explain what each badge means.
+
+### 2. Data usage explanation in expanded diagnostics
+- When Direct LAN: green info box — "File data flows directly over your local network. No internet data is used for the transfer — only a few KB for initial signaling."
+- When Relayed: amber info box — "Traffic is relayed through a TURN server. This uses internet data for the file transfer. Still encrypted (DTLS)."
+
+### 3. New FAQ in Help dialog (`help-dialog.tsx`)
+- Added "Does it use internet data if both devices are on the same LAN?" question.
+- Explains host candidates, LAN connection, signaling data usage (~few KB), and how to verify via the Diagnostics panel (⌘K).
+
+## Verification
+- **Lint: clean (0 errors, 0 warnings)**
+- **FAQ visible** in Help dialog: "Does it use internet data if both devices are on the same LAN?"
+- **No console errors**.
