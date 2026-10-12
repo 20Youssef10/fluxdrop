@@ -70,12 +70,20 @@ export const TRANSFER_ID_BYTES = 4
 
 // === Tunables ===
 export const CONSTANTS = {
-  // Chunk size: 256 KB is the safe maximum across ALL modern browsers.
-  // Chrome/Firefox support up to 1 MB+ without renegotiation, but Safari
-  // caps at ~256 KB. 256 KB + 9-byte header = 262,153 bytes.
-  // For a 1.5 GB file: 6,144 chunks (vs 24,576 at 64 KB) — 4x fewer messages.
-  // This is the single biggest throughput lever — fewer chunks = less overhead.
-  CHUNK_SIZE: 256 * 1024,                       // 256 KB (max safe for all browsers)
+  // Chunk size: 16 KB + 9-byte header = 16,393 bytes.
+  // The WebRTC spec DEFAULT max message size is 64 KB, but some browsers
+  // (especially in certain network configs) enforce 16 KB or even lower.
+  // 16 KB is the ONLY size guaranteed to work on EVERY browser without
+  // any SDP renegotiation.
+  //
+  // To compensate for the smaller chunk, we use:
+  // - Higher buffer targets (32 MB) for more in-flight data
+  // - Non-blocking receiver (no IDB write per chunk)
+  // - Fire-and-forget ack tracking
+  // - 500ms drain timeout
+  //
+  // Throughput is maintained via aggressive buffering, not chunk size.
+  CHUNK_SIZE: 16 * 1024,                        // 16 KB (guaranteed safe on ALL browsers)
   MAX_BUFFERED_BYTES: 32 * 1024 * 1024,        // 32 MB backpressure threshold
   TARGET_BUFFERED_BYTES: 8 * 1024 * 1024,      // 8 MB target (higher = more throughput)
   MAX_FILE_SIZE: 10 * 1024 * 1024 * 1024,      // 10 GB

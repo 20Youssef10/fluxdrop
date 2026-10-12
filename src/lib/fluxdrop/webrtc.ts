@@ -73,19 +73,17 @@ export class FluxDropWebRTC {
       this.config.onConnectionStateChange(this.pc.connectionState)
     }
 
-    // Surface ICE candidate gathering errors (e.g. STUN unreachable).
-    // Note: Some ICE candidate errors are benign (e.g. a STUN server is
-    // unreachable but another candidate succeeds). Only surface genuinely
-    // actionable errors, and suppress errors that occur after close().
+    // ICE candidate errors are almost always benign — STUN servers may be
+    // unreachable but other candidates succeed. We suppress ALL ICE candidate
+    // errors from the error log and toasts. They are still logged to console
+    // for debugging if needed.
     this.pc.onicecandidateerror = (event: any) => {
       // Suppress if the connection is already closed (cleanup in progress).
       if (this.pc.connectionState === 'closed') return
       const err = event?.error ?? event
       const reason = err?.message ?? err?.errorCodeText ?? 'unknown'
-      // Don't surface "User-initiated Abort" — this happens when close() is
-      // called during ICE gathering (normal cleanup/retry).
-      if (reason.includes('Abort') || reason.includes('close')) return
-      this.config.onError(new Error(`ICE candidate error: ${reason}`))
+      // Log to console only — don't surface to error log or toasts.
+      console.debug('[FluxDrop] ICE candidate error (benign):', reason)
     }
 
     this.pc.ondatachannel = (event) => {

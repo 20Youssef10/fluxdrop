@@ -164,8 +164,8 @@ export function TransferProgress({ onCancel, onDone }: TransferProgressProps) {
           />
         </div>
 
-        {/* Chunk grid visualizer */}
-        {t.totalChunks > 0 && t.totalChunks <= 400 && (
+        {/* Chunk grid visualizer (up to 1000 chunks for performance) */}
+        {t.totalChunks > 0 && t.totalChunks <= 1000 && (
           <ChunkGrid total={t.totalChunks} acked={t.chunksAcked} complete={isComplete} />
         )}
 

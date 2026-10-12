@@ -395,9 +395,7 @@ export function useFluxDrop() {
         onError: (err) => {
           // Log all WebRTC errors for diagnostics.
           console.warn('[FluxDrop] WebRTC error:', err.message)
-          // Add to persistent error log (doesn't disappear like toasts)
-          transferRef.current.addErrorLog({ message: err.message })
-          // Only show a toast for critical errors, not benign ICE candidate failures.
+          // Determine if this is a benign error that shouldn't clutter the UI.
           const msg = err.message.toLowerCase()
           const isBenign =
             msg.includes('ice candidate') ||
@@ -405,7 +403,9 @@ export function useFluxDrop() {
             msg.includes('close') ||
             msg.includes('stun') ||
             msg.includes('gather')
+          // Only add to error log and show toast for critical errors.
           if (!isBenign) {
+            transferRef.current.addErrorLog({ message: err.message })
             toast.error('WebRTC error', { description: err.message, duration: 10000 })
           }
         },
@@ -470,9 +470,7 @@ export function useFluxDrop() {
         onError: (err) => {
           // Log all WebRTC errors for diagnostics.
           console.warn('[FluxDrop] WebRTC error:', err.message)
-          // Add to persistent error log (doesn't disappear like toasts)
-          transferRef.current.addErrorLog({ message: err.message })
-          // Only show a toast for critical errors, not benign ICE candidate failures.
+          // Determine if this is a benign error that shouldn't clutter the UI.
           const msg = err.message.toLowerCase()
           const isBenign =
             msg.includes('ice candidate') ||
@@ -480,7 +478,9 @@ export function useFluxDrop() {
             msg.includes('close') ||
             msg.includes('stun') ||
             msg.includes('gather')
+          // Only add to error log and show toast for critical errors.
           if (!isBenign) {
+            transferRef.current.addErrorLog({ message: err.message })
             toast.error('WebRTC error', { description: err.message, duration: 10000 })
           }
         },
