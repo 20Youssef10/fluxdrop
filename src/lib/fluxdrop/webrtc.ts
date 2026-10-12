@@ -466,6 +466,16 @@ export class FluxDropWebRTC {
     this.sendControl(MessageType.RESUME_RESPONSE, transferId, fromChunkIndex, { accepted, fromChunkIndex })
   }
 
+  /** Ask the peer to pause streaming (flow control). Uses the PAUSE opcode. */
+  sendPause(transferId: string): void {
+    this.sendControl(MessageType.PAUSE, transferId, 0, { paused: true })
+  }
+
+  /** Tell the peer to continue streaming. Uses the RESUME_STREAM opcode. */
+  sendResumeStream(transferId: string): void {
+    this.sendControl(MessageType.RESUME_STREAM, transferId, 0, { paused: false })
+  }
+
   get bufferedAmount(): number {
     return this.channel?.bufferedAmount ?? 0
   }

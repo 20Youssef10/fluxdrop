@@ -40,6 +40,7 @@ export type TransferState =
   | 'RETRYING'
   | 'MANIFEST_EXCHANGE'
   | 'TRANSFERRING'
+  | 'PAUSED'
   | 'RESUMING'
   | 'VERIFYING'
   | 'COMPLETE'

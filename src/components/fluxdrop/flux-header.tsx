@@ -1,7 +1,7 @@
 'use client'
 
 import { useTheme } from 'next-themes'
-import { Moon, Sun, Settings, Wifi, WifiOff, Plus, Trash2, Server, User, Shield, HelpCircle } from 'lucide-react'
+import { Moon, Sun, Settings, Wifi, WifiOff, Plus, Trash2, Server, User, Shield, HelpCircle, Bell, Volume2, BellOff, VolumeX } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -19,6 +19,7 @@ import { Switch } from '@/components/ui/switch'
 import { Separator } from '@/components/ui/separator'
 import { useState, useEffect } from 'react'
 import { useSessionStore, type IceServerConfig } from '@/stores/session-store'
+import { setSoundEnabled, unlockAudio } from '@/lib/fluxdrop/sound'
 import { FluxLogo, FluxWordmark } from './flux-logo'
 
 export function FluxHeader({ onOpenSettings, onOpenHelp }: { onOpenSettings?: () => void; onOpenHelp?: () => void }) {
@@ -150,6 +151,11 @@ export function SettingsDialog({
   const useCustomIce = useSessionStore((s) => s.useCustomIce)
   const setCustomIceServers = useSessionStore((s) => s.setCustomIceServers)
   const setUseCustomIce = useSessionStore((s) => s.setUseCustomIce)
+  const soundEnabled = useSessionStore((s) => s.soundEnabled)
+  const setSoundPref = useSessionStore((s) => s.setSoundEnabled)
+  const notificationsEnabled = useSessionStore((s) => s.notificationsEnabled)
+  const setNotificationsPref = useSessionStore((s) => s.setNotificationsEnabled)
+  const [notifPermission, setNotifPermission] = useState<NotificationPermission | 'unsupported'>('default')
 
   const [draft, setDraft] = useState(alias)
   const [iceDraft, setIceDraft] = useState<IceServerConfig[]>([])
@@ -166,6 +172,11 @@ export function SettingsDialog({
         : [{ urls: 'stun:stun.l.google.com:19302' }]
     )
     setUseIceDraft(useCustomIce)
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      setNotifPermission(Notification.permission)
+    } else {
+      setNotifPermission('unsupported')
+    }
   }, [open, alias, customIceServers, useCustomIce])
 
   const save = () => {
@@ -185,6 +196,21 @@ export function SettingsDialog({
     setIceDraft(iceDraft.map((s, i) => (i === idx ? { ...s, [field]: value } : s)))
   }
 
+  // Alert prefs apply instantly (no Save needed) for immediate feedback.
+  const handleSoundToggle = (v: boolean) => {
+    setSoundEnabled(v) // persist to the sound module first (sync)
+    setSoundPref(v) // then mirror in the store
+    if (v) unlockAudio()
+  }
+  const handleNotifToggle = (v: boolean) => {
+    setNotificationsPref(v)
+    if (v && typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'default') {
+      void Notification.requestPermission().then((result) => {
+        setNotifPermission(result)
+      })
+    }
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
@@ -195,7 +221,7 @@ export function SettingsDialog({
           </DialogDescription>
         </DialogHeader>
         <Tabs defaultValue="device" className="w-full">
-          <TabsList className="grid w-full grid-cols-3">
+          <TabsList className="grid w-full grid-cols-4">
             <TabsTrigger value="device" className="text-xs">
               <User className="mr-1.5 h-3.5 w-3.5" />
               Device
@@ -203,6 +229,10 @@ export function SettingsDialog({
             <TabsTrigger value="network" className="text-xs">
               <Server className="mr-1.5 h-3.5 w-3.5" />
               Network
+            </TabsTrigger>
+            <TabsTrigger value="alerts" className="text-xs">
+              <Bell className="mr-1.5 h-3.5 w-3.5" />
+              Alerts
             </TabsTrigger>
             <TabsTrigger value="privacy" className="text-xs">
               <Shield className="mr-1.5 h-3.5 w-3.5" />
@@ -308,6 +338,61 @@ export function SettingsDialog({
                 <span>Using public Google + Cloudflare STUN servers. Sufficient for most home/mobile networks.</span>
               </div>
             )}
+          </TabsContent>
+
+          {/* Alerts tab */}
+          <TabsContent value="alerts" className="space-y-4 mt-4">
+            <div className="flex items-center justify-between rounded-lg border border-border/60 p-3">
+              <div className="flex items-center gap-3 pr-3">
+                <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${soundEnabled ? 'bg-flux-500/10 text-flux-600 dark:text-flux-400' : 'bg-muted text-muted-foreground'}`}>
+                  {soundEnabled ? <Volume2 className="h-4.5 w-4.5" /> : <VolumeX className="h-4.5 w-4.5" />}
+                </div>
+                <div>
+                  <p className="text-sm font-medium">Sound effects</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Subtle chime when a transfer completes, pauses, or fails.
+                  </p>
+                </div>
+              </div>
+              <Switch checked={soundEnabled} onCheckedChange={handleSoundToggle} />
+            </div>
+
+            <div className="flex items-center justify-between rounded-lg border border-border/60 p-3">
+              <div className="flex items-center gap-3 pr-3">
+                <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${notificationsEnabled ? 'bg-flux-500/10 text-flux-600 dark:text-flux-400' : 'bg-muted text-muted-foreground'}`}>
+                  {notificationsEnabled ? <Bell className="h-4.5 w-4.5" /> : <BellOff className="h-4.5 w-4.5" />}
+                </div>
+                <div>
+                  <p className="text-sm font-medium">Desktop notifications</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Get alerted when background transfers finish.
+                  </p>
+                </div>
+              </div>
+              <Switch
+                checked={notificationsEnabled}
+                onCheckedChange={handleNotifToggle}
+                disabled={notifPermission === 'unsupported'}
+              />
+            </div>
+
+            {notifPermission === 'denied' && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5 text-[11px] text-muted-foreground">
+                <span className="font-medium text-amber-600 dark:text-amber-400">Permission blocked:</span>{' '}
+                your browser has denied notification permission for this site. Enable it in the
+                browser's site settings to receive background alerts.
+              </div>
+            )}
+            {notifPermission === 'unsupported' && (
+              <div className="rounded-lg border border-border/60 bg-muted/30 p-2.5 text-[11px] text-muted-foreground">
+                Desktop notifications are not supported in this browser.
+              </div>
+            )}
+
+            <div className="rounded-lg border border-border/60 bg-muted/30 p-3 text-xs text-muted-foreground">
+              <p className="font-medium text-foreground mb-1">Applies instantly</p>
+              <span>Alert preferences save immediately — no need to press Save below.</span>
+            </div>
           </TabsContent>
 
           {/* Privacy tab */}

@@ -17,15 +17,18 @@ interface ReceiverPanelProps {
   onCancel: () => void
   onDone: () => void
   onBack: () => void
+  onPause?: () => void
+  onResume?: () => void
 }
 
-export function ReceiverPanel({ onJoin, onCancel, onDone, onBack }: ReceiverPanelProps) {
+export function ReceiverPanel({ onJoin, onCancel, onDone, onBack, onPause, onResume }: ReceiverPanelProps) {
   const session = useSessionStore()
   const transfer = useTransferStore()
 
   const hasRoom = !!session.roomId
   const isTransferring =
     transfer.transferState === 'TRANSFERRING' ||
+    transfer.transferState === 'PAUSED' ||
     transfer.transferState === 'VERIFYING' ||
     transfer.transferState === 'MANIFEST_EXCHANGE'
   const isDone =
@@ -99,7 +102,7 @@ export function ReceiverPanel({ onJoin, onCancel, onDone, onBack }: ReceiverPane
       )}
 
       {(isTransferring || isDone) && (
-        <TransferProgress onCancel={onCancel} onDone={onDone} />
+        <TransferProgress onCancel={onCancel} onDone={onDone} onPause={onPause} onResume={onResume} />
       )}
     </div>
   )

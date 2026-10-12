@@ -25,9 +25,11 @@ interface SenderPanelProps {
   onCancel: () => void
   onDone: () => void
   onBack: () => void
+  onPause?: () => void
+  onResume?: () => void
 }
 
-export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, onBack }: SenderPanelProps) {
+export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, onBack, onPause, onResume }: SenderPanelProps) {
   const session = useSessionStore()
   const transfer = useTransferStore()
   const [showFiles, setShowFiles] = useState(false)
@@ -36,6 +38,7 @@ export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, on
   const isValidating = transfer.transferState === 'VALIDATING'
   const isTransferring =
     transfer.transferState === 'TRANSFERRING' ||
+    transfer.transferState === 'PAUSED' ||
     transfer.transferState === 'VERIFYING' ||
     transfer.transferState === 'MANIFEST_EXCHANGE'
   const isDone =
@@ -125,7 +128,7 @@ export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, on
 
       {/* Transferring / done */}
       {(isTransferring || isDone) && (
-        <TransferProgress onCancel={onCancel} onDone={onDone} />
+        <TransferProgress onCancel={onCancel} onDone={onDone} onPause={onPause} onResume={onResume} />
       )}
     </div>
   )

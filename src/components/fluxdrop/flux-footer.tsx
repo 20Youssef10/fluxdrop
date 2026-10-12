@@ -2,6 +2,7 @@
 
 import { FluxLogo, FluxWordmark } from './flux-logo'
 import { Shield, Zap, Lock } from 'lucide-react'
+import { InstallButton } from './install-button'
 
 export function FluxFooter() {
   return (
@@ -29,6 +30,7 @@ export function FluxFooter() {
               <Shield className="h-3.5 w-3.5 text-flux-500" />
               Zero storage
             </span>
+            <InstallButton />
           </div>
         </div>
 

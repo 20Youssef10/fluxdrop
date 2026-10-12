@@ -27,6 +27,7 @@ import {
 } from '@/lib/fluxdrop/resume'
 import { assembleBlob, saveBlobWithPicker, saveFilesToDirectory } from '@/lib/fluxdrop/file-io'
 import { addRecentRoom } from '@/lib/fluxdrop/recent-rooms'
+import { playSuccess, playError, playConnect, playPause, playResume } from '@/lib/fluxdrop/sound'
 import { MessageType, CONSTANTS, type TransferManifest, type TransferSummary } from '@/lib/fluxdrop/protocol'
 import { toast } from 'sonner'
 
@@ -51,6 +52,12 @@ export function useFluxDrop() {
   const speedTickerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const peerDeviceIdRef = useRef<string | null>(null)
   const checksumVerifiedRef = useRef<boolean | null>(null)
+  // Pause/Resume flow control: either side can pause the stream.
+  const pauseLocalRef = useRef<boolean>(false)
+  const pausePeerRef = useRef<boolean>(false)
+
+  const isPaused = () => pauseLocalRef.current || pausePeerRef.current
+  const clearPaused = () => { pauseLocalRef.current = false; pausePeerRef.current = false }
 
   // ---- Speed ticker ----
   useEffect(() => {
@@ -231,14 +238,16 @@ export function useFluxDrop() {
       },
       onTransferComplete: () => {
         transferRef.current.setTransferState('COMPLETE')
+        playSuccess()
         const m = manifestRef.current
         toast.success('Transfer complete!', {
           description: m
             ? `${m.files.length} file${m.files.length > 1 ? 's' : ''} · ${formatBytes(m.totalSize)} verified`
             : 'All files verified',
         })
-        // Browser notification for background tabs
-        if (typeof document !== 'undefined' && document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+        // Browser notification for background tabs (respects user preference)
+        const notifEnabled = sessionRef.current.notificationsEnabled
+        if (notifEnabled && typeof document !== 'undefined' && document.hidden && 'Notification' in window && Notification.permission === 'granted') {
           try {
             const n = new Notification('FluxDrop — Transfer complete', {
               body: m ? `${m.files.length} file${m.files.length > 1 ? 's' : ''} · ${formatBytes(m.totalSize)} verified` : 'All files verified',
@@ -252,6 +261,7 @@ export function useFluxDrop() {
       onTransferCancel: (payload) => {
         transferRef.current.setTransferState('CANCELLED')
         transferRef.current.setError(payload.reason ?? 'Transfer cancelled')
+        playError()
         toast.error('Transfer cancelled', { description: payload.reason })
       },
       onResumeRequest: (payload) => {
@@ -429,6 +439,7 @@ export function useFluxDrop() {
           sessionRef.current.setRtcState(state)
           if (state === 'connected') {
             toast.success('Peer connection established')
+            playConnect()
             startDiagnosticsPolling()
           } else if (state === 'failed') {
             handleConnectionFailure('sender')
@@ -471,7 +482,7 @@ export function useFluxDrop() {
         onDataChannelClose: () => {
           sessionRef.current.setDataChannelOpen(false)
           stopDiagnosticsPolling()
-          if (transferRef.current.transferState === 'TRANSFERRING') {
+          if (transferRef.current.transferState === 'TRANSFERRING' || transferRef.current.transferState === 'PAUSED') {
             transferRef.current.setTransferState('RESUMING')
             // Real resume: persist state and attempt ICE restart.
             void attemptResume()
@@ -538,6 +549,7 @@ export function useFluxDrop() {
           sessionRef.current.setRtcState(state)
           if (state === 'connected') {
             toast.success('Peer connection established')
+            playConnect()
             startDiagnosticsPolling()
           }
           if (state === 'failed') {
@@ -642,6 +654,7 @@ export function useFluxDrop() {
       case MessageType.TRANSFER_COMPLETE_ACK: {
         if (msg.body?.verified) {
           transferRef.current.setTransferState('COMPLETE')
+          playSuccess()
           toast.success('Transfer complete & verified!')
           signalingRef.current?.sendTransferComplete({
             roomId: sessionRef.current.roomId!,
@@ -654,7 +667,30 @@ export function useFluxDrop() {
       case MessageType.TRANSFER_CANCEL: {
         transferRef.current.setTransferState('CANCELLED')
         transferRef.current.setError(msg.body?.reason ?? 'Cancelled by peer')
+        playError()
         toast.error('Transfer cancelled', { description: msg.body?.reason })
+        break
+      }
+      case MessageType.PAUSE: {
+        // Peer requested pause — freeze the stream on both sides.
+        pausePeerRef.current = true
+        const st = transferRef.current.transferState
+        if (st === 'TRANSFERRING') {
+          transferRef.current.setTransferState('PAUSED')
+          playPause()
+          toast.info('Transfer paused by peer')
+        }
+        break
+      }
+      case MessageType.RESUME_STREAM: {
+        // Peer resumed — unfreeze (sender loop polls the flag).
+        pausePeerRef.current = false
+        const st2 = transferRef.current.transferState
+        if (st2 === 'PAUSED' && !pauseLocalRef.current) {
+          transferRef.current.setTransferState('TRANSFERRING')
+          playResume()
+          toast.info('Transfer resumed by peer')
+        }
         break
       }
       case MessageType.RESUME_REQUEST: {
@@ -774,6 +810,7 @@ export function useFluxDrop() {
           ? await verifyChecksumWorker(blob, entry.checksum)
           : await verifyChecksum(blob, entry.checksum)
         if (!verified) {
+          playError()
           toast.error(`Checksum mismatch for ${entry.name}`)
           checksumVerifiedRef.current = false
           transferRef.current.setChecksumVerified(false)
@@ -803,10 +840,12 @@ export function useFluxDrop() {
       transferRef.current.setChecksumVerified(true)
       transferRef.current.setTransferState('COMPLETE')
       webrtcRef.current?.sendTransferCompleteAck(m.transferId, true)
+      playSuccess()
       toast.success('All files received and verified!', {
         description: `${m.files.length} file${m.files.length > 1 ? 's' : ''} saved · SHA-256 ✓`,
       })
     } catch (err: any) {
+      playError()
       toast.error('Failed to save file', { description: err.message })
       transferRef.current.setTransferState('ERROR')
       transferRef.current.setError(err.message)
@@ -892,6 +931,34 @@ export function useFluxDrop() {
       let nextBuf: ArrayBuffer | null = await readChunk(resumeFrom)
 
       for (let i = resumeFrom; i < m.totalChunks; i++) {
+        // Pause gate: freeze the loop while paused (locally or by peer request).
+        // Polls the flag instead of busy-blocking the event loop.
+        if (isPaused()) {
+          transferRef.current.setTransferState('PAUSED')
+          while (isPaused() && rtc.isOpen) {
+            await new Promise((r) => setTimeout(r, 150))
+          }
+          if (!rtc.isOpen) {
+            // Channel died while paused — fall through to the resume path below.
+            transferRef.current.setTransferState('RESUMING')
+            sendingRef.current = false
+            await saveTransferRecord({
+              transferId: m.transferId,
+              role: 'sender',
+              manifest: m,
+              status: 'RESUMING',
+              chunksAcked: [],
+              bytesTransferred: transferRef.current.bytesTransferred,
+              peerAlias: sessionRef.current.peers[0]?.alias ?? 'peer',
+              peerDeviceId: peerDeviceIdRef.current ?? '',
+              startedAt: transferRef.current.startedAt ?? Date.now(),
+              updatedAt: Date.now(),
+            })
+            return
+          }
+          transferRef.current.setTransferState('TRANSFERRING')
+        }
+
         if (!rtc.isOpen) {
           transferRef.current.setTransferState('RESUMING')
           sendingRef.current = false
@@ -975,6 +1042,7 @@ export function useFluxDrop() {
       sendingRef.current = false
     } catch (err: any) {
       sendingRef.current = false
+      playError()
       toast.error('Send error', { description: err.message, duration: 10000 })
       transferRef.current.addErrorLog({ message: `Send error: ${err.message}` })
       transferRef.current.setTransferState('FAILED')
@@ -1013,8 +1081,13 @@ export function useFluxDrop() {
       transferRef.current.setManifest(m)
       transferRef.current.resetProgress(m.totalChunks, m.totalSize)
       transferRef.current.setTransferState('PAIRING')
-      // Prompt for notifications on first transfer (once per browser)
-      if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'default') {
+      // Prompt for notifications on first transfer (once per browser, respects pref)
+      if (
+        sessionRef.current.notificationsEnabled &&
+        typeof window !== 'undefined' &&
+        'Notification' in window &&
+        Notification.permission === 'default'
+      ) {
         try {
           if (!localStorage.getItem('fluxdrop:notif-prompted')) {
             setTimeout(() => {
@@ -1084,8 +1157,36 @@ export function useFluxDrop() {
     }
   }, [connect])
 
+  // ---- Public API: pause / resume mid-transfer ----
+  // Either side can pause. The sender freezes its chunk loop; both UIs show
+  // PAUSED. Control messages (PAUSE / RESUME_STREAM) sync both sides.
+  const pauseTransfer = useCallback(() => {
+    const m = manifestRef.current
+    const st = transferRef.current.transferState
+    if (!m || (st !== 'TRANSFERRING')) return
+    pauseLocalRef.current = true
+    webrtcRef.current?.sendPause(m.transferId)
+    transferRef.current.setTransferState('PAUSED')
+    playPause()
+    toast.info('Transfer paused')
+  }, [])
+
+  const resumeTransfer = useCallback(() => {
+    const m = manifestRef.current
+    if (!m) return
+    pauseLocalRef.current = false
+    webrtcRef.current?.sendResumeStream(m.transferId)
+    // Only flip the UI state if the peer hasn't also paused.
+    if (!pausePeerRef.current && transferRef.current.transferState === 'PAUSED') {
+      transferRef.current.setTransferState('TRANSFERRING')
+    }
+    playResume()
+    toast.info('Transfer resumed')
+  }, [])
+
   // ---- Public API: cancel ----
   const cancelTransfer = useCallback((reason: string = 'Cancelled by user') => {
+    clearPaused()
     const m = manifestRef.current
     if (m) webrtcRef.current?.sendCancel(m.transferId, reason)
     signalingRef.current?.sendTransferCancel({
@@ -1097,9 +1198,9 @@ export function useFluxDrop() {
     transferRef.current.setTransferState('CANCELLED')
     transferRef.current.setError(reason)
   }, [])
-
   // ---- Public API: leave room / reset ----
   const cleanup = useCallback(() => {
+    clearPaused()
     stopDiagnosticsPolling()
     webrtcRef.current?.close()
     webrtcRef.current = null
@@ -1127,6 +1228,8 @@ export function useFluxDrop() {
     cancelTransfer,
     acceptTransfer,
     rejectTransfer,
+    pauseTransfer,
+    resumeTransfer,
     cleanup,
   }
 }

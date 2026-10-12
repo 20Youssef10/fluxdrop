@@ -34,6 +34,12 @@ interface SessionState {
   setCustomIceServers: (servers: IceServerConfig[]) => void
   setUseCustomIce: (v: boolean) => void
 
+  // Alert preferences (sound + desktop notifications)
+  soundEnabled: boolean
+  notificationsEnabled: boolean
+  setSoundEnabled: (v: boolean) => void
+  setNotificationsEnabled: (v: boolean) => void
+
   // View / mode
   view: SessionView
   setView: (view: SessionView) => void
@@ -169,6 +175,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (useIceRaw) {
         set({ useCustomIce: JSON.parse(useIceRaw) === true })
       }
+      const soundRaw = localStorage.getItem('fluxdrop:sound-enabled')
+      if (soundRaw !== null) set({ soundEnabled: soundRaw === 'true' })
+      const notifRaw = localStorage.getItem('fluxdrop:notifications-enabled')
+      if (notifRaw !== null) set({ notificationsEnabled: notifRaw === 'true' })
     } catch { /* ignore */ }
   },
 
@@ -251,6 +261,25 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     if (typeof window !== 'undefined') {
       try {
         localStorage.setItem('fluxdrop:use-custom-ice', JSON.stringify(v))
+      } catch { /* ignore */ }
+    }
+  },
+
+  soundEnabled: true,
+  notificationsEnabled: true,
+  setSoundEnabled: (v) => {
+    set({ soundEnabled: v })
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('fluxdrop:sound-enabled', v ? 'true' : 'false')
+      } catch { /* ignore */ }
+    }
+  },
+  setNotificationsEnabled: (v) => {
+    set({ notificationsEnabled: v })
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('fluxdrop:notifications-enabled', v ? 'true' : 'false')
       } catch { /* ignore */ }
     }
   },

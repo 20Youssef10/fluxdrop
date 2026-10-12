@@ -2,6 +2,7 @@
 
 import { useCallback, useRef, useState } from 'react'
 import { UploadCloud, FolderOpen, X, FilePlus } from 'lucide-react'
+import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { formatBytes, validateFiles, fileTypeCategory } from '@/lib/fluxdrop/format'
@@ -44,6 +45,20 @@ export function FilePicker({ files, onFilesChange, onSend, disabled }: FilePicke
   const removeFile = (idx: number) => {
     onFilesChange(files.filter((_, i) => i !== idx))
   }
+
+  const addSnippet = useCallback(
+    (file: File) => {
+      if (files.length >= CONSTANTS.MAX_FILES_PER_TRANSFER) {
+        toast.error(`Maximum ${CONSTANTS.MAX_FILES_PER_TRANSFER} files per transfer`)
+        return
+      }
+      onFilesChange([...files, file])
+      toast.success('Snippet added to transfer', {
+        description: `${file.name} · ${formatBytes(file.size)}`,
+      })
+    },
+    [files, onFilesChange]
+  )
 
   const totalSize = files.reduce((s, f) => s + f.size, 0)
   const validation = validateFiles(files)
@@ -142,6 +157,9 @@ export function FilePicker({ files, onFilesChange, onSend, disabled }: FilePicke
         </div>
       </Card>
 
+      {/* Text snippet share option — always available while picking files */}
+      <TextSnippetShare onShare={addSnippet} disabled={disabled} />
+
       {files.length > 0 && (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
@@ -187,14 +205,6 @@ export function FilePicker({ files, onFilesChange, onSend, disabled }: FilePicke
                 <p key={i}>• {e}</p>
               ))}
             </div>
-          )}
-
-          {/* Text snippet share option */}
-          {files.length === 0 && (
-            <TextSnippetShare
-              onShare={() => {}}
-              disabled={disabled}
-            />
           )}
 
           <Button

@@ -1116,3 +1116,58 @@ Task: Create README, LICENSE, docs, and push to GitHub.
 - **Description**: "Peer-to-peer file transfer that flows directly between your devices. No cloud, no servers — just a direct, encrypted WebRTC tunnel."
 - **Branch**: main
 - **Status**: All files pushed successfully (109 src files + 4 mini-service files + 6 docs)
+
+---
+Task ID: clone-deploy-1
+Agent: Z.ai Code (main orchestrator)
+Task: Clone https://github.com/20Youssef10/fluxdrop and build/run it in the sandbox WITHOUT modifying any code (per user instruction: "Never edit or modify until I tell you").
+
+Work Log:
+- Cloned https://github.com/20Youssef10/fluxdrop to /home/z/fluxdrop (HEAD: 64d6acb "Fix: Web Worker build error in Turbopack — use inline Blob worker").
+- Identified stack: Next.js 16 (App Router, Turbopack) + Socket.IO signaling mini-service on port 3003 + Prisma boilerplate (unused by app features).
+- Stopped the placeholder scaffold dev server that occupied port 3000.
+- Installed dependencies: root `bun install` (849 packages) and `mini-services/signaling` `bun install` (22 packages).
+- Generated Prisma client (`bunx prisma generate`); created gitignored `.env` with `DATABASE_URL=file:/home/z/my-project/db/custom.db` (runtime config only, repo untracks .env upstream — NOT a code change).
+- Discovered the sandbox only persists + auto-manages /home/z/my-project (boot script runs .zscripts/dev.sh: bun install → db:push → next dev :3000 → all mini-services/*). Deployed the pristine clone as the active project: copied all files (including .git, so origin remains github.com/20Youssef10/fluxdrop) into /home/z/my-project, excluding the read-only `upload/` OSS mount.
+- Launched the stack via the sandbox's own `/home/z/my-project/.zscripts/dev.sh` (double-fork daemonized) — this is the reliable way to keep services alive across tool sessions (setsid/nohup alone were killed).
+- Verified services: Next.js :3000 (HTTP 200) and signaling :3003 (socket.io handshake OK, WebSocket upgrade 101 through Caddy gateway).
+- Full browser QA with agent-browser (through gateway :81, exactly like the Preview Panel):
+  * Landing renders (hero, particles, tips banner, recent transfers, sticky footer) in dark + light themes; theme toggle works.
+  * Onboarding tour (5 steps) shows and is skippable.
+  * Sender flow: S shortcut / Send files → file picker → uploaded /tmp/qa-test-file.txt → "Create transfer room".
+  * Signaling logs confirmed: connect → "room QFZ8TU created by FrostSeal-69 (pin=066338)"; QR + ROOM ID + PIN + expiry countdown rendered.
+  * Cancel flow: "Cancel and close room" → "Transfer cancelled" summary dialog → Done → back to landing. ✔
+  * Receiver flow (isolated agent-browser session = separate device identity): deep link `/#join=ROOM&pin=PIN` auto-joined → "JollyLynx-62 joined room 8TDTC7 (2/2)".
+  * Consent dialog "Incoming transfer — Reject/Accept" appeared on receiver; Accept → WebRTC DataChannel transfer → BOTH sides showed "Transfer complete — SHA-256 verified · 1 file · 63 B" with stats (duration, avg/peak speed) and green "P2P live" header badge.
+- Closed QA browser sessions; services remain running (PIDs managed by dev.sh: next :3000, signaling :3003).
+
+Stage Summary:
+- FluxDrop is deployed as the active project at /home/z/my-project, running via the sandbox's standard dev flow, fully browser-verified END-TO-END (real P2P file transfer between two isolated browser sessions, SHA-256 verified).
+- ZERO source code modifications — working tree only differs from upstream in .env (runtime) and the absent `upload/` mount content (sandbox mount point, shows as deletions in `git status`; the tracked files exist in git history).
+- Notes for future agents: (1) two tabs in the SAME browser profile share localStorage → same deviceId → receiver replaces sender in room; always use a separate agent-browser `--session` when simulating the second device. (2) Deep-link join requires a real page load (hash-only navigation on an already-loaded page doesn't trigger the join effect). (3) Header badge on landing shows "Connecting" by design — signaling connects lazily on send/receive; shows "P2P live" once connected. (4) Dev-only hydration attribute warning in console (next-themes) — cosmetic, non-blocking.
+- DO NOT modify any code until the user explicitly says so. Future cron review rounds should prioritize QA-only checks first, then await user instructions.
+
+---
+Task ID: dev-18
+Agent: Z.ai Code (main orchestrator)
+Task: User granted edit permission + GitHub token for commit/push (author: youssef2010.mahmoud@gmail.com). Continue development: fix broken features, add pause/resume, sound feedback, PWA install.
+
+Work Log:
+- Repo hygiene: discovered accidental local commit a534b92 (UUID message, wrong author, deleted docs/architecture ADRs + upload/docs.zip). Reset it (`git reset --mixed HEAD~1`), restored deleted files from git, kept the legitimate clone-deploy-1 worklog section uncommitted (included in this commit).
+- **Fixed text snippet sharing (was shipped broken)**: `TextSnippetShare` rendered inside `{files.length>0}` gated on `{files.length===0}` (never visible) with a no-op `onShare`. Moved it out of the gate in `file-picker.tsx`, wired `onShare(file)` to append a generated `snippet-YYYY-MM-DD-HHMM.txt` File to the queue (with toast). Component rewritten: autofocus, Escape/backdrop close, ⌘/Ctrl+Enter shortcut, char counter color, paste/copy buttons.
+- **Pause/Resume mid-transfer (new)**: wired previously-unused opcodes PAUSE (0x0a) / RESUME_STREAM (0x0b). Added `'PAUSED'` TransferState; `webrtc.ts` gained `sendPause`/`sendResumeStream`; `use-fluxdrop.ts` gained `pauseLocalRef`/`pausePeerRef`, a pause gate in the pipelined send loop (150ms poll, exits safely to RESUMING if channel dies while paused), message handlers for peer pause/resume, public `pauseTransfer`/`resumeTransfer`, pause-flag resets in cancel/cleanup, DC-close-while-PAUSED now triggers resume flow. UI: Pause/Resume buttons + amber "Paused" badge in `transfer-progress.tsx`; panels include PAUSED in isTransferring checks (prevents the progress card from vanishing); full-page drop zone excludes PAUSED.
+- **Sound feedback (new)**: `src/lib/fluxdrop/sound.ts` — WebAudio synth (zero assets): success arpeggio, error double-buzz, connect ping, pause/resume ticks; enabled-pref persisted at `fluxdrop:sound-enabled`. Hooked into connect, sender/receiver COMPLETE, checksum mismatch, send error, cancel, pause/resume. New Settings "Alerts" tab (4 tabs now) with Sound effects + Desktop notifications switches that apply instantly; notification permission prompt now gated on the user's preference.
+- **PWA install support**: generated real icons via sharp (`scripts/gen-icons.mjs`): icon-192/512 (rounded teal gradient + brand bolt), maskable-512 (safe-zone), apple-touch-icon-180. Manifest now lists PNG icons + purpose-separated maskable + app shortcuts (Send/Receive). `layout.tsx` icons updated. New `install-button.tsx` (beforeinstallprompt capture) in footer.
+- Dev server incident: Turbopack watcher went stale (edits not recompiled — served chunk lacked new strings). Fixed by killing the wedged `next dev` and restarting via `bun run dev` (daemonized). Note for future agents: if edits don't appear, verify the served chunk actually contains a NEW-only string before debugging code.
+- Browser QA (agent-browser, sessions qa2=sender / qa3=receiver through gateway :81):
+  * Snippet flow: button visible → dialog → typed text → "Add to transfer" → `snippet-2026-10-12-2021.txt (54 B)` queued → room QFRAJF → receiver deep-link join → Accept → **both sides "Transfer complete · SHA-256 verified"**.
+  * 30 MB binary: verified complete both sides.
+  * 300 MB pause test: receiver clicked Pause at 17.2% → BOTH sides flipped to Paused badge + Resume button; Resume → 100% → **SHA-256 verified on both sides**.
+  * Settings Alerts tab renders both toggles; sound toggle persisted (localStorage false→true verified).
+  * Lint clean; dev.log has no runtime errors (only the cosmetic cross-origin dev warning).
+
+Stage Summary:
+- 4 feature areas shipped & browser-verified: working text snippet sharing, bidirectional pause/resume with peer sync, synthesized sound feedback + Alerts preferences, PWA icons/manifest/install button.
+- Commit authored as 20Youssef10 <youssef2010.mahmoud@gmail.com> and pushed to origin/main via the user-provided PAT (one-shot URL, not persisted in .git/config).
+- Elapsed timer still counts paused time (minor, noted); receiver-side pause of an in-flight transfer relies on backpressure drain of buffered chunks (~8 MB target) before full stop — visually seamless.
+- Next-round candidates (by impact): trusted-peers auto-accept + clear-local-data settings, make TransferHistory "Resume" actionable on sender (persist File handles), PAUSED-aware elapsed timer (freeze), receiver-side snippet preview dialog, allowedDevOrigins config to silence the dev warning.

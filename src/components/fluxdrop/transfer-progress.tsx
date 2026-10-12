@@ -1,7 +1,7 @@
 'use client'
 
 import { motion, AnimatePresence } from 'framer-motion'
-import { Gauge, Timer, Hash, CheckCircle2, AlertTriangle, Loader2, ShieldCheck, TrendingUp } from 'lucide-react'
+import { Gauge, Timer, Hash, CheckCircle2, AlertTriangle, Loader2, ShieldCheck, TrendingUp, Pause, Play } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
@@ -20,9 +20,11 @@ import { useState, useEffect, useRef, memo } from 'react'
 interface TransferProgressProps {
   onCancel: () => void
   onDone: () => void
+  onPause?: () => void
+  onResume?: () => void
 }
 
-export function TransferProgress({ onCancel, onDone }: TransferProgressProps) {
+export function TransferProgress({ onCancel, onDone, onPause, onResume }: TransferProgressProps) {
   const t = useTransferStore()
   const pct = t.totalBytes > 0 ? (t.bytesTransferred / t.totalBytes) * 100 : 0
   const remaining = Math.max(0, t.totalBytes - t.bytesTransferred)
@@ -30,6 +32,7 @@ export function TransferProgress({ onCancel, onDone }: TransferProgressProps) {
   const isError = t.transferState === 'FAILED' || t.transferState === 'ERROR'
   const isCancelled = t.transferState === 'CANCELLED'
   const isTransferring = t.transferState === 'TRANSFERRING'
+  const isPaused = t.transferState === 'PAUSED'
 
   // Trigger celebration exactly once when transfer completes
   const [celebrate, setCelebrate] = useState(false)
@@ -66,12 +69,18 @@ export function TransferProgress({ onCancel, onDone }: TransferProgressProps) {
           <div className="min-w-0">
             <div className="flex items-center gap-2 mb-1">
               <h3 className="text-lg font-semibold">
-                {isComplete ? 'Transfer complete' : isError ? 'Transfer failed' : isCancelled ? 'Transfer cancelled' : 'Transferring…'}
+                {isComplete ? 'Transfer complete' : isError ? 'Transfer failed' : isCancelled ? 'Transfer cancelled' : isPaused ? 'Paused' : 'Transferring…'}
               </h3>
               {isComplete && t.checksumVerified && (
                 <Badge variant="outline" className="border-flux-500/40 bg-flux-500/10 text-flux-700 dark:text-flux-300">
                   <ShieldCheck className="mr-1 h-3 w-3" />
                   Verified
+                </Badge>
+              )}
+              {isPaused && (
+                <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400">
+                  <Pause className="mr-1 h-3 w-3" />
+                  Paused
                 </Badge>
               )}
             </div>
@@ -176,9 +185,31 @@ export function TransferProgress({ onCancel, onDone }: TransferProgressProps) {
               Done
             </Button>
           ) : (
-            <Button variant="outline" onClick={onCancel} className="text-destructive hover:bg-destructive/5">
-              Cancel transfer
-            </Button>
+            <>
+              {isPaused ? (
+                <Button
+                  onClick={onResume}
+                  disabled={!onResume}
+                  className="bg-flux-600 hover:bg-flux-700 text-white"
+                >
+                  <Play className="mr-2 h-4 w-4" />
+                  Resume
+                </Button>
+              ) : (
+                <Button
+                  variant="outline"
+                  onClick={onPause}
+                  disabled={!onPause || !isTransferring}
+                  className="text-amber-600 dark:text-amber-400 hover:bg-amber-500/10 border-amber-500/40"
+                >
+                  <Pause className="mr-2 h-4 w-4" />
+                  Pause
+                </Button>
+              )}
+              <Button variant="outline" onClick={onCancel} className="text-destructive hover:bg-destructive/5">
+                Cancel transfer
+              </Button>
+            </>
           )}
         </div>
       </Card>

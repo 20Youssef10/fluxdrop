@@ -1,7 +1,7 @@
 'use client'
 
-import { useState } from 'react'
-import { MessageSquare, Send, X, Copy } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { MessageSquare, Send, X, Copy, ClipboardPaste } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -9,27 +9,56 @@ import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 
 interface TextSnippetShareProps {
-  onShare: (text: string) => void
+  /** Called with a ready-to-transfer .txt File built from the snippet text. */
+  onShare: (file: File) => void
   disabled?: boolean
 }
 
 const MAX_TEXT_LENGTH = 10000
 
+/** Build a friendly, sortable snippet filename like `snippet-2026-10-12-0930.txt`. */
+export function makeSnippetFileName(date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `snippet-${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}.txt`
+}
+
+/** Wrap raw text into a text/plain File ready for the transfer pipeline. */
+export function makeSnippetFile(text: string): File {
+  const blob = new Blob([text], { type: 'text/plain' })
+  return new File([blob], makeSnippetFileName(), {
+    type: 'text/plain',
+    lastModified: Date.now(),
+  })
+}
+
 /**
  * Allows sending a short text snippet (up to 10,000 chars) as a "file"
- * to the receiver. The text is wrapped in a .txt File object.
+ * to the receiver. The text is wrapped in a .txt File object and handed
+ * to the parent via onShare, joining the regular file queue.
  */
 export function TextSnippetShare({ onShare, disabled }: TextSnippetShareProps) {
   const [open, setOpen] = useState(false)
   const [text, setText] = useState('')
+  const [copied, setCopied] = useState(false)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  // Autofocus + Escape-to-close while the dialog is open.
+  useEffect(() => {
+    if (!open) return
+    const t = setTimeout(() => textareaRef.current?.focus(), 50)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      clearTimeout(t)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [open])
 
   const handleShare = () => {
     if (!text.trim()) return
-    const blob = new Blob([text], { type: 'text/plain' })
-    const file = new File([blob], `snippet-${Date.now()}.txt`, { type: 'text/plain' })
-    onShare(text)
-    // Also add the file to the transfer
-    // (The parent component handles the actual file list)
+    onShare(makeSnippetFile(text))
     setOpen(false)
     setText('')
   }
@@ -37,13 +66,15 @@ export function TextSnippetShare({ onShare, disabled }: TextSnippetShareProps) {
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
     } catch { /* ignore */ }
   }
 
   const handlePaste = async () => {
     try {
       const clipText = await navigator.clipboard.readText()
-      setText(clipText)
+      if (clipText) setText(clipText.slice(0, MAX_TEXT_LENGTH))
     } catch { /* ignore */ }
   }
 
@@ -61,7 +92,13 @@ export function TextSnippetShare({ onShare, disabled }: TextSnippetShareProps) {
       </Button>
 
       {open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm"
+          onClick={(e) => { if (e.target === e.currentTarget) setOpen(false) }}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Share text snippet"
+        >
           <Card className="flux-glass w-full max-w-lg p-6 space-y-4">
             <div className="flex items-center justify-between">
               <div>
@@ -70,10 +107,10 @@ export function TextSnippetShare({ onShare, disabled }: TextSnippetShareProps) {
                   Share text snippet
                 </h3>
                 <p className="text-sm text-muted-foreground mt-1">
-                  Send a short text message as a .txt file
+                  Send a link, note, or code block as a .txt file
                 </p>
               </div>
-              <Button variant="ghost" size="icon" onClick={() => setOpen(false)} className="h-8 w-8">
+              <Button variant="ghost" size="icon" onClick={() => setOpen(false)} className="h-8 w-8" aria-label="Close">
                 <X className="h-4 w-4" />
               </Button>
             </div>
@@ -81,27 +118,38 @@ export function TextSnippetShare({ onShare, disabled }: TextSnippetShareProps) {
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <Label htmlFor="snippet-text">Text content</Label>
-                <Badge variant="outline" className="text-[10px]">
-                  {text.length} / {MAX_TEXT_LENGTH}
+                <Badge
+                  variant="outline"
+                  className={`text-[10px] ${text.length >= MAX_TEXT_LENGTH ? 'border-amber-500/40 text-amber-600 dark:text-amber-400' : ''}`}
+                >
+                  {text.length.toLocaleString()} / {MAX_TEXT_LENGTH.toLocaleString()}
                 </Badge>
               </div>
               <Textarea
                 id="snippet-text"
+                ref={textareaRef}
                 value={text}
                 onChange={(e) => setText(e.target.value.slice(0, MAX_TEXT_LENGTH))}
                 placeholder="Type or paste text to share…"
                 className="min-h-[160px] font-mono text-sm"
+                onKeyDown={(e) => {
+                  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') handleShare()
+                }}
               />
             </div>
 
             <div className="flex items-center gap-2">
               <Button variant="outline" size="sm" onClick={handlePaste} className="text-xs">
-                Paste from clipboard
+                <ClipboardPaste className="mr-1 h-3 w-3" />
+                Paste
               </Button>
               <Button variant="outline" size="sm" onClick={handleCopy} disabled={!text} className="text-xs">
                 <Copy className="mr-1 h-3 w-3" />
-                Copy
+                {copied ? 'Copied' : 'Copy'}
               </Button>
+              <span className="ml-auto text-[10px] text-muted-foreground hidden sm:inline">
+                ⌘/Ctrl + Enter to add
+              </span>
             </div>
 
             <div className="flex justify-end gap-2 pt-2 border-t border-border/50">

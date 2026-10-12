@@ -95,6 +95,7 @@ export default function Home() {
   const dropEnabled =
     view === 'sender' &&
     transferState !== 'TRANSFERRING' &&
+    transferState !== 'PAUSED' &&
     transferState !== 'MANIFEST_EXCHANGE' &&
     transferState !== 'VERIFYING' &&
     transferState !== 'COMPLETE'
@@ -145,6 +146,8 @@ export default function Home() {
                   onCancel={() => flux.cancelTransfer('Sender cancelled')}
                   onDone={goHome}
                   onBack={goHome}
+                  onPause={flux.pauseTransfer}
+                  onResume={flux.resumeTransfer}
                 />
               </FullPageDropZone>
               <div className="mt-6 flex justify-center">
@@ -167,6 +170,8 @@ export default function Home() {
                 onCancel={() => flux.cancelTransfer('Receiver cancelled')}
                 onDone={goHome}
                 onBack={goHome}
+                onPause={flux.pauseTransfer}
+                onResume={flux.resumeTransfer}
               />
               <div className="mt-6 flex justify-center">
                 <ShortcutsHint view={view} />

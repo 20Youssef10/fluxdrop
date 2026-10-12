@@ -30,8 +30,8 @@ export const metadata: Metadata = {
   authors: [{ name: "FluxDrop" }],
   manifest: "/manifest.json",
   icons: {
-    icon: "/logo.svg",
-    apple: "/logo.svg",
+    icon: [{ url: "/logo.svg", type: "image/svg+xml" }, { url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" }],
+    apple: "/icons/apple-touch-icon.png",
   },
   appleWebApp: {
     capable: true,
