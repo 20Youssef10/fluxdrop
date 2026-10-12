@@ -130,8 +130,28 @@ export class FluxDropWebRTC {
   }
 
   // === SDP flow ===
+
+  /**
+   * Munge the SDP to negotiate a larger max-message-size for the SCTP transport.
+   * The WebRTC spec default is 64 KB, but most browsers support much more.
+   * We set it to 1 MB so we can use 256 KB chunks safely.
+   * This is a well-known SDP munging technique used by many WebRTC file transfer apps.
+   */
+  private mungeMaxMessageSize(sdp: string | undefined, maxSize: number): string | undefined {
+    if (!sdp) return sdp
+    const line = `a=max-message-size:${maxSize}`
+    // Replace existing max-message-size line, or add it if not present.
+    if (sdp.includes('a=max-message-size:')) {
+      return sdp.replace(/a=max-message-size:\d+/, line)
+    }
+    // Add before the end of the m=application section.
+    return sdp + '\r\n' + line
+  }
+
   async createOffer(): Promise<RTCSessionDescriptionInit> {
     const offer = await this.pc.createOffer()
+    // Munge SDP to negotiate 1 MB max-message-size (default is often only 64 KB).
+    offer.sdp = this.mungeMaxMessageSize(offer.sdp, 1024 * 1024)
     await this.pc.setLocalDescription(offer)
     return offer
   }
@@ -142,11 +162,15 @@ export class FluxDropWebRTC {
     // Flush any ICE candidates that arrived before the offer.
     await this.flushPendingCandidates()
     const answer = await this.pc.createAnswer()
+    // Munge SDP to negotiate 1 MB max-message-size on the answer side too.
+    answer.sdp = this.mungeMaxMessageSize(answer.sdp, 1024 * 1024)
     await this.pc.setLocalDescription(answer)
     return answer
   }
 
   async acceptAnswer(answer: RTCSessionDescriptionInit): Promise<void> {
+    // The answer's SDP should already have the munged max-message-size from the
+    // receiver's createAnswer call. We just set it as remote description.
     await this.pc.setRemoteDescription(answer)
     this.remoteDescriptionSet = true
     await this.flushPendingCandidates()
