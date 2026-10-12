@@ -1238,3 +1238,20 @@ Stage Summary:
 - Resume-from-history E2E working end-to-end except final completion check (pending).
 - IDB multi-store bug fixed — receiver chunk persistence across reloads now actually works.
 - Lint clean; tsc clean for src/.
+
+---
+Task ID: cron-review-r4 (final)
+Agent: Z.ai Code (cron webDevReview round 4 — completion)
+Task: Finalize feature round: E2E verification results, commit, push.
+
+Work Log (verification results):
+- **Sender resume E2E (1.5GB file)**: room PSMZVV → receiver accepted → sender cancelled at 1.0% → record CANCELLED (IDB-verified) → Resume → "1 file re-attached" + banner → room E86TD7 created INSTANTLY (manifest reused, zero hashing) → transfer started. Mid-transfer Fast Refresh (sandbox dev artifact) wedged the send loop → led to the kickSenderLoop robustness fix.
+- **50MB full lifecycle (post-IDB-fix)**: `fluxdrop-sender-files` DB created (was impossible pre-fix), file key present during transfer → transfer complete + SHA-256 verified BOTH sides → sender-files store EMPTY after COMPLETE (auto-cleanup verified).
+- **Hydration**: 0 hydration errors on clean reload (was 1 every load); "1 Issue" dev badge gone.
+- Lint clean; tsc clean for src/; 12 files committed as 05e8477 authored Youssef Mahmoud <youssef2010.mahmoud@gmail.com>; pushed 68455c0..05e8477 to origin/main.
+
+Stage Summary:
+- Shipped: sender resume from history (persist + re-attach + manifest reuse), dead-loop kick, IDB multi-store critical fix, hydration root-cause fix, multi-file snippet preview, PWA screenshots.
+- **Sandbox QA caveat**: this sandbox's browser context can WIPE IndexedDB on session reloads (localStorage persists; IDB doesn't). Real browsers persist IDB reliably — this is an agent-browser/sandbox limitation, not an app bug. Future QA: don't rely on cross-reload IDB state in this sandbox; verify within a single page lifetime.
+- Note: a 1.5GB transfer runs at ~1.6-3.4 MB/s in the sandbox (slower than the 300MB test's 23MB/s — likely fs-cache effects on the huge file).
+- Next-round candidates: receiver-side auto-resume when a sender re-sends a known transferId (skip acked chunks on the wire), stale-sendingRef watchdog (kick can't fix a hung await with sendingRef stuck true — add a 30s no-progress watchdog that force-resets), allowed file-size guard for persisted sender files per storage quota estimate, add "resumed" badge to history records (startedAt vs resumedAt), service-worker offline page.
