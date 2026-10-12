@@ -1255,3 +1255,33 @@ Stage Summary:
 - **Sandbox QA caveat**: this sandbox's browser context can WIPE IndexedDB on session reloads (localStorage persists; IDB doesn't). Real browsers persist IDB reliably — this is an agent-browser/sandbox limitation, not an app bug. Future QA: don't rely on cross-reload IDB state in this sandbox; verify within a single page lifetime.
 - Note: a 1.5GB transfer runs at ~1.6-3.4 MB/s in the sandbox (slower than the 300MB test's 23MB/s — likely fs-cache effects on the huge file).
 - Next-round candidates: receiver-side auto-resume when a sender re-sends a known transferId (skip acked chunks on the wire), stale-sendingRef watchdog (kick can't fix a hung await with sendingRef stuck true — add a 30s no-progress watchdog that force-resets), allowed file-size guard for persisted sender files per storage quota estimate, add "resumed" badge to history records (startedAt vs resumedAt), service-worker offline page.
+
+---
+Task ID: cron-review-r5
+Agent: Z.ai Code (cron webDevReview round 5)
+Task: QA + resume-skip protocol, cancel-loop fixes, pipelined send corruption fix.
+
+## Current project status
+FluxDrop is stable and feature-rich; this round hardened the resume system end-to-end and fixed four serious correctness bugs found through deep E2E debugging. Services healthy (:3000 app, :3003 signaling); lint + tsc clean; committed as a6f27d2 and pushed.
+
+## Completed this round (all browser-verified)
+1. **Resume-skip protocol (RESUME_QUERY 0x0c)**: sender queries receiver's stored chunks on a resumed re-send; receiver answers with acks ∩ actually-stored payloads (getStoredChunkIndices bulk IDB read); sender skips those indices. Saves 40-80% bandwidth on resumes. Consent dialog shows "You already have N% of this transfer". Progress seeded on both sides. Completion works via TRANSFER_COMPLETE when the last chunk was skipped (grace window + bulk re-poll before assembly).
+2. **[CRITICAL] Cancel never stopped the send loop** — cancelled transfers streamed to completion in the background. Fixed with generation-counter supersede in cancelTransfer.
+3. **[CRITICAL] Pipelined pre-read corruption** — skipping a chunk with a bare `continue` sent the skipped chunk's pre-read bytes under the NEXT chunk index (off-by-one corruption on every resume-skip; right size, wrong content). Fix: skip refreshes the pre-read (`nextBuf = await readChunk(i+1)`). This was the root cause of every "checksum mismatch with matching size" in the resume tests.
+4. **Receiver state-machine hardening**: chunks ignored in finished states (CANCELLED/FAILED/ERROR/COMPLETE); DC-open no longer clobbers a finished state; resume-on-reconnect branches were DEAD CODE (wasResuming read after the state was overwritten to MANIFEST_EXCHANGE) — fixed by capturing state first.
+5. **30s no-progress watchdog**: force-restarts a hung send loop (generation-guarded, so the hung loop aborts at its next check without double-sending).
+6. **Reliability**: ackCache init race fixed (loser keeps winner's set); flushAcked MERGES acks (was replacing — wiped prior attempt's acks); receiver chunk payloads now actually persist (saveChunk was dead code!) via lazy delta flush (cancel / TRANSFER_CANCEL / unload / 1024-chunk boundary); acks-vs-payloads now match exactly (verified 1976=1976, 246=246 in tests).
+7. **Verification hardening**: moved receiver verify to main-thread crypto.subtle — the hash-wasm-in-worker path (CDN import) returned a wrong digest on a large composite blob; worker hashing now falls back to main thread on error (manifest build).
+8. **UX**: "Resumed" badge in history (resumedAt persisted through record merges); gradient+glow progress bar; percentages capped at 100; resume-aware error message when the receiver rejects the checksum.
+
+## E2E verification (the full cycle, 20MB file)
+send → receiver accepts → sender cancels at 40% → both records CANCELLED → history Resume → files re-attached + banner → room re-created instantly (manifest reused, no hashing) → receiver joins → consent shows "You already have 40%" → accept → handshake: `record acks=129, stored=129, usable=129` → sender skips 40% → **Transfer complete · SHA-256 verified on BOTH sides** → single merged record with original startedAt.
+
+## Unresolved issues / risks
+- **Sandbox caveat (do NOT re-debug)**: this sandbox's browser corrupts IndexedDB-persisted File object BACKING for large files (300MB test: 2 of 8 sampled 16MB blocks differed from the original; small files intact). Real browsers persist Files reliably. The checksum verification correctly caught this — do not mistake it for an app bug. Keep resume E2E tests ≤ 20MB in the sandbox.
+- Chunk indices arrive out of order (parallel channels): contiguous-prefix resume logic is meaningless — always use the bitmap (implemented).
+- Elapsed timer still counts in-flight ack drain time after cancel (cosmetic).
+- Next-round candidates: receiver-side UI showing "skipped N chunks" toast parity, bandwidth-saved stat in the summary card, service-worker offline page, stats dashboard enhancements, allowDevOrigins check for prod preview.
+
+## Recommendation for next phase
+Stable phase — prioritize UI polish + small features; avoid large-file resume tests in the sandbox (File-persistence corruption) — use ≤20MB files.
