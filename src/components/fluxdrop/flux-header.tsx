@@ -1,7 +1,7 @@
 'use client'
 
 import { useTheme } from 'next-themes'
-import { Moon, Sun, Settings, Wifi, WifiOff, Plus, Trash2, Server, User, Shield, HelpCircle, Bell, Volume2, BellOff, VolumeX } from 'lucide-react'
+import { Moon, Sun, Settings, Wifi, WifiOff, Plus, Trash2, Server, User, Shield, HelpCircle, Bell, Volume2, BellOff, VolumeX, BadgeCheck } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -20,6 +20,7 @@ import { Separator } from '@/components/ui/separator'
 import { useState, useEffect } from 'react'
 import { useSessionStore, type IceServerConfig } from '@/stores/session-store'
 import { setSoundEnabled, unlockAudio } from '@/lib/fluxdrop/sound'
+import { getTrustedPeers, removeTrustedPeer, clearTrustedPeers, type TrustedPeer } from '@/lib/fluxdrop/trusted-peers'
 import { FluxLogo, FluxWordmark } from './flux-logo'
 
 export function FluxHeader({ onOpenSettings, onOpenHelp }: { onOpenSettings?: () => void; onOpenHelp?: () => void }) {
@@ -155,7 +156,10 @@ export function SettingsDialog({
   const setSoundPref = useSessionStore((s) => s.setSoundEnabled)
   const notificationsEnabled = useSessionStore((s) => s.notificationsEnabled)
   const setNotificationsPref = useSessionStore((s) => s.setNotificationsEnabled)
+  const autoAcceptTrusted = useSessionStore((s) => s.autoAcceptTrusted)
+  const setAutoAcceptTrusted = useSessionStore((s) => s.setAutoAcceptTrusted)
   const [notifPermission, setNotifPermission] = useState<NotificationPermission | 'unsupported'>('default')
+  const [trustedList, setTrustedList] = useState<TrustedPeer[]>([])
 
   const [draft, setDraft] = useState(alias)
   const [iceDraft, setIceDraft] = useState<IceServerConfig[]>([])
@@ -177,6 +181,7 @@ export function SettingsDialog({
     } else {
       setNotifPermission('unsupported')
     }
+    setTrustedList(getTrustedPeers())
   }, [open, alias, customIceServers, useCustomIce])
 
   const save = () => {
@@ -209,6 +214,14 @@ export function SettingsDialog({
         setNotifPermission(result)
       })
     }
+  }
+  const handleRevokePeer = (deviceId: string) => {
+    removeTrustedPeer(deviceId)
+    setTrustedList(getTrustedPeers())
+  }
+  const handleClearPeers = () => {
+    clearTrustedPeers()
+    setTrustedList([])
   }
 
   return (
@@ -397,6 +410,68 @@ export function SettingsDialog({
 
           {/* Privacy tab */}
           <TabsContent value="privacy" className="space-y-3 mt-4">
+            {/* Trusted devices */}
+            <div className="rounded-lg border border-border/60 p-3 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="pr-2">
+                  <p className="text-sm font-medium flex items-center gap-1.5">
+                    <BadgeCheck className="h-4 w-4 text-flux-500" />
+                    Trusted devices
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Devices you explicitly trusted when accepting a transfer.
+                  </p>
+                </div>
+                <Switch checked={autoAcceptTrusted} onCheckedChange={setAutoAcceptTrusted} />
+              </div>
+              <p className="text-[11px] text-muted-foreground -mt-1">
+                Toggle on to <span className="font-medium text-foreground">auto-accept</span> incoming
+                transfers from trusted devices without asking. Consent is always required for unknown devices.
+              </p>
+
+              {trustedList.length > 0 ? (
+                <div className="space-y-1.5">
+                  <div className="max-h-32 overflow-y-auto flux-scroll space-y-1.5 pr-1">
+                    {trustedList.map((p) => (
+                      <div key={p.deviceId} className="flex items-center gap-2.5 rounded-md border border-border/40 bg-card/50 p-2">
+                        <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-flux-500/10 text-flux-600 dark:text-flux-400">
+                          <BadgeCheck className="h-3.5 w-3.5" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-xs font-medium">{p.alias}</p>
+                          <p className="text-[10px] text-muted-foreground">
+                            trusted {new Date(p.addedAt).toLocaleDateString()}
+                          </p>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => handleRevokePeer(p.deviceId)}
+                          aria-label={`Revoke ${p.alias}`}
+                          className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleClearPeers}
+                    className="h-7 text-xs text-muted-foreground hover:text-destructive"
+                  >
+                    <Trash2 className="mr-1.5 h-3 w-3" />
+                    Forget all devices
+                  </Button>
+                </div>
+              ) : (
+                <p className="text-[11px] text-muted-foreground rounded-md border border-dashed border-border/60 p-2.5">
+                  No trusted devices yet — check "Trust this device" in the transfer consent dialog.
+                </p>
+              )}
+            </div>
+
             <div className="rounded-lg border border-flux-500/30 bg-flux-500/5 p-3 text-xs">
               <p className="font-medium text-foreground mb-1.5 flex items-center gap-1.5">
                 <Shield className="h-3.5 w-3.5 text-flux-500" />

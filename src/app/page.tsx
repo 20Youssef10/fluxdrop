@@ -17,6 +17,7 @@ import { OnboardingTour } from '@/components/fluxdrop/onboarding-tour'
 import { ConnectionRipple } from '@/components/fluxdrop/connection-ripple'
 import { TipsBanner } from '@/components/fluxdrop/tips-banner'
 import { ConsentDialog } from '@/components/fluxdrop/consent-dialog'
+import { SnippetPreviewDialog } from '@/components/fluxdrop/snippet-preview-dialog'
 import { VerificationCode } from '@/components/fluxdrop/verification-code'
 import { useFluxDrop } from '@/hooks/fluxdrop/use-fluxdrop'
 import { useKeyboardShortcuts } from '@/hooks/fluxdrop/use-keyboard-shortcuts'
@@ -193,9 +194,13 @@ export default function Home() {
       <ConsentDialog
         manifest={flux.session.pendingManifest}
         peerAlias={flux.session.peers[0]?.alias ?? 'Unknown'}
+        peerDeviceId={flux.session.peers[0]?.id ?? null}
         onAccept={flux.acceptTransfer}
         onReject={flux.rejectTransfer}
       />
+
+      {/* Received text snippet preview (receiver-side instant read/copy) */}
+      <SnippetPreviewDialog />
 
       {/* Security verification code (shown during active transfer) */}
       <VerificationCode />

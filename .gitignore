@@ -51,4 +51,8 @@ prompt
 
 server.log
 # Skills directory
+/skills/tool-results/
+
+# Sandbox scratch dirs (never commit)
+/tool-results/
 /skills/

@@ -27,6 +27,7 @@ import {
 } from '@/lib/fluxdrop/resume'
 import { assembleBlob, saveBlobWithPicker, saveFilesToDirectory } from '@/lib/fluxdrop/file-io'
 import { addRecentRoom } from '@/lib/fluxdrop/recent-rooms'
+import { isTrustedPeer, addTrustedPeer } from '@/lib/fluxdrop/trusted-peers'
 import { playSuccess, playError, playConnect, playPause, playResume } from '@/lib/fluxdrop/sound'
 import { MessageType, CONSTANTS, type TransferManifest, type TransferSummary } from '@/lib/fluxdrop/protocol'
 import { toast } from 'sonner'
@@ -674,6 +675,7 @@ export function useFluxDrop() {
       case MessageType.PAUSE: {
         // Peer requested pause — freeze the stream on both sides.
         pausePeerRef.current = true
+        transferRef.current.pauseTimer()
         const st = transferRef.current.transferState
         if (st === 'TRANSFERRING') {
           transferRef.current.setTransferState('PAUSED')
@@ -685,6 +687,7 @@ export function useFluxDrop() {
       case MessageType.RESUME_STREAM: {
         // Peer resumed — unfreeze (sender loop polls the flag).
         pausePeerRef.current = false
+        transferRef.current.resumeTimer()
         const st2 = transferRef.current.transferState
         if (st2 === 'PAUSED' && !pauseLocalRef.current) {
           transferRef.current.setTransferState('TRANSFERRING')
@@ -707,30 +710,9 @@ export function useFluxDrop() {
   }, [])
 
   // ---- Receiver: handle incoming manifest (via DC or signaling) ----
-  // Instead of auto-accepting, set pendingManifest so the UI can show
-  // a consent dialog for the user to accept or reject.
-  const handleIncomingManifest = useCallback(async (m: TransferManifest) => {
-    if (!m || !m.transferId) return
-    if (manifestRef.current?.transferId === m.transferId) {
-      // Already seen — re-ack.
-      webrtcRef.current?.sendManifestAck(m.transferId, true)
-      return
-    }
-    manifestRef.current = m
-    slicePlanRef.current = buildSlicePlan(m)
-    transferRef.current.setManifest(m)
-    transferRef.current.resetProgress(m.totalChunks, m.totalSize)
-    transferRef.current.initFiles(m.files)
-    transferRef.current.setTransferState('MANIFEST_EXCHANGE')
-    // Set pending manifest so the ConsentDialog shows in the UI.
-    // The user must explicitly accept before transfer begins.
-    sessionRef.current.setPendingManifest(m)
-  }, [])
-
-  /** Called when the user accepts the transfer in the ConsentDialog. */
-  const acceptTransfer = useCallback(async () => {
-    const m = manifestRef.current
-    if (!m) return
+  // Shared accept pipeline — used by the manual consent dialog AND the
+  // trusted-device auto-accept path.
+  const doAcceptTransfer = useCallback(async (m: TransferManifest) => {
     sessionRef.current.setPendingManifest(null)
     transferRef.current.setTransferState('TRANSFERRING')
     transferRef.current.startTimer()
@@ -754,8 +736,56 @@ export function useFluxDrop() {
       updatedAt: Date.now(),
     }
     await saveTransferRecord(rec)
-    toast.success(`Receiving ${m.files.length} file${m.files.length > 1 ? 's' : ''} (${formatBytes(m.totalSize)})`)
   }, [])
+
+  // Instead of auto-accepting, set pendingManifest so the UI can show
+  // a consent dialog for the user to accept or reject — UNLESS the peer
+  // is a trusted device and auto-accept is enabled (opt-in setting).
+  const handleIncomingManifest = useCallback(async (m: TransferManifest) => {
+    if (!m || !m.transferId) return
+    if (manifestRef.current?.transferId === m.transferId) {
+      // Already seen — re-ack.
+      webrtcRef.current?.sendManifestAck(m.transferId, true)
+      return
+    }
+    manifestRef.current = m
+    slicePlanRef.current = buildSlicePlan(m)
+    transferRef.current.setManifest(m)
+    transferRef.current.resetProgress(m.totalChunks, m.totalSize)
+    transferRef.current.initFiles(m.files)
+    transferRef.current.setTransferState('MANIFEST_EXCHANGE')
+    // Trusted auto-accept (only when the user opted in AND explicitly
+    // trusted this device previously).
+    const peerId = peerDeviceIdRef.current
+    if (sessionRef.current.autoAcceptTrusted && isTrustedPeer(peerId)) {
+      const alias = sessionRef.current.peers[0]?.alias ?? 'trusted device'
+      await doAcceptTransfer(m)
+      toast.success(`Auto-accepted from trusted device ${alias}`, {
+        description: 'Manage trusted devices in Settings → Privacy.',
+      })
+      return
+    }
+    // Set pending manifest so the ConsentDialog shows in the UI.
+    // The user must explicitly accept before transfer begins.
+    sessionRef.current.setPendingManifest(m)
+  }, [doAcceptTransfer])
+
+  /** Called when the user accepts the transfer in the ConsentDialog. */
+  const acceptTransfer = useCallback(async (trust = false) => {
+    const m = manifestRef.current
+    if (!m) return
+    if (trust && peerDeviceIdRef.current) {
+      addTrustedPeer({
+        deviceId: peerDeviceIdRef.current,
+        alias: sessionRef.current.peers[0]?.alias ?? 'peer',
+      })
+      toast.success('Device trusted', {
+        description: 'Future transfers from this device can be auto-accepted (enable in Settings → Privacy).',
+      })
+    }
+    await doAcceptTransfer(m)
+    toast.success(`Receiving ${m.files.length} file${m.files.length > 1 ? 's' : ''} (${formatBytes(m.totalSize)})`)
+  }, [doAcceptTransfer])
 
   /** Called when the user rejects the transfer in the ConsentDialog. */
   const rejectTransfer = useCallback(() => {
@@ -844,6 +874,17 @@ export function useFluxDrop() {
       toast.success('All files received and verified!', {
         description: `${m.files.length} file${m.files.length > 1 ? 's' : ''} saved · SHA-256 ✓`,
       })
+      // Snippet preview: a single small text file shared via "Share text
+      // snippet" gets an instant read/copy dialog instead of a silent save.
+      if (assembledFiles.length === 1) {
+        const f = assembledFiles[0]
+        if (/^snippet-.*\.txt$/i.test(f.name) && f.blob.size <= 100 * 1024) {
+          try {
+            const text = await f.blob.text()
+            transferRef.current.setSnippetPreview({ name: f.name, text })
+          } catch { /* ignore — preview is best-effort */ }
+        }
+      }
     } catch (err: any) {
       playError()
       toast.error('Failed to save file', { description: err.message })
@@ -861,7 +902,7 @@ export function useFluxDrop() {
   // It must WAIT for finishReceiverTransfer to complete verification before
   // sending the ack — otherwise the sender gets "verified: true" before
   // the checksum check has finished.
-  const verificationPromiseRef = useRef<Promise<boolean> | null>(null)
+  const verificationPromiseRef = useRef<Promise<boolean | undefined | void> | null>(null)
 
   const verifyReceiverTransfer = useCallback(async () => {
     const m = manifestRef.current
@@ -1165,6 +1206,7 @@ export function useFluxDrop() {
     const st = transferRef.current.transferState
     if (!m || (st !== 'TRANSFERRING')) return
     pauseLocalRef.current = true
+    transferRef.current.pauseTimer()
     webrtcRef.current?.sendPause(m.transferId)
     transferRef.current.setTransferState('PAUSED')
     playPause()
@@ -1175,6 +1217,7 @@ export function useFluxDrop() {
     const m = manifestRef.current
     if (!m) return
     pauseLocalRef.current = false
+    transferRef.current.resumeTimer()
     webrtcRef.current?.sendResumeStream(m.transferId)
     // Only flip the UI state if the peer hasn't also paused.
     if (!pausePeerRef.current && transferRef.current.transferState === 'PAUSED') {

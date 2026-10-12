@@ -98,7 +98,7 @@ export function validateFiles(files: File[]): ValidationResult {
       errors.push(`Filename too long: "${f.name.slice(0, 20)}..."`)
     }
     const ext = '.' + (f.name.split('.').pop() || '').toLowerCase()
-    if (CONSTANTS.BLOCKED_EXTENSIONS.includes(ext)) {
+    if ((CONSTANTS.BLOCKED_EXTENSIONS as readonly string[]).includes(ext)) {
       errors.push(`Blocked file type: "${f.name}" (${ext})`)
     }
   }

@@ -40,6 +40,10 @@ interface SessionState {
   setSoundEnabled: (v: boolean) => void
   setNotificationsEnabled: (v: boolean) => void
 
+  // Auto-accept incoming transfers from trusted devices (opt-in)
+  autoAcceptTrusted: boolean
+  setAutoAcceptTrusted: (v: boolean) => void
+
   // View / mode
   view: SessionView
   setView: (view: SessionView) => void
@@ -108,6 +112,10 @@ export interface WebRtcDiagnostics {
     protocol?: string
     currentRoundTripTime?: number
     nominated?: boolean
+    bytesSent?: number
+    bytesReceived?: number
+    requestsSent?: number
+    requestsReceived?: number
   }
   bytesSent: number
   bytesReceived: number
@@ -179,6 +187,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (soundRaw !== null) set({ soundEnabled: soundRaw === 'true' })
       const notifRaw = localStorage.getItem('fluxdrop:notifications-enabled')
       if (notifRaw !== null) set({ notificationsEnabled: notifRaw === 'true' })
+      const autoRaw = localStorage.getItem('fluxdrop:auto-accept-trusted')
+      if (autoRaw !== null) set({ autoAcceptTrusted: autoRaw === 'true' })
     } catch { /* ignore */ }
   },
 
@@ -280,6 +290,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     if (typeof window !== 'undefined') {
       try {
         localStorage.setItem('fluxdrop:notifications-enabled', v ? 'true' : 'false')
+      } catch { /* ignore */ }
+    }
+  },
+
+  autoAcceptTrusted: false,
+  setAutoAcceptTrusted: (v) => {
+    set({ autoAcceptTrusted: v })
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('fluxdrop:auto-accept-trusted', v ? 'true' : 'false')
       } catch { /* ignore */ }
     }
   },

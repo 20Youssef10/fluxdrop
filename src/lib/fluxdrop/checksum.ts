@@ -49,7 +49,7 @@ export async function hashFile(file: File | Blob): Promise<string> {
 }
 
 export async function hashBytes(data: ArrayBuffer | Uint8Array): Promise<string> {
-  const buf = data instanceof Uint8Array ? data.buffer.slice(0) : data
+  const buf: ArrayBuffer = data instanceof Uint8Array ? data.slice().buffer as ArrayBuffer : data
   const digest = await crypto.subtle.digest('SHA-256', buf)
   return bufToHex(digest)
 }

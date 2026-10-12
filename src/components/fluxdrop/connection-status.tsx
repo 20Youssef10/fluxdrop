@@ -15,6 +15,7 @@ const STATE_LABELS: Record<TransferState, { label: string; color: string }> = {
   RETRYING: { label: 'Retrying', color: 'text-amber-500' },
   MANIFEST_EXCHANGE: { label: 'Exchanging manifest', color: 'text-flux-600 dark:text-flux-400' },
   TRANSFERRING: { label: 'Transferring', color: 'text-flux-600 dark:text-flux-400' },
+  PAUSED: { label: 'Paused', color: 'text-amber-500' },
   RESUMING: { label: 'Resuming', color: 'text-amber-500' },
   VERIFYING: { label: 'Verifying checksum', color: 'text-flux-600 dark:text-flux-400' },
   COMPLETE: { label: 'Complete', color: 'text-emerald-500' },

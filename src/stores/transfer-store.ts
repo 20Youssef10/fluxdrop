@@ -42,6 +42,15 @@ interface TransferStoreState {
   _lastSpeedSampleAt: number | null
   _lastSpeedSampleBytes: number | null
   speedHistory: number[]   // last N speed samples for sparkline
+  // Pause-aware elapsed tracking (excludes paused time from elapsedMs)
+  _pausedAt: number | null
+  _pausedTotalMs: number
+  pauseTimer: () => void
+  resumeTimer: () => void
+
+  // Receiver snippet preview (small text file received — shown in a dialog)
+  snippetPreview: { name: string; text: string } | null
+  setSnippetPreview: (p: { name: string; text: string } | null) => void
 
   // File-level progress (receiver)
   files: LiveFileProgress[]
@@ -123,6 +132,8 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
       _lastSpeedSampleAt: null,
       _lastSpeedSampleBytes: null,
       speedHistory: [],
+      _pausedAt: null,
+      _pausedTotalMs: 0,
       checksumVerified: null,
       _pendingChunks: 0,
       _pendingBytes: 0,
@@ -130,9 +141,24 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
     }),
 
   startedAt: null,
-  startTimer: () => set({ startedAt: Date.now(), _lastSpeedSampleAt: Date.now(), _lastSpeedSampleBytes: 0 }),
+  startTimer: () => set({ startedAt: Date.now(), _lastSpeedSampleAt: Date.now(), _lastSpeedSampleBytes: 0, _pausedAt: null, _pausedTotalMs: 0 }),
   elapsedMs: 0,
   speedBps: 0,
+  _pausedAt: null,
+  _pausedTotalMs: 0,
+  pauseTimer: () => {
+    const s = get()
+    if (s._pausedAt != null) return
+    set({ _pausedAt: Date.now() })
+  },
+  resumeTimer: () => {
+    const s = get()
+    if (s._pausedAt == null) return
+    set({
+      _pausedTotalMs: s._pausedTotalMs + (Date.now() - s._pausedAt),
+      _pausedAt: null,
+    })
+  },
   tickSpeed: (now) => {
     const s = get()
     if (!s.startedAt || s._lastSpeedSampleAt == null) return
@@ -141,15 +167,22 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
     const dBytes = s.bytesTransferred - (s._lastSpeedSampleBytes ?? 0)
     const speed = (dBytes / dt) * 1000
     const history = [...s.speedHistory, speed].slice(-40) // keep last 40 samples
+    // Elapsed excludes time spent paused (live pause window included).
+    const pausedMs = s._pausedTotalMs + (s._pausedAt != null ? now - s._pausedAt : 0)
     set({
       speedBps: speed,
-      elapsedMs: now - s.startedAt,
+      elapsedMs: Math.max(0, now - s.startedAt - pausedMs),
       _lastSpeedSampleAt: now,
       _lastSpeedSampleBytes: s.bytesTransferred,
       speedHistory: history,
     })
   },
+  _lastSpeedSampleAt: null,
+  _lastSpeedSampleBytes: null,
   speedHistory: [],
+
+  snippetPreview: null,
+  setSnippetPreview: (p) => set({ snippetPreview: p }),
 
   files: [],
   initFiles: (entries) =>
@@ -203,6 +236,9 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
       checksumVerified: null,
       resumeAvailable: false,
       hashingProgress: null,
+      snippetPreview: null,
+      _pausedAt: null,
+      _pausedTotalMs: 0,
       _pendingChunks: 0,
       _pendingBytes: 0,
       _flushTimer: null,

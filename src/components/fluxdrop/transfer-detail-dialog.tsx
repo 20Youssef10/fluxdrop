@@ -10,7 +10,8 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { ArrowUp, ArrowDown, CheckCircle2, AlertCircle, Clock, Hash, Database, FileIcon } from 'lucide-react'
+import { ArrowUp, ArrowDown, CheckCircle2, AlertCircle, Clock, Hash, Database } from 'lucide-react'
+import { FileIcon } from './file-icon'
 import type { StoredTransfer } from '@/lib/fluxdrop/resume'
 import { formatBytes, formatDuration, fileTypeCategory } from '@/lib/fluxdrop/format'
 

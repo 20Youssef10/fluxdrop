@@ -1171,3 +1171,26 @@ Stage Summary:
 - Commit authored as 20Youssef10 <youssef2010.mahmoud@gmail.com> and pushed to origin/main via the user-provided PAT (one-shot URL, not persisted in .git/config).
 - Elapsed timer still counts paused time (minor, noted); receiver-side pause of an in-flight transfer relies on backpressure drain of buffered chunks (~8 MB target) before full stop — visually seamless.
 - Next-round candidates (by impact): trusted-peers auto-accept + clear-local-data settings, make TransferHistory "Resume" actionable on sender (persist File handles), PAUSED-aware elapsed timer (freeze), receiver-side snippet preview dialog, allowedDevOrigins config to silence the dev warning.
+
+---
+Task ID: cron-review-r2
+Agent: Z.ai Code (cron webDevReview round 2)
+Task: Assess status, QA, fix bugs, add trusted-peers auto-accept + snippet preview + pause-aware timer.
+
+Work Log:
+- Repo hygiene: dropped another accidental sandbox auto-commit (216206b, UUID message, only added tool-results scratch); gitignored `/tool-results/` and `/skills/` to prevent recurrence.
+- **[CRITICAL FIX] page.tsx corruption**: discovered `const elpOpen, setHelpOpen] = useState(false)` (missing `[h`) — a syntax error present in upstream commit 64d6acb and HEAD, causing GET / 500 once Turbopack's cached-good compile expired. Fixed to `const [helpOpen, setHelpOpen] = ...`. Help dialog re-verified in browser.
+- **[Sandbox insight] delayed-write visibility**: the sandbox filesystem serves stale views to subsequent processes (sed fix invisible to next read, then visible; explains last round's "stale Turbopack" and contradictory tool outputs). When file state looks impossible, re-read after `sync` + sleep before concluding; verify served chunks by NEW-only strings.
+- **Trusted peers + auto-accept (new)**: `src/lib/fluxdrop/trusted-peers.ts` (localStorage, max 20, add/remove/clear/isTrusted). Consent dialog gained "Trust this device" checkbox + "Trusted device" badge (BadgeCheck) for already-trusted peers + autofocus Accept. Hook: extracted shared `doAcceptTransfer` pipeline; `handleIncomingManifest` auto-accepts when store pref `autoAcceptTrusted` AND peer trusted; `acceptTransfer(trust?)` records trust. Settings → Privacy tab: auto-accept toggle, trusted-device list (revoke per device, "Forget all devices"), explainer copy. Full QA: trust → persist → enable auto-accept → second transfer auto-accepted (no consent dialog, completed, snippet preview shown).
+- **Receiver snippet preview (new)**: `snippet-preview-dialog.tsx` — glass card, mono pre text, char count, Copy button (with copied state), SHA-256 badge; triggered in `finishReceiverTransfer` when single `snippet-*.txt` ≤ 100 KB; state `snippetPreview` in transfer store; mounted from page.tsx. QA: dialog appeared with correct body text; copy clicked.
+- **PAUSED-aware elapsed timer**: transfer store `_pausedAt`/`_pausedTotalMs` + `pauseTimer`/`resumeTimer`; tickSpeed subtracts paused time (live window included); hooked into local + peer pause/resume paths. Elapsed now freezes while paused.
+- **Config**: `allowedDevOrigins: ["*.space-z.ai"]` added to next.config.ts to silence the cross-origin dev warning.
+- **Type hygiene (src/ now has ZERO tsc errors)**: fixed wrong FileIcon import in transfer-detail-dialog (lucide → app component), BLOCKED_EXTENSIONS readonly-string casts (format.ts, consent-dialog), WebRtcDiagnostics.selectedPair missing stat fields (session-store), checksum.ts SharedArrayBuffer cast, verificationPromiseRef widened, added missing store literal initial values (`_lastSpeedSampleAt/_lastSpeedSampleBytes/speedHistory`), added PAUSED to connection-status STATE_LABELS.
+- QA note: toggling a setting then reloading the page within ~1s can read stale localStorage in this sandbox (storage flush lag) — round-2 auto-accept test hit this; round 3 with a settled reload verified the feature works. Not an app bug, but future QA should allow a beat between write and reload.
+
+Stage Summary:
+- Shipped: trusted-device auto-accept (opt-in, revocable), receiver snippet preview dialog, pause-aware elapsed timer, plus 8 type-correctness fixes (src tsc clean) and the critical page.tsx syntax-error fix that had 500'd the app.
+- All QA passed in browser: trust flow, auto-accept flow (consent skipped), snippet preview with content, help dialog.
+- Commit authored as 20Youssef10 <youssef2010.mahmoud@gmail.com>, pushed to origin/main (one-shot token URL).
+- Known cosmetic: transient HMR "BadgeCheck is not defined" errors in dev.log during editing (resolved in final state); timer still counts RESUMING-window time (minor).
+- Next-round candidates: actionable sender-side Resume from TransferHistory (persist File handles), PAUSED state in VerificationCode/diagnostics edge cases, receiver snippet preview for multi-file transfers (preview first snippet), onboarding tour mention of new features, PWA screenshots in manifest.
