@@ -1,8 +1,8 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
-import { Check, X, AlertTriangle, ShieldCheck, BadgeCheck } from 'lucide-react'
+import { Check, X, AlertTriangle, ShieldCheck, BadgeCheck, RotateCcw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -11,6 +11,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { formatBytes, fileTypeCategory } from '@/lib/fluxdrop/format'
 import { FileIcon } from './file-icon'
 import { isTrustedPeer } from '@/lib/fluxdrop/trusted-peers'
+import { getTransferRecord } from '@/lib/fluxdrop/resume'
 import type { TransferManifest } from '@/lib/fluxdrop/protocol'
 import { CONSTANTS } from '@/lib/fluxdrop/protocol'
 
@@ -30,6 +31,29 @@ interface ConsentDialogProps {
  */
 export function ConsentDialog({ manifest, peerAlias, peerDeviceId, onAccept, onReject }: ConsentDialogProps) {
   const [trust, setTrust] = useState(false)
+  // Partial-progress lookup: if we already stored chunks for this transferId
+  // (previous interrupted attempt), tell the user the re-send will skip ahead.
+  const [partial, setPartial] = useState<{ id: string; pct: number } | null>(null)
+  useEffect(() => {
+    if (!manifest) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const rec = await getTransferRecord(manifest.transferId)
+        if (cancelled) return
+        const acked = rec?.chunksAcked?.length ?? 0
+        const pct =
+          acked > 0 && manifest.totalChunks > 0 && acked < manifest.totalChunks
+            ? Math.round((acked / manifest.totalChunks) * 100)
+            : 0
+        setPartial({ id: manifest.transferId, pct })
+      } catch { /* ignore — panel is best-effort */ }
+    })()
+    return () => { cancelled = true }
+  }, [manifest])
+  const partialPercent = manifest && partial?.id === manifest.transferId && partial.pct > 0
+    ? partial.pct
+    : null
   if (!manifest) return null
   const alreadyTrusted = !!peerDeviceId && isTrustedPeer(peerDeviceId)
 
@@ -100,6 +124,17 @@ export function ConsentDialog({ manifest, peerAlias, peerDeviceId, onAccept, onR
                 <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Chunks</p>
               </div>
             </div>
+
+            {/* Partial-progress notice: a re-send of an interrupted transfer */}
+            {partialPercent !== null && !hasErrors && (
+              <div className="flex items-center gap-2.5 rounded-lg border border-flux-500/30 bg-flux-500/10 px-3 py-2">
+                <RotateCcw className="h-4 w-4 shrink-0 text-flux-600 dark:text-flux-400" />
+                <p className="text-xs leading-relaxed text-flux-700 dark:text-flux-300">
+                  You already have <span className="font-semibold tabular-nums">{partialPercent}%</span> of this
+                  transfer — accepting will skip ahead and only fetch the missing parts.
+                </p>
+              </div>
+            )}
 
             {/* File list */}
             <ScrollArea className="max-h-48 flux-scroll">

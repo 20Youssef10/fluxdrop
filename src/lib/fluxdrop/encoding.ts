@@ -20,6 +20,7 @@ const CONTROL_TYPES = new Set<number>([
   MessageType.TRANSFER_CANCEL,
   MessageType.RESUME_REQUEST,
   MessageType.RESUME_RESPONSE,
+  MessageType.RESUME_QUERY,
   MessageType.PAUSE,
   MessageType.RESUME_STREAM,
 ])

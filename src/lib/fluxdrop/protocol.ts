@@ -61,6 +61,9 @@ export const MessageType = {
   RESUME_RESPONSE: 0x09,
   PAUSE: 0x0a,
   RESUME_STREAM: 0x0b,
+  // Sender → receiver: "how much of this transferId do you already have?"
+  // Lets a resumed send skip chunks the receiver already stored.
+  RESUME_QUERY: 0x0c,
 } as const
 
 export type MessageTypeValue = (typeof MessageType)[keyof typeof MessageType]

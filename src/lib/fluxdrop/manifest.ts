@@ -39,7 +39,8 @@ export async function buildManifest(
     })
 
     // Use worker-based hashing for large files (off main thread, true incremental SHA-256).
-    // Falls back to main-thread crypto.subtle.digest for small files.
+    // Falls back to main-thread crypto.subtle.digest for small files, and to
+    // the main thread whenever the worker fails — hashing must never break a send.
     const checksum = file.size > 256 * 1024 * 1024
       ? await hashFileWorker(file, (p) => {
           onProgress?.({
@@ -49,6 +50,9 @@ export async function buildManifest(
             bytesProcessed: p.bytesProcessed,
             totalBytes,
           })
+        }).catch(async (err) => {
+          console.warn('[FluxDrop] Worker hashing failed, falling back to main thread:', err?.message)
+          return hashFile(file)
         })
       : await hashFile(file)
     entries.push({

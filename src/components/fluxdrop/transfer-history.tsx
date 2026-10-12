@@ -404,6 +404,15 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
                         {rec.status === 'FAILED' || rec.status === 'ERROR' ? (
                           <AlertCircle className="h-3.5 w-3.5 text-destructive shrink-0" />
                         ) : null}
+                        {rec.resumedAt && rec.status !== 'COMPLETE' && (
+                          <Badge
+                            variant="outline"
+                            className="shrink-0 border-flux-500/40 bg-flux-500/10 text-[9px] uppercase tracking-wide px-1.5 py-0 text-flux-600 dark:text-flux-400"
+                          >
+                            <RotateCcw className="mr-0.5 h-2.5 w-2.5" />
+                            Resumed
+                          </Badge>
+                        )}
                       </div>
                       <div className="flex items-center gap-2 text-xs text-muted-foreground mt-0.5">
                         <span>{formatBytes(rec.manifest.totalSize)}</span>

@@ -462,8 +462,18 @@ export class FluxDropWebRTC {
     this.sendControl(MessageType.RESUME_REQUEST, transferId, lastChunkIndex, { lastChunkIndex })
   }
 
-  sendResumeResponse(transferId: string, accepted: boolean, fromChunkIndex: number): void {
-    this.sendControl(MessageType.RESUME_RESPONSE, transferId, fromChunkIndex, { accepted, fromChunkIndex })
+  sendResumeResponse(transferId: string, accepted: boolean, fromChunkIndex: number, ackedIndices?: number[]): void {
+    this.sendControl(MessageType.RESUME_RESPONSE, transferId, fromChunkIndex, { accepted, fromChunkIndex, ackedIndices })
+  }
+
+  /**
+   * Ask the receiver how much of this transfer it already has. Used when a
+   * transfer is re-sent after a resume-from-history: the receiver answers
+   * with RESUME_RESPONSE { fromChunkIndex } so already-stored chunks never
+   * travel the wire again.
+   */
+  sendResumeQuery(transferId: string): void {
+    this.sendControl(MessageType.RESUME_QUERY, transferId, 0, {})
   }
 
   /** Ask the peer to pause streaming (flow control). Uses the PAUSE opcode. */

@@ -26,7 +26,7 @@ interface TransferProgressProps {
 
 export function TransferProgress({ onCancel, onDone, onPause, onResume }: TransferProgressProps) {
   const t = useTransferStore()
-  const pct = t.totalBytes > 0 ? (t.bytesTransferred / t.totalBytes) * 100 : 0
+  const pct = t.totalBytes > 0 ? Math.min(100, (t.bytesTransferred / t.totalBytes) * 100) : 0
   const remaining = Math.max(0, t.totalBytes - t.bytesTransferred)
   const isComplete = t.transferState === 'COMPLETE'
   const isError = t.transferState === 'FAILED' || t.transferState === 'ERROR'
@@ -105,7 +105,7 @@ export function TransferProgress({ onCancel, onDone, onPause, onResume }: Transf
         <div className="mt-5 relative">
           <Progress
             value={pct}
-            className="h-3 bg-muted overflow-hidden"
+            className="h-3 bg-muted overflow-hidden [&>div]:bg-gradient-to-r [&>div]:from-flux-400 [&>div]:via-flux-500 [&>div]:to-flux-600 [&>div]:shadow-[0_0_12px_rgba(16,185,129,0.35)] [&>div]:transition-[width,background-color] [&>div]:duration-300"
           />
           {!isComplete && !isError && !isCancelled && pct > 0 && (
             <div className="absolute inset-0 flux-shimmer rounded-full pointer-events-none" />

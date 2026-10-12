@@ -38,7 +38,7 @@ export function TransferAnnouncer() {
   const message = STATE_MESSAGES[transferState] ?? transferState
   const progressMsg =
     transferState === 'TRANSFERRING' && totalBytes > 0
-      ? `${message}. ${Math.round((bytesTransferred / totalBytes) * 100)} percent complete.`
+      ? `${message}. ${Math.min(100, Math.round((bytesTransferred / totalBytes) * 100))} percent complete.`
       : message
 
   return (

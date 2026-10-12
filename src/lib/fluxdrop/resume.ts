@@ -43,6 +43,8 @@ export interface StoredTransfer {
   updatedAt: number
   finishedAt?: number
   checksumVerified?: boolean
+  /** Set when a transfer was continued from history via Resume. */
+  resumedAt?: number
 }
 
 const CHUNK_PREFIX = 'chunk:'
@@ -112,6 +114,13 @@ export async function saveSenderFiles(transferId: string, files: File[]): Promis
   try {
     const total = files.reduce((s, f) => s + f.size, 0)
     if (total > MAX_PERSIST_BYTES) return false
+    // Respect the browser's storage quota — skip persistence when free space
+    // can't comfortably hold the queue (best-effort feature, never block sends).
+    if (typeof navigator !== 'undefined' && navigator.storage?.estimate) {
+      const est = await navigator.storage.estimate()
+      const free = (est.quota ?? 0) - (est.usage ?? 0)
+      if (free > 0 && free < total * 1.25) return false
+    }
     await set(`${FILE_PREFIX}${transferId}`, files, filesStore)
     return true
   } catch { return false }
@@ -146,7 +155,14 @@ export async function markChunkAcked(transferId: string, chunkIndex: number): Pr
   if (!cached) {
     const rec = await getTransferRecord(transferId)
     cached = new Set(rec?.chunksAcked ?? [])
-    ackCache.set(transferId, cached)
+    // Another concurrent init may have won the race while we awaited — keep
+    // theirs (it already contains the record acks) so no entries are lost.
+    const winner = ackCache.get(transferId)
+    if (winner) {
+      cached = winner
+    } else {
+      ackCache.set(transferId, cached)
+    }
   }
   if (cached.has(chunkIndex)) return
   cached.add(chunkIndex)
@@ -175,11 +191,15 @@ export async function markChunkAcked(transferId: string, chunkIndex: number): Pr
   }
 }
 
-/** Flush the in-memory ack cache to IndexedDB. */
+/** Flush the in-memory ack cache to IndexedDB (merging with existing acks). */
 async function flushAcked(transferId: string, acked: Set<number>): Promise<void> {
   const rec = await getTransferRecord(transferId)
   if (!rec) return
-  rec.chunksAcked = Array.from(acked)
+  // MERGE with the stored acks — the cache only knows about chunks acked in
+  // the current session, and wiping pre-existing acks (e.g. from a previous
+  // attempt of a resumed transfer) would corrupt history progress.
+  const merged = new Set<number>([...(rec.chunksAcked ?? []), ...acked])
+  rec.chunksAcked = Array.from(merged)
   // Sort once on flush (cheap, happens infrequently).
   rec.chunksAcked.sort((a, b) => a - b)
   rec.bytesTransferred = Math.min(
@@ -223,6 +243,30 @@ export async function getChunk(transferId: string, chunkIndex: number): Promise<
   try {
     return await get(`${CHUNK_PREFIX}${transferId}:${chunkIndex}`, chunksStore)
   } catch { return undefined }
+}
+
+/**
+ * Indices of THIS transfer's chunks that are actually stored in IndexedDB.
+ * One bulk key read — far cheaper than per-chunk gets. Used to build the
+ * resume-skip bitmap: acks alone can outrun payloads (ack flush vs payload
+ * flush timing), and skipping a chunk with no stored payload would corrupt
+ * the reassembled file.
+ */
+export async function getStoredChunkIndices(transferId: string): Promise<Set<number>> {
+  const { chunksStore } = getStores()
+  if (!chunksStore) return new Set()
+  try {
+    const ks = await keys(chunksStore)
+    const out = new Set<number>()
+    const prefix = `${CHUNK_PREFIX}${transferId}:`
+    for (const k of ks) {
+      if (typeof k === 'string' && k.startsWith(prefix)) {
+        const idx = parseInt(k.slice(prefix.length), 10)
+        if (!Number.isNaN(idx)) out.add(idx)
+      }
+    }
+    return out
+  } catch { return new Set() }
 }
 
 export async function getAllChunks(transferId: string, totalChunks: number): Promise<ArrayBuffer[]> {

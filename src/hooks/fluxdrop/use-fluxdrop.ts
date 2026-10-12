@@ -15,7 +15,7 @@ import { FluxDropSignaling } from '@/lib/fluxdrop/signaling'
 import { FluxDropWebRTC } from '@/lib/fluxdrop/webrtc'
 import { buildManifest, buildSlicePlan, resolveChunk } from '@/lib/fluxdrop/manifest'
 import { verifyChecksum } from '@/lib/fluxdrop/checksum'
-import { verifyChecksumWorker, destroyHashWorker } from '@/lib/fluxdrop/hash-worker-client'
+import { destroyHashWorker } from '@/lib/fluxdrop/hash-worker-client'
 import { validateFiles, formatBytes } from '@/lib/fluxdrop/format'
 import {
   saveTransferRecord,
@@ -23,6 +23,7 @@ import {
   markChunkAcked,
   saveChunk,
   getChunk,
+  getStoredChunkIndices,
   flushAllPendingAcks,
   saveSenderFiles,
   deleteSenderFiles,
@@ -62,8 +63,55 @@ export function useFluxDrop() {
   // Next chunk the sender loop should push. Updated by the loop itself so a
   // dead loop can be restarted from the right position (see kickSenderLoop).
   const senderNextIndexRef = useRef<number>(0)
+  // Generation counter for send loops: each beginSending() bumps it, and a
+  // superseded loop aborts when it sees a newer generation (prevents two
+  // loops racing after a watchdog force-restart).
+  const sendLoopGenRef = useRef<number>(0)
+  const beginSendingRef = useRef<((resumeFrom?: number) => Promise<void>) | null>(null)
+  // Watchdog bookkeeping: last chunk index seen + consecutive stalled ticks.
+  const stallLastIdxRef = useRef<number>(-1)
+  const stallTicksRef = useRef<number>(0)
+  // Resumed-send state: set when startSend reuses a stored manifest so the
+  // MANIFEST_ACK path knows to query the receiver before streaming.
+  const resumeSkipPendingRef = useRef<boolean>(false)
+  const resumeQueryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Chunks the receiver already holds (from its acked bitmap) — the send loop
+  // skips these so stored chunks never travel the wire twice.
+  const skipIndicesRef = useRef<Set<number>>(new Set())
+  // True once a resumed send actually skipped stored chunks — used to give a
+  // more helpful error message if the receiver's verification then fails.
+  const resumeSkipUsedRef = useRef<boolean>(false)
+  // Receiver chunk persistence: which received chunks have already been
+  // written to IndexedDB (lazy delta flush — see flushReceiverBuffers).
+  const flushedChunkIdsRef = useRef<Set<number>>(new Set())
+  const flushChainRef = useRef<Promise<void>>(Promise.resolve())
+  // Receiver completion tracking: has the LAST chunk arrived in this session?
+  // (On resumed re-sends the last chunk may be skipped — completion is then
+  // triggered by TRANSFER_COMPLETE instead.)
+  const lastChunkSeenRef = useRef<boolean>(false)
 
   const isPaused = () => pauseLocalRef.current || pausePeerRef.current
+
+  // ---- Receiver chunk persistence ----
+  // Chunks live in memory while streaming (per-chunk IDB writes would kill
+  // throughput). This flushes NEW chunks to IndexedDB in the background so a
+  // resumed transfer can skip them later (and assembly can read them back).
+  const flushReceiverBuffers = useCallback(() => {
+    const m = manifestRef.current
+    if (!m) return
+    const pending: Array<[number, ArrayBuffer]> = []
+    for (const [idx, buf] of receiverBuffersRef.current) {
+      if (!flushedChunkIdsRef.current.has(idx)) pending.push([idx, buf])
+    }
+    if (pending.length === 0) return
+    for (const [idx] of pending) flushedChunkIdsRef.current.add(idx)
+    // Sequence flushes to keep IndexedDB writes ordered and non-concurrent.
+    flushChainRef.current = flushChainRef.current.then(async () => {
+      for (const [idx, buf] of pending) {
+        try { await saveChunk(m.transferId, idx, buf) } catch { /* best-effort */ }
+      }
+    }).catch(() => { /* ignore */ })
+  }, [])
 
   // ---- Transfer-history persistence ----
   // Single helper that records every transfer lifecycle transition so the
@@ -92,6 +140,7 @@ export function useFluxDrop() {
         updatedAt: Date.now(),
         finishedAt: finished ? Date.now() : existing?.finishedAt,
         checksumVerified: extra?.checksumVerified ?? existing?.checksumVerified,
+        resumedAt: existing?.resumedAt,
       }
       await saveTransferRecord(rec)
     } catch { /* best-effort — history must never break transfers */ }
@@ -306,6 +355,8 @@ export function useFluxDrop() {
         transferRef.current.setTransferState('CANCELLED')
         transferRef.current.setError(payload.reason ?? 'Transfer cancelled')
         playError()
+        // Persist received chunks so a later resume can skip them.
+        flushReceiverBuffers()
         void persistTransferRecord(filesRef.current.length > 0 ? 'sender' : 'receiver', 'CANCELLED')
         toast.error('Transfer cancelled', { description: payload.reason })
       },
@@ -327,7 +378,7 @@ export function useFluxDrop() {
     })
     sig.connect()
     signalingRef.current = sig
-  }, [persistTransferRecord])
+  }, [persistTransferRecord, flushReceiverBuffers])
 
   // ---- Diagnostics polling (ICE candidate pair + bytes) ----
   const diagnosticsRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -397,6 +448,8 @@ export function useFluxDrop() {
 
     // Persist current state for resume (preserve existing acked chunks!).
     const isSender = filesRef.current.length > 0
+    // Persist any in-memory received chunks so the resumed re-send can skip them.
+    flushReceiverBuffers()
     await persistTransferRecord(isSender ? 'sender' : 'receiver', 'RESUMING')
 
     // Wait 2 seconds before attempting reconnection (backoff).
@@ -434,7 +487,7 @@ export function useFluxDrop() {
       transferRef.current.setTransferState('FAILED')
       toast.error('Cannot resume — no room or peer available')
     }
-  }, [connect, persistTransferRecord])
+  }, [connect, persistTransferRecord, flushReceiverBuffers])
 
   // ---- Helper: get effective ICE servers ----
   const getEffectiveIceServers = useCallback((): RTCIceServer[] | undefined => {
@@ -482,11 +535,19 @@ export function useFluxDrop() {
         onDataChannelOpen: () => {
           sessionRef.current.setDataChannelOpen(true)
           sessionRef.current.setRetryCount(0)
-          transferRef.current.setTransferState('MANIFEST_EXCHANGE')
           const m = manifestRef.current
+          const stNow = transferRef.current.transferState
+          // Capture BEFORE any state overwrite (the old code set
+          // MANIFEST_EXCHANGE first, making wasResuming permanently false and
+          // the whole resume-on-reconnect path dead).
+          const wasResuming = stNow === 'RESUMING'
+          // A DC reopen with a finished local transfer (CANCELLED/FAILED/etc.)
+          // must NOT reset the state machine — the transfer is over locally.
+          const isFinishedState = stNow === 'CANCELLED' || stNow === 'FAILED' || stNow === 'ERROR' || stNow === 'COMPLETE'
+          if (!m || isFinishedState) return
+          transferRef.current.setTransferState('MANIFEST_EXCHANGE')
           if (m) {
             // Check if this is a resume (state was RESUMING before reconnection).
-            const wasResuming = transferRef.current.transferState === 'RESUMING'
             if (wasResuming && filesRef.current.length === 0) {
               // Receiver resume: send RESUME_REQUEST with last acked chunk.
               const lastAcked = transferRef.current.chunksAcked - 1 // chunksAcked is a count, not index
@@ -643,7 +704,23 @@ export function useFluxDrop() {
         break
       }
       case MessageType.MANIFEST_ACK: {
-        if (msg.body?.accepted) beginSending()
+        if (msg.body?.accepted) {
+          if (resumeSkipPendingRef.current && m) {
+            // Resumed send: ask the receiver what it already has so stored
+            // chunks never travel the wire twice. Falls back to a full send
+            // if the answer doesn't arrive within 15s.
+            resumeQueryTimerRef.current = setTimeout(() => {
+              if (!resumeSkipPendingRef.current) return
+              resumeSkipPendingRef.current = false
+              console.log('[FluxDrop] No resume-skip answer within 15s — sending from chunk 0')
+              beginSending()
+            }, 15000)
+            console.log(`[FluxDrop] Sending resume-skip query for ${m.transferId.slice(0, 8)}`)
+            webrtcRef.current?.sendResumeQuery(m.transferId)
+          } else {
+            beginSending()
+          }
+        }
         else {
           transferRef.current.setTransferState('FAILED')
           toast.error('Transfer rejected', { description: msg.body?.reason })
@@ -652,6 +729,15 @@ export function useFluxDrop() {
       }
       case MessageType.CHUNK_DATA: {
         if (!m) return
+        // Ignore stream data for transfers that are already finished locally
+        // (CANCELLED/FAILED/ERROR/COMPLETE) — otherwise a peer that hasn't
+        // processed our cancel yet would resurrect the transfer.
+        {
+          const st = transferRef.current.transferState
+          if (st === 'CANCELLED' || st === 'FAILED' || st === 'ERROR' || st === 'COMPLETE') {
+            return
+          }
+        }
         // Keep chunk in memory (fast). Only save to IndexedDB if the transfer
         // is interrupted — we do this lazily to avoid IDB write overhead on
         // every single chunk, which is the #1 throughput killer.
@@ -669,6 +755,14 @@ export function useFluxDrop() {
         }
         // Track ack in memory (fast). IndexedDB flush is debounced.
         void markChunkAcked(m.transferId, msg.chunkIndex)
+        if (msg.chunkIndex === m.totalChunks - 1) {
+          lastChunkSeenRef.current = true
+        }
+        // Periodically persist new chunks in the background (delta flush) so
+        // an interrupt can resume without re-sending everything.
+        if (msg.chunkIndex > 0 && msg.chunkIndex % 1024 === 0) {
+          flushReceiverBuffers()
+        }
         if (msg.chunkIndex === m.totalChunks - 1) {
           await finishReceiverTransfer()
         }
@@ -697,6 +791,18 @@ export function useFluxDrop() {
             from: sessionRef.current.deviceId,
             to: peerDeviceIdRef.current!,
           })
+        } else {
+          // Receiver's checksum didn't match. On a resumed send this usually
+          // means the source files changed since the original transfer.
+          transferRef.current.setTransferState('ERROR')
+          transferRef.current.setError('Receiver verification failed — checksum mismatch')
+          playError()
+          void persistTransferRecord('sender', 'ERROR', { checksumVerified: false })
+          toast.error('Verification failed on the receiver', {
+            description: resumeSkipUsedRef.current
+              ? 'The re-attached files may have changed since the original transfer. Start a fresh transfer with the current files.'
+              : 'The transferred data did not match the original checksum. Please retry.',
+          })
         }
         break
       }
@@ -704,6 +810,8 @@ export function useFluxDrop() {
         transferRef.current.setTransferState('CANCELLED')
         transferRef.current.setError(msg.body?.reason ?? 'Cancelled by peer')
         playError()
+        // Persist received chunks so a later resume can skip them.
+        flushReceiverBuffers()
         void persistTransferRecord(filesRef.current.length > 0 ? 'sender' : 'receiver', 'CANCELLED')
         toast.error('Transfer cancelled', { description: msg.body?.reason })
         break
@@ -735,17 +843,89 @@ export function useFluxDrop() {
         break
       }
       case MessageType.RESUME_REQUEST: {
-        toast.info(`Resume requested from chunk ${(msg.body?.lastChunkIndex ?? 0) + 1}`)
+        // Receiver reconnected and wants to continue. Instead of trusting a
+        // single "last chunk" index (parallel channels ack out-of-order),
+        // run the bitmap handshake so only genuinely-missing chunks travel.
+        toast.info('Receiver reconnected — checking stored chunks…')
+        resumeSkipPendingRef.current = true
+        resumeQueryTimerRef.current = setTimeout(() => {
+          if (!resumeSkipPendingRef.current) return
+          resumeSkipPendingRef.current = false
+          console.log('[FluxDrop] No resume-skip answer within 5s — sending from chunk 0')
+          beginSending()
+        }, 5000)
+        webrtcRef.current?.sendResumeQuery(m?.transferId ?? '')
+        // Legacy ack so the receiver's UI shows the resume was registered.
         webrtcRef.current?.sendResumeResponse(m?.transferId ?? '', true, (msg.body?.lastChunkIndex ?? 0) + 1)
-        beginSending((msg.body?.lastChunkIndex ?? 0) + 1)
+        break
+      }
+      case MessageType.RESUME_QUERY: {
+        // Receiver side of the resume-skip handshake: the sender is re-sending
+        // a transfer we may already hold chunks for. Flush pending state, then
+        // report our acked-chunk bitmap so the sender can skip stored chunks.
+        // (Chunks arrive out-of-order on parallel channels, so a contiguous
+        // prefix would be useless — the full bitmap is what matters.)
+        if (!m) break
+        console.log(`[FluxDrop] Resume-skip query received (${m.transferId.slice(0, 8)})`)
+        void (async () => {
+          try {
+            console.log('[FluxDrop] Resume-skip: flushing acks…')
+            await flushAllPendingAcks()
+            flushReceiverBuffers()
+            console.log('[FluxDrop] Resume-skip: reading record…')
+            const rec = await getTransferRecord(m.transferId)
+            const ackedSet = new Set(rec?.chunksAcked ?? [])
+            // Intersect acks with ACTUALLY STORED payloads — an ack without a
+            // stored payload must NOT be skipped (it would leave a hole in the
+            // reassembled file and fail verification).
+            const stored = await getStoredChunkIndices(m.transferId)
+            const acked: number[] = []
+            for (const i of ackedSet) {
+              if (i >= 0 && i < m.totalChunks && (stored.has(i) || receiverBuffersRef.current.has(i))) acked.push(i)
+            }
+            console.log(`[FluxDrop] Resume-skip: record acks=${ackedSet.size}, stored=${stored.size}, usable=${acked.length}`)
+            if (acked.length > 0) {
+              const storedBytes = Math.min(acked.length * m.chunkSize, m.totalSize)
+              transferRef.current.seedProgress(acked.length, storedBytes)
+              console.log(`[FluxDrop] Resume-skip: ${acked.length}/${m.totalChunks} chunks already stored (${Math.round((acked.length / m.totalChunks) * 100)}%) — answering sender`)
+            }
+            webrtcRef.current?.sendResumeResponse(m.transferId, true, acked.length, acked)
+            console.log('[FluxDrop] Resume-skip: bitmap answer sent')
+          } catch { webrtcRef.current?.sendResumeResponse(m.transferId, true, 0) }
+        })()
         break
       }
       case MessageType.RESUME_RESPONSE: {
-        if (msg.body?.accepted) toast.success('Resume acknowledged')
+        console.log(`[FluxDrop] RESUME_RESPONSE received (accepted=${!!msg.body?.accepted}, indices=${Array.isArray(msg.body?.ackedIndices) ? msg.body.ackedIndices.length : 'none'})`)
+        if (msg.body?.accepted) {
+          if (resumeSkipPendingRef.current) {
+            // Answer to our resume-skip query: the receiver's acked bitmap.
+            resumeSkipPendingRef.current = false
+            if (resumeQueryTimerRef.current) {
+              clearTimeout(resumeQueryTimerRef.current)
+              resumeQueryTimerRef.current = null
+            }
+            const acked: number[] = Array.isArray(msg.body?.ackedIndices) ? msg.body.ackedIndices : []
+            if (acked.length > 0 && m) {
+              skipIndicesRef.current = new Set(acked)
+              resumeSkipUsedRef.current = true
+              const storedBytes = Math.min(acked.length * m.chunkSize, m.totalSize)
+              transferRef.current.seedProgress(acked.length, storedBytes)
+              toast.info(`Skipping ${acked.length} of ${m.totalChunks} chunks`, {
+                description: `${Math.round((acked.length / m.totalChunks) * 100)}% was already received by the peer.`,
+              })
+            } else {
+              skipIndicesRef.current = new Set()
+            }
+            beginSending(0)
+          } else {
+            toast.success('Resume acknowledged')
+          }
+        }
         break
       }
     }
-  }, [persistTransferRecord])
+  }, [persistTransferRecord, flushReceiverBuffers])
 
   // ---- Receiver: handle incoming manifest (via DC or signaling) ----
   // Shared accept pipeline — used by the manual consent dialog AND the
@@ -761,16 +941,23 @@ export function useFluxDrop() {
       to: peerDeviceIdRef.current!,
       accepted: true,
     })
+    // New receiving attempt: start a fresh flush set (old flushed chunks stay
+    // in IndexedDB and still count via the record's chunksAcked below).
+    flushedChunkIdsRef.current = new Set()
+    lastChunkSeenRef.current = false
+    // MERGE with any existing record — a re-accept of a resumed transfer must
+    // keep the previously-acked chunks and the original start timestamp.
+    const existing = await getTransferRecord(m.transferId)
     const rec: StoredTransfer = {
       transferId: m.transferId,
       role: 'receiver',
       manifest: m,
       status: 'TRANSFERRING',
-      chunksAcked: [],
-      bytesTransferred: 0,
-      peerAlias: sessionRef.current.peers[0]?.alias ?? 'peer',
-      peerDeviceId: peerDeviceIdRef.current ?? '',
-      startedAt: Date.now(),
+      chunksAcked: existing?.chunksAcked ?? [],
+      bytesTransferred: existing?.bytesTransferred ?? 0,
+      peerAlias: sessionRef.current.peers[0]?.alias ?? existing?.peerAlias ?? 'peer',
+      peerDeviceId: peerDeviceIdRef.current ?? existing?.peerDeviceId ?? '',
+      startedAt: existing?.startedAt ?? Date.now(),
       updatedAt: Date.now(),
     }
     await saveTransferRecord(rec)
@@ -849,6 +1036,29 @@ export function useFluxDrop() {
   const finishReceiverTransfer = useCallback(async () => {
     const m = manifestRef.current
     if (!m) return
+    // Guard against double-run (last-chunk trigger racing TRANSFER_COMPLETE).
+    if (verificationPromiseRef.current) {
+      await verificationPromiseRef.current
+      return
+    }
+    // If triggered by TRANSFER_COMPLETE rather than the last chunk (resumed
+    // re-send where the last chunk was skipped, or cross-channel reorder),
+    // give in-flight chunks a grace window: check that every chunk is either
+    // in memory or already stored before assembling.
+    if (!lastChunkSeenRef.current) {
+      // One bulk read of what IDB actually holds for this transfer, re-polled
+      // while chunks are still arriving on parallel channels.
+      let storedIdx = await getStoredChunkIndices(m.transferId)
+      for (let attempt = 0; attempt < 15; attempt++) {
+        let missing = false
+        for (let c = 0; c < m.totalChunks; c++) {
+          if (!receiverBuffersRef.current.has(c) && !storedIdx.has(c)) { missing = true; break }
+        }
+        if (!missing) break
+        await new Promise((r) => setTimeout(r, 1000))
+        storedIdx = await getStoredChunkIndices(m.transferId)
+      }
+    }
     const verifyPromise = (async () => {
     transferRef.current.setTransferState('VERIFYING')
     try {
@@ -874,12 +1084,15 @@ export function useFluxDrop() {
           fileChunks.push(buf.slice(localStart, localEnd))
         }
         const blob = assembleBlob(fileChunks, entry.type)
-        const verified = entry.size > 256 * 1024 * 1024
-          ? await verifyChecksumWorker(blob, entry.checksum)
-          : await verifyChecksum(blob, entry.checksum)
+        // Main-thread verification (native crypto.subtle). The worker path
+        // (hash-wasm via CDN) produced a wrong digest on a large composite
+        // blob in testing — verification must be bulletproof, and the brief
+        // main-thread hash at completion time is acceptable.
+        const verified = await verifyChecksum(blob, entry.checksum)
         if (!verified) {
           playError()
           toast.error(`Checksum mismatch for ${entry.name}`)
+          console.error(`[FluxDrop] Checksum mismatch for ${entry.name}: assembled ${blob.size}B, expected ${entry.size}B`)
           checksumVerifiedRef.current = false
           transferRef.current.setChecksumVerified(false)
           transferRef.current.setTransferState('ERROR')
@@ -933,6 +1146,7 @@ export function useFluxDrop() {
       }
     } catch (err: any) {
       playError()
+      console.error('[FluxDrop] Receiver finish failed:', err?.message, err?.stack?.slice(0, 300))
       toast.error('Failed to save file', { description: err.message })
       transferRef.current.setTransferState('ERROR')
       transferRef.current.setError(err.message)
@@ -954,15 +1168,16 @@ export function useFluxDrop() {
   const verifyReceiverTransfer = useCallback(async () => {
     const m = manifestRef.current
     if (!m) return
-    // Wait for the receiver's finishReceiverTransfer to complete.
-    // finishReceiverTransfer sets checksumVerifiedRef and sends the ack itself,
-    // so we don't need to send it again here. But if finishReceiverTransfer
-    // hasn't been called yet (race condition), we need to wait.
-    if (verificationPromiseRef.current) {
-      await verificationPromiseRef.current
+    // finishReceiverTransfer normally triggers on the LAST chunk arriving and
+    // sends the ack itself. But on a resumed re-send the last chunk may be in
+    // the skip set (receiver already stored it) — TRANSFER_COMPLETE then has
+    // to run the assembly itself, after a short grace for in-flight chunks.
+    if (!verificationPromiseRef.current) {
+      await finishReceiverTransfer()
+      return
     }
-    // finishReceiverTransfer already sent the ack — nothing more to do.
-  }, [])
+    await verificationPromiseRef.current
+  }, [finishReceiverTransfer])
 
   // ---- Sender: begin streaming chunks ----
   const beginSending = useCallback(async (resumeFrom: number = 0) => {
@@ -970,6 +1185,10 @@ export function useFluxDrop() {
     const files = filesRef.current
     if (!m || files.length === 0) return
     if (sendingRef.current) return
+    // Generation ownership: bumping the counter marks THIS loop as the active
+    // sender. A watchdog force-restart (or any newer beginSending) supersedes
+    // the previous loop, which aborts on its next iteration check.
+    const myGen = ++sendLoopGenRef.current
     sendingRef.current = true
     senderNextIndexRef.current = resumeFrom
     transferRef.current.setTransferState('TRANSFERRING')
@@ -1020,6 +1239,19 @@ export function useFluxDrop() {
       let nextBuf: ArrayBuffer | null = await readChunk(resumeFrom)
 
       for (let i = resumeFrom; i < m.totalChunks; i++) {
+        // A newer send loop took over (watchdog restart / resume race) —
+        // abort WITHOUT touching sendingRef (the new loop owns it now).
+        if (sendLoopGenRef.current !== myGen) return
+        // Chunk already stored by the receiver (resume-skip bitmap) — skip it.
+        // CRITICAL: the pipelined pre-read invariant is "nextBuf holds THIS
+        // chunk's data". Skipping with a bare continue would send the skipped
+        // chunk's pre-read bytes under the NEXT index (off-by-one corruption).
+        // Drop the skipped pre-read and pre-read the next index instead.
+        if (skipIndicesRef.current.has(i)) {
+          nextBuf = await readChunk(i + 1)
+          senderNextIndexRef.current = i + 1
+          continue
+        }
         // Pause gate: freeze the loop while paused (locally or by peer request).
         // Polls the flag instead of busy-blocking the event loop.
         if (isPaused()) {
@@ -1030,7 +1262,6 @@ export function useFluxDrop() {
           if (!rtc.isOpen) {
             // Channel died while paused — fall through to the resume path below.
             transferRef.current.setTransferState('RESUMING')
-            sendingRef.current = false
             await persistTransferRecord('sender', 'RESUMING')
             return
           }
@@ -1038,9 +1269,11 @@ export function useFluxDrop() {
         }
 
         if (!rtc.isOpen) {
-          transferRef.current.setTransferState('RESUMING')
-          sendingRef.current = false
-          await persistTransferRecord('sender', 'RESUMING')
+          // Only transition to RESUMING if this loop still owns the transfer.
+          if (sendLoopGenRef.current === myGen) {
+            transferRef.current.setTransferState('RESUMING')
+            await persistTransferRecord('sender', 'RESUMING')
+          }
           return
         }
 
@@ -1079,20 +1312,17 @@ export function useFluxDrop() {
               await rtc.waitForDrain()
               sent = rtc.sendChunkData(m.transferId, i, buf)
               if (!sent) {
-                transferRef.current.setTransferState('RESUMING')
-                sendingRef.current = false
+                if (sendLoopGenRef.current === myGen) transferRef.current.setTransferState('RESUMING')
                 return
               }
             } else {
-              transferRef.current.setTransferState('RESUMING')
-              sendingRef.current = false
+              if (sendLoopGenRef.current === myGen) transferRef.current.setTransferState('RESUMING')
               return
             }
           }
         }
         if (!sent) {
-          transferRef.current.setTransferState('RESUMING')
-          sendingRef.current = false
+          if (sendLoopGenRef.current === myGen) transferRef.current.setTransferState('RESUMING')
           return
         }
 
@@ -1109,17 +1339,71 @@ export function useFluxDrop() {
       }
       const combined = m.files.map((f) => f.checksum).join('')
       rtc.sendTransferComplete(m.transferId, combined)
-      sendingRef.current = false
     } catch (err: any) {
-      sendingRef.current = false
       playError()
       toast.error('Send error', { description: err.message, duration: 10000 })
       transferRef.current.addErrorLog({ message: `Send error: ${err.message}` })
       transferRef.current.setTransferState('FAILED')
       transferRef.current.setError(err.message)
       await persistTransferRecord('sender', 'FAILED')
+    } finally {
+      // Release the sending lock ONLY if this loop still owns it — a
+      // watchdog force-restart may have started a newer loop already.
+      if (sendLoopGenRef.current === myGen) {
+        sendingRef.current = false
+      }
     }
-  }, [persistTransferRecord])
+  }, [persistTransferRecord, flushReceiverBuffers])
+
+  // Register beginSending for the watchdog effect (declared below) — refs
+  // avoid the temporal-dead-zone of referencing it from an earlier callback.
+  useEffect(() => {
+    beginSendingRef.current = beginSending
+  }, [beginSending])
+
+  // ---- Page unload: persist receiver state best-effort ----
+  // Chunks received but not yet flushed go to IndexedDB so a resumed re-send
+  // can skip them after the page comes back.
+  useEffect(() => {
+    const onUnload = () => {
+      try { flushReceiverBuffers() } catch { /* ignore */ }
+      void flushAllPendingAcks()
+    }
+    window.addEventListener('beforeunload', onUnload)
+    return () => window.removeEventListener('beforeunload', onUnload)
+  }, [flushReceiverBuffers])
+
+  // ---- 30s no-progress stall watchdog ----
+  // The send loop can hang (hung await, tab throttling, dev Fast Refresh)
+  // while the UI still shows TRANSFERRING. resumeTransfer/kickSenderLoop can't
+  // help when sendingRef is stuck true. This interval detects zero chunk
+  // progress over 30s and force-restarts the loop from the last recorded
+  // position (generation counter supersedes the hung loop safely).
+  useEffect(() => {
+    const id = setInterval(() => {
+      const st = transferRef.current.transferState
+      if (st !== 'TRANSFERRING') {
+        stallTicksRef.current = 0
+        return
+      }
+      const idx = senderNextIndexRef.current
+      if (idx === stallLastIdxRef.current) {
+        stallTicksRef.current++
+        if (stallTicksRef.current >= 6) {
+          stallTicksRef.current = 0
+          console.log(`[FluxDrop] Send loop stalled 30s at chunk ${idx} — force-restarting`)
+          transferRef.current.addErrorLog({ message: `Send loop stalled — auto-restarted from chunk ${idx}` })
+          sendLoopGenRef.current++ // supersede the hung loop
+          sendingRef.current = false
+          void beginSendingRef.current?.(idx)
+        }
+      } else {
+        stallLastIdxRef.current = idx
+        stallTicksRef.current = 0
+      }
+    }, 5000)
+    return () => clearInterval(id)
+  }, [])
 
   // ---- Dead-loop watchdog ----
   // The send loop can die silently (e.g. tab throttling, dev Fast Refresh)
@@ -1187,6 +1471,27 @@ export function useFluxDrop() {
       // Persist the files so history-resume can re-attach them later
       // (removed automatically once the transfer completes).
       void saveSenderFiles(m.transferId, files)
+      // Fresh sends carry no skip state; resumed sends start empty too (the
+      // bitmap arrives via the RESUME_QUERY handshake after MANIFEST_ACK).
+      skipIndicesRef.current = new Set()
+      resumeSkipUsedRef.current = false
+      // Resumed sends query the receiver before streaming so already-stored
+      // chunks are skipped (RESUME_QUERY handshake after MANIFEST_ACK).
+      resumeSkipPendingRef.current = !!resumeManifest
+      if (resumeManifest) {
+        // Mark the history record so the UI can show a "Resumed" badge.
+        void (async () => {
+          try {
+            const rec = await getTransferRecord(m.transferId)
+            if (rec) {
+              rec.resumedAt = Date.now()
+              rec.status = 'PAIRING'
+              rec.finishedAt = undefined
+              await saveTransferRecord(rec)
+            }
+          } catch { /* best-effort */ }
+        })()
+      }
       manifestRef.current = m
       slicePlanRef.current = buildSlicePlan(m)
       transferRef.current.setManifest(m)
@@ -1312,11 +1617,28 @@ export function useFluxDrop() {
     })
     transferRef.current.setTransferState('CANCELLED')
     transferRef.current.setError(reason)
+    // STOP the send loop: supersede the current generation so the loop aborts
+    // at its next iteration check. Without this, a cancelled transfer kept
+    // streaming in the background until the DataChannel closed.
+    sendLoopGenRef.current++
+    sendingRef.current = false
+    skipIndicesRef.current = new Set()
+    // Cancel any pending resume-skip handshake.
+    resumeSkipPendingRef.current = false
+    if (resumeQueryTimerRef.current) {
+      clearTimeout(resumeQueryTimerRef.current)
+      resumeQueryTimerRef.current = null
+    }
+    // Persist received chunks so a later resume can skip them. Flush twice:
+    // once now, and once after acks flush — chunks that arrived between the
+    // two points would otherwise end up acked-but-unstored (a hole in any
+    // later resume-skip bitmap).
+    flushReceiverBuffers()
     if (m) {
       void persistTransferRecord(filesRef.current.length > 0 ? 'sender' : 'receiver', 'CANCELLED')
-      void flushAllPendingAcks()
+      void flushAllPendingAcks().then(() => flushReceiverBuffers())
     }
-  }, [])
+  }, [flushReceiverBuffers])
   // ---- Public API: leave room / reset ----
   const cleanup = useCallback(() => {
     clearPaused()
@@ -1326,6 +1648,15 @@ export function useFluxDrop() {
     signalingRef.current?.leaveRoom()
     signalingRef.current?.disconnect()
     signalingRef.current = null
+    // Kill any running send loop generation.
+    sendLoopGenRef.current++
+    skipIndicesRef.current = new Set()
+    resumeSkipPendingRef.current = false
+    if (resumeQueryTimerRef.current) {
+      clearTimeout(resumeQueryTimerRef.current)
+      resumeQueryTimerRef.current = null
+    }
+    stallTicksRef.current = 0
     // Flush any pending IndexedDB ack writes before resetting state.
     void flushAllPendingAcks()
     sessionRef.current.resetSession()
@@ -1334,6 +1665,7 @@ export function useFluxDrop() {
     filesRef.current = []
     slicePlanRef.current = []
     receiverBuffersRef.current.clear()
+    flushedChunkIdsRef.current = new Set()
     sendingRef.current = false
     checksumVerifiedRef.current = null
   }, [])

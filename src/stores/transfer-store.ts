@@ -28,6 +28,8 @@ interface TransferStoreState {
   totalBytes: number
   ackChunk: (bytes: number) => void
   resetProgress: (totalChunks: number, totalBytes: number) => void
+  /** Seed progress after skipping already-received chunks (resume flows). */
+  seedProgress: (chunks: number, bytes: number) => void
   // Internal: batched ack state (not for UI use)
   _pendingChunks: number
   _pendingBytes: number
@@ -139,6 +141,17 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
       _pendingBytes: 0,
       _flushTimer: null,
     }),
+
+  seedProgress: (chunks, bytes) =>
+    set((st) => ({
+      chunksAcked: chunks,
+      bytesTransferred: bytes,
+      // Sync speed-sampling baselines so the seeded progress doesn't show up
+      // as a giant instantaneous speed spike.
+      _lastSpeedSampleBytes: bytes,
+      _pendingChunks: 0,
+      _pendingBytes: 0,
+    })),
 
   startedAt: null,
   startTimer: () => set({ startedAt: Date.now(), _lastSpeedSampleAt: Date.now(), _lastSpeedSampleBytes: 0, _pausedAt: null, _pausedTotalMs: 0 }),
