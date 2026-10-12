@@ -121,7 +121,7 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/fluxdrop.git
+git clone https://github.com/20Youssef10/fluxdrop.git
 cd fluxdrop
 
 # Install dependencies

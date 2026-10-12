@@ -12,7 +12,7 @@ Thank you for your interest in contributing to FluxDrop! This document covers th
 
 ```bash
 # Clone
-git clone https://github.com/YOUR_USERNAME/fluxdrop.git
+git clone https://github.com/20Youssef10/fluxdrop.git
 cd fluxdrop
 
 # Install dependencies
