@@ -17,6 +17,7 @@ import { OnboardingTour } from '@/components/fluxdrop/onboarding-tour'
 import { ConnectionRipple } from '@/components/fluxdrop/connection-ripple'
 import { TipsBanner } from '@/components/fluxdrop/tips-banner'
 import { ConsentDialog } from '@/components/fluxdrop/consent-dialog'
+import { VerificationCode } from '@/components/fluxdrop/verification-code'
 import { useFluxDrop } from '@/hooks/fluxdrop/use-fluxdrop'
 import { useKeyboardShortcuts } from '@/hooks/fluxdrop/use-keyboard-shortcuts'
 import { useSessionStore } from '@/stores/session-store'
@@ -190,6 +191,9 @@ export default function Home() {
         onAccept={flux.acceptTransfer}
         onReject={flux.rejectTransfer}
       />
+
+      {/* Security verification code (shown during active transfer) */}
+      <VerificationCode />
     </div>
   )
 }

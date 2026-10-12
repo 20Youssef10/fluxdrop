@@ -168,7 +168,19 @@ export function DiagnosticsPanel() {
                 />
               </div>
 
-              {/* Candidate types explanation */}
+              {/* Observability: buffered amount + throughput */}
+              <div className="grid grid-cols-2 gap-2">
+                <Stat
+                  icon={<Zap className="h-3 w-3" />}
+                  label="Buffered"
+                  value={formatBytes(diagnostics?.selectedPair?.bytesSent ?? 0)}
+                />
+                <Stat
+                  icon={<Activity className="h-3 w-3" />}
+                  label="Requests"
+                  value={`${diagnostics?.selectedPair?.requestsSent ?? 0} / ${diagnostics?.selectedPair?.requestsReceived ?? 0}`}
+                />
+              </div>
               <div className="rounded-lg border border-border/40 bg-muted/20 p-3 text-[11px] text-muted-foreground">
                 <p className="font-medium text-foreground mb-1">Candidate types</p>
                 <div className="flex flex-wrap gap-x-4 gap-y-1">

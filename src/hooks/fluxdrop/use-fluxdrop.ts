@@ -24,7 +24,7 @@ import {
   flushAllPendingAcks,
   type StoredTransfer,
 } from '@/lib/fluxdrop/resume'
-import { assembleBlob, saveBlobWithPicker } from '@/lib/fluxdrop/file-io'
+import { assembleBlob, saveBlobWithPicker, saveFilesToDirectory } from '@/lib/fluxdrop/file-io'
 import { addRecentRoom } from '@/lib/fluxdrop/recent-rooms'
 import { MessageType, CONSTANTS, type TransferManifest, type TransferSummary } from '@/lib/fluxdrop/protocol'
 import { toast } from 'sonner'
@@ -375,13 +375,11 @@ export function useFluxDrop() {
           transferRef.current.setTransferState('MANIFEST_EXCHANGE')
           const m = manifestRef.current
           if (m) {
+            // Send manifest via DataChannel only (not via signaling).
+            // The signaling relay was redundant — the DataChannel is the
+            // secure transport. Sending via signaling exposed file metadata
+            // (names, sizes, checksums) to the server unnecessarily.
             webrtcRef.current?.sendManifest(m.transferId, m)
-            signalingRef.current?.sendTransferManifest({
-              roomId: sessionRef.current.roomId!,
-              from: sessionRef.current.deviceId,
-              to: peerDeviceIdRef.current!,
-              manifest: m,
-            })
           }
         },
         onDataChannelClose: () => {
@@ -659,10 +657,12 @@ export function useFluxDrop() {
   const finishReceiverTransfer = useCallback(async () => {
     const m = manifestRef.current
     if (!m) return
-    // Create a verification promise so verifyReceiverTransfer can await it.
     const verifyPromise = (async () => {
     transferRef.current.setTransferState('VERIFYING')
     try {
+      // Assemble all files, verify checksums, and save preserving folder structure.
+      const assembledFiles: { name: string; blob: Blob; relativePath: string }[] = []
+
       for (let i = 0; i < m.files.length; i++) {
         const entry = m.files[i]
         const fileChunks: ArrayBuffer[] = []
@@ -691,9 +691,24 @@ export function useFluxDrop() {
           webrtcRef.current?.sendTransferCompleteAck(m.transferId, false)
           return
         }
-        await saveBlobWithPicker(blob, entry.name)
+        assembledFiles.push({ name: entry.name, blob, relativePath: entry.relativePath })
         transferRef.current.markFileComplete(i)
       }
+
+      // Save: use directory picker for multi-file (preserves folder structure),
+      // or save picker for single file.
+      if (assembledFiles.length > 1) {
+        const result = await saveFilesToDirectory(assembledFiles)
+        if (result === 'cancelled') {
+          toast.info('Save cancelled — files not saved')
+        }
+      } else if (assembledFiles.length === 1) {
+        await saveBlobWithPicker(assembledFiles[0].blob, assembledFiles[0].name)
+      }
+
+      // Free memory: clear receiver buffers after saving.
+      receiverBuffersRef.current.clear()
+
       checksumVerifiedRef.current = true
       transferRef.current.setChecksumVerified(true)
       transferRef.current.setTransferState('COMPLETE')
