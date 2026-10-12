@@ -214,8 +214,9 @@ export class FluxDropWebRTC {
       const onClose = () => cleanup()
       channel.addEventListener('bufferedamountlow', onLow)
       channel.addEventListener('close', onClose)
-      // Safety timeout in case the event never fires.
-      const timerId = setTimeout(cleanup, 2000)
+      // Safety timeout: 500ms is enough — the browser flushes the buffer quickly.
+      // 2s was too long and stalled the pipeline on every backpressure event.
+      const timerId = setTimeout(cleanup, 500)
     })
   }
 

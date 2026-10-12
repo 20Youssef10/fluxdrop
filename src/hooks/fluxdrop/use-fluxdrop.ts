@@ -520,14 +520,19 @@ export function useFluxDrop() {
       }
       case MessageType.CHUNK_DATA: {
         if (!m) return
-        await saveChunk(m.transferId, msg.chunkIndex, msg.payload)
+        // Keep chunk in memory (fast). Only save to IndexedDB if the transfer
+        // is interrupted — we do this lazily to avoid IDB write overhead on
+        // every single chunk, which is the #1 throughput killer.
         receiverBuffersRef.current.set(msg.chunkIndex, msg.payload)
+        // Send ACK immediately (non-blocking) so the sender can keep streaming.
         webrtcRef.current?.sendChunkAck(m.transferId, msg.chunkIndex, true)
         const bytes = msg.payload.byteLength
         transferRef.current.ackChunk(bytes)
         const resolved = resolveChunk(slicePlanRef.current, msg.chunkIndex, m.chunkSize)
         if (resolved) transferRef.current.addFileBytes(resolved.fileIndex, bytes)
-        await markChunkAcked(m.transferId, msg.chunkIndex)
+        // Track ack in memory (fast). IndexedDB flush is debounced.
+        // Don't await — fire and forget so we don't block the receive loop.
+        void markChunkAcked(m.transferId, msg.chunkIndex)
         if (msg.chunkIndex === m.totalChunks - 1) {
           await finishReceiverTransfer()
         }
@@ -705,6 +710,8 @@ export function useFluxDrop() {
           })
           return
         }
+        // Backpressure: only wait when buffer is full, not on every chunk.
+        // This lets us send bursts of chunks at full speed.
         if (!rtc.canSend()) await rtc.waitForDrain()
         const resolved = resolveChunk(plan, i, m.chunkSize)
         if (!resolved) continue
@@ -718,6 +725,10 @@ export function useFluxDrop() {
           transferRef.current.setTransferState('RESUMING')
           sendingRef.current = false
           return
+        }
+        // Yield to event loop every 64 chunks so UI can update progress.
+        if (i % 64 === 0) {
+          await new Promise((r) => setTimeout(r, 0))
         }
       }
       const combined = m.files.map((f) => f.checksum).join('')
