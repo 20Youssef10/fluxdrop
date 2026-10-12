@@ -1069,3 +1069,50 @@ Task: Answer "Does it consume data/Internet if both devices are on the same LAN?
 - **Lint: clean (0 errors, 0 warnings)**
 - **FAQ visible** in Help dialog: "Does it use internet data if both devices are on the same LAN?"
 - **No console errors**.
+
+---
+
+Task ID: 17
+Agent: direct review
+Task: Create README, LICENSE, docs, and push to GitHub.
+
+## Documentation Created (6 files)
+
+1. **README.md** — Comprehensive project documentation:
+   - Features overview (core, transfer, UX, diagnostics, history, settings, help)
+   - Architecture diagram
+   - Tech stack table
+   - Binary wire protocol spec
+   - Getting started (prerequisites, installation, running)
+   - How it works (sender flow, receiver flow, connection types)
+   - Keyboard shortcuts table
+   - Project structure tree
+   - Security overview
+   - License, contributing, acknowledgments
+
+2. **LICENSE** — MIT License
+
+3. **CHANGELOG.md** — Version 1.0.0 changelog with all 50+ features listed
+
+4. **CONTRIBUTING.md** — Development setup, coding standards, contribution workflow
+
+5. **CODE_OF_CONDUCT.md** — Community guidelines (Contributor Covenant)
+
+6. **docs/architecture/README.md** — Detailed architecture documentation:
+   - System overview
+   - Module boundaries
+   - Protocol design (binary wire protocol)
+   - Transfer state machine
+   - Chunked transfer design
+   - Device discovery & pairing
+   - Security design
+   - Resume & persistence (IndexedDB schema)
+
+## GitHub Repository
+
+- **Repo URL**: https://github.com/20Youssef10/fluxdrop
+- **Owner**: 20Youssef10
+- **Visibility**: Public
+- **Description**: "Peer-to-peer file transfer that flows directly between your devices. No cloud, no servers — just a direct, encrypted WebRTC tunnel."
+- **Branch**: main
+- **Status**: All files pushed successfully (109 src files + 4 mini-service files + 6 docs)
