@@ -48,6 +48,10 @@ interface TransferStoreState {
   // Errors
   error: string | null
   setError: (e: string | null) => void
+  // Error log (persistent, doesn't disappear like toasts)
+  errorLog: { timestamp: number; message: string; chunkIndex?: number }[]
+  addErrorLog: (entry: { message: string; chunkIndex?: number }) => void
+  clearErrorLog: () => void
 
   // Checksum verification
   checksumVerified: boolean | null
@@ -141,6 +145,11 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
 
   error: null,
   setError: (e) => set({ error: e }),
+  errorLog: [],
+  addErrorLog: (entry) => set((s) => ({
+    errorLog: [...s.errorLog, { timestamp: Date.now(), ...entry }].slice(-20) // keep last 20
+  })),
+  clearErrorLog: () => set({ errorLog: [] }),
 
   checksumVerified: null,
   setChecksumVerified: (v) => set({ checksumVerified: v }),

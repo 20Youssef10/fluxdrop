@@ -395,6 +395,8 @@ export function useFluxDrop() {
         onError: (err) => {
           // Log all WebRTC errors for diagnostics.
           console.warn('[FluxDrop] WebRTC error:', err.message)
+          // Add to persistent error log (doesn't disappear like toasts)
+          transferRef.current.addErrorLog({ message: err.message })
           // Only show a toast for critical errors, not benign ICE candidate failures.
           const msg = err.message.toLowerCase()
           const isBenign =
@@ -404,7 +406,7 @@ export function useFluxDrop() {
             msg.includes('stun') ||
             msg.includes('gather')
           if (!isBenign) {
-            toast.error('WebRTC error', { description: err.message })
+            toast.error('WebRTC error', { description: err.message, duration: 10000 })
           }
         },
       },
@@ -468,6 +470,8 @@ export function useFluxDrop() {
         onError: (err) => {
           // Log all WebRTC errors for diagnostics.
           console.warn('[FluxDrop] WebRTC error:', err.message)
+          // Add to persistent error log (doesn't disappear like toasts)
+          transferRef.current.addErrorLog({ message: err.message })
           // Only show a toast for critical errors, not benign ICE candidate failures.
           const msg = err.message.toLowerCase()
           const isBenign =
@@ -477,7 +481,7 @@ export function useFluxDrop() {
             msg.includes('stun') ||
             msg.includes('gather')
           if (!isBenign) {
-            toast.error('WebRTC error', { description: err.message })
+            toast.error('WebRTC error', { description: err.message, duration: 10000 })
           }
         },
       },
@@ -721,7 +725,8 @@ export function useFluxDrop() {
       sendingRef.current = false
     } catch (err: any) {
       sendingRef.current = false
-      toast.error('Send error', { description: err.message })
+      toast.error('Send error', { description: err.message, duration: 10000 })
+      transferRef.current.addErrorLog({ message: `Send error: ${err.message}` })
       transferRef.current.setTransferState('FAILED')
       transferRef.current.setError(err.message)
     }

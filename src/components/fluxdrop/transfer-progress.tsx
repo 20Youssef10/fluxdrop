@@ -14,6 +14,7 @@ import { SpeedSparkline } from './speed-sparkline'
 import { Celebration } from './celebration'
 import { ConnectionViz } from './connection-viz'
 import { TransferSummaryCard } from './transfer-summary-card'
+import { ErrorLogPanel } from './error-log-panel'
 import { useState, useEffect, useRef, memo } from 'react'
 
 interface TransferProgressProps {
@@ -234,6 +235,9 @@ export function TransferProgress({ onCancel, onDone }: TransferProgressProps) {
       )}
       </>
       )}
+
+      {/* Persistent error log (doesn't disappear like toasts) */}
+      <ErrorLogPanel />
     </div>
   )
 }
