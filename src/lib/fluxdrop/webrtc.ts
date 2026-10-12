@@ -4,7 +4,7 @@
 
 'use client'
 
-import { CONSTANTS, MessageType } from './protocol'
+import { CONSTANTS, MessageType, HEADER_SIZE } from './protocol'
 import {
   encodeChunkData,
   encodeChunkAck,
@@ -46,6 +46,13 @@ export class FluxDropWebRTC {
   /** Queue of ICE candidates that arrived before setRemoteDescription. */
   private pendingCandidates: RTCIceCandidateInit[] = []
   private remoteDescriptionSet = false
+  /** Chunk size negotiated from SCTP max-message-size (set on DC open). */
+  private negotiatedChunkSize: number = CONSTANTS.CHUNK_SIZE
+
+  /** Get the effective chunk size (negotiated or default). */
+  get effectiveChunkSize(): number {
+    return this.negotiatedChunkSize || CONSTANTS.CHUNK_SIZE
+  }
 
   constructor(config: WebRTCConfig, isInitiator: boolean) {
     this.config = config
@@ -106,7 +113,23 @@ export class FluxDropWebRTC {
     channel.binaryType = 'arraybuffer'
     channel.bufferedAmountLowThreshold = CONSTANTS.TARGET_BUFFERED_BYTES
 
-    channel.onopen = () => this.config.onDataChannelOpen()
+    channel.onopen = () => {
+      // Read the negotiated SCTP max message size to use the largest safe chunk.
+      // Chromium negotiates well above 64 KB (often 256 KB+), so this cuts
+      // message count ~4x without SDP munging.
+      const sctp = (this.pc as any).sctp
+      if (sctp?.maxMessageSize) {
+        // Use 90% of the negotiated max to leave room for the 9-byte header
+        // and any overhead. Clamp to [16 KB, 1 MB] for safety.
+        const negotiated = sctp.maxMessageSize as number
+        this.negotiatedChunkSize = Math.min(
+          Math.max(Math.floor(negotiated * 0.9) - HEADER_SIZE, 16 * 1024),
+          1024 * 1024
+        )
+        console.log(`[FluxDrop] Negotiated max-message-size: ${negotiated} bytes, using chunk size: ${this.negotiatedChunkSize}`)
+      }
+      this.config.onDataChannelOpen()
+    }
     channel.onclose = () => this.config.onDataChannelClose()
     channel.onerror = (e: any) => {
       // RTCErrorEvent stores the actual Error on `e.error`, not `e.message`.

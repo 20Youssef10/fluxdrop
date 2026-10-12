@@ -104,7 +104,9 @@
 └──────────┴────────────┴──────────────┴──────────────┘
 ```
 
-- **9-byte header** — minimal overhead (0.0009% for a 1 MB chunk)
+- **9-byte header** — minimal overhead
+- **64 KB chunks** — WebRTC spec default max-message-size, safe for all browsers
+- **Negotiated chunk size** — after DataChannel opens, reads `pc.sctp.maxMessageSize` and uses the largest safe chunk (up to 256 KB)
 - **Big-endian** — fixed-offset O(1) parsing
 - **Native ArrayBuffer** — no encoding overhead on the hot path
 
@@ -257,14 +259,21 @@ fluxdrop/
 - Your device alias
 - Room ID and PIN
 - WebRTC connection metadata (SDP, ICE candidates)
+- File manifest (file names, sizes, types, checksums) — relayed via signaling for initial setup
+- Device alias
 
 ### What stays on your device
-- File contents
+- File contents (never relayed through signaling)
 - Transfer history (IndexedDB)
 - Device preferences
 
 ### What is never stored
-- File data on any server
+- File data on any server — bytes flow directly peer-to-peer via WebRTC DataChannel
+
+### Limitations
+- Files > 256 MB use a Merkle-like hash construction (not standard SHA-256 of the file). Corruption is still detected, but `sha256sum` won't match for large files.
+- E2E encryption depends on an honest signaling server. A malicious server could MITM the DTLS handshake. For maximum security, verify a short code shown on both devices.
+- `crypto.randomUUID` and `crypto.subtle` require HTTPS or localhost. For LAN use without localhost, serve via HTTPS (e.g., mkcert).
 
 ---
 

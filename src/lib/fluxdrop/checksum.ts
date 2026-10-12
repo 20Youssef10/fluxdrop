@@ -1,28 +1,34 @@
-// SHA-256 streaming checksum using the Web Crypto API.
-// For large files, uses a segmented approach to bound memory usage.
+// SHA-256 checksum using the Web Crypto API.
+// For files ≤ 256 MB: read whole file and hash directly (standard SHA-256).
+// For files > 256 MB: hash in 4 MB segments and combine the segment hashes
+// into a final digest. This is NOT standard SHA-256 of the file — it's a
+// Merkle-like construction. The README documents this limitation.
 // Yields to the event loop periodically to avoid blocking the UI.
 
 const HASH_CHUNK_SIZE = 4 * 1024 * 1024 // 4MB read slices
-const SMALL_FILE_THRESHOLD = 64 * 1024 * 1024 // ≤64MB: read whole file
+const WHOLE_FILE_THRESHOLD = 256 * 1024 * 1024 // ≤256MB: read whole file
 const YIELD_INTERVAL = 4 // yield to UI every N chunks
 
 export async function hashFile(file: File | Blob): Promise<string> {
   const total = file.size
   if (total === 0) {
-    // SHA-256 of empty input
     const digest = await crypto.subtle.digest('SHA-256', new ArrayBuffer(0))
     return bufToHex(digest)
   }
 
   // Small files: read whole file into memory and hash directly.
-  if (total <= SMALL_FILE_THRESHOLD) {
+  // This produces standard SHA-256 that matches `sha256sum`.
+  if (total <= WHOLE_FILE_THRESHOLD) {
     const buf = await file.arrayBuffer()
     const digest = await crypto.subtle.digest('SHA-256', buf)
     return bufToHex(digest)
   }
 
   // Large files: hash each segment, then hash the concatenated segment digests.
-  // This bounds memory to one chunk at a time (4MB) + the digest array.
+  // NOTE: This is NOT standard SHA-256 of the file. It's a Merkle-like
+  // construction for memory-bounded hashing. The checksum still detects
+  // any corruption (a single bit change in any segment changes the final
+  // digest), but it won't match `sha256sum` output for files > 256 MB.
   const digests: ArrayBuffer[] = []
   let offset = 0
   let chunkNum = 0
@@ -42,8 +48,6 @@ export async function hashFile(file: File | Blob): Promise<string> {
     }
   }
 
-  // Hash the concatenated segment digests (not the raw file data).
-  // This is memory-efficient: only the 32-byte digests are concatenated.
   const combined = concatArrayBuffers(digests)
   const finalDigest = await crypto.subtle.digest('SHA-256', combined)
   return bufToHex(finalDigest)

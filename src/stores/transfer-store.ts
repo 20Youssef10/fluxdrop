@@ -28,6 +28,10 @@ interface TransferStoreState {
   totalBytes: number
   ackChunk: (bytes: number) => void
   resetProgress: (totalChunks: number, totalBytes: number) => void
+  // Internal: batched ack state (not for UI use)
+  _pendingChunks: number
+  _pendingBytes: number
+  _flushTimer: ReturnType<typeof setTimeout> | null
 
   // Speed tracking
   startedAt: number | null
@@ -86,11 +90,28 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
   totalChunks: 0,
   bytesTransferred: 0,
   totalBytes: 0,
-  ackChunk: (bytes) =>
-    set((s) => ({
-      chunksAcked: s.chunksAcked + 1,
-      bytesTransferred: s.bytesTransferred + bytes,
-    })),
+  // Batched chunk ack: accumulate in memory, flush to Zustand every 100ms.
+  // This prevents per-chunk re-renders (24K+ for a 1.5 GB file).
+  _pendingChunks: 0,
+  _pendingBytes: 0,
+  _flushTimer: null as ReturnType<typeof setTimeout> | null,
+  ackChunk: (bytes) => {
+    const s = get()
+    s._pendingChunks++
+    s._pendingBytes += bytes
+    // Flush at most every 100ms (10 Hz).
+    if (!s._flushTimer) {
+      s._flushTimer = setTimeout(() => {
+        set((st) => ({
+          chunksAcked: st.chunksAcked + st._pendingChunks,
+          bytesTransferred: st.bytesTransferred + st._pendingBytes,
+          _pendingChunks: 0,
+          _pendingBytes: 0,
+          _flushTimer: null,
+        }))
+      }, 100)
+    }
+  },
   resetProgress: (totalChunks, totalBytes) =>
     set({
       chunksAcked: 0,
@@ -103,6 +124,9 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
       _lastSpeedSampleBytes: null,
       speedHistory: [],
       checksumVerified: null,
+      _pendingChunks: 0,
+      _pendingBytes: 0,
+      _flushTimer: null,
     }),
 
   startedAt: null,
@@ -179,5 +203,8 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
       checksumVerified: null,
       resumeAvailable: false,
       hashingProgress: null,
+      _pendingChunks: 0,
+      _pendingBytes: 0,
+      _flushTimer: null,
     }),
 }))
