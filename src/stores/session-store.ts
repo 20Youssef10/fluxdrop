@@ -3,7 +3,7 @@
 'use client'
 
 import { create } from 'zustand'
-import type { DeviceRole } from '@/lib/fluxdrop/protocol'
+import type { DeviceRole, TransferManifest } from '@/lib/fluxdrop/protocol'
 import { generateDeviceAlias } from '@/lib/fluxdrop/format'
 import { getDevicePreferences, saveDevicePreferences, type DevicePreferences } from '@/lib/fluxdrop/resume'
 
@@ -68,6 +68,10 @@ interface SessionState {
   setRtcState: (s: string) => void
   dataChannelOpen: boolean
   setDataChannelOpen: (v: boolean) => void
+
+  // Pending manifest for receiver consent (set before user accepts)
+  pendingManifest: TransferManifest | null
+  setPendingManifest: (m: TransferManifest | null) => void
 
   // WebRTC diagnostics
   iceGatheringState: string
@@ -218,6 +222,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   setRtcState: (s) => set({ rtcState: s }),
   dataChannelOpen: false,
   setDataChannelOpen: (v) => set({ dataChannelOpen: v }),
+
+  pendingManifest: null,
+  setPendingManifest: (m) => set({ pendingManifest: m }),
 
   iceGatheringState: 'new',
   setIceGatheringState: (s) => set({ iceGatheringState: s }),

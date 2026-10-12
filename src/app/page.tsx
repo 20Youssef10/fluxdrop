@@ -16,6 +16,7 @@ import { TransferAnnouncer } from '@/components/fluxdrop/transfer-announcer'
 import { OnboardingTour } from '@/components/fluxdrop/onboarding-tour'
 import { ConnectionRipple } from '@/components/fluxdrop/connection-ripple'
 import { TipsBanner } from '@/components/fluxdrop/tips-banner'
+import { ConsentDialog } from '@/components/fluxdrop/consent-dialog'
 import { useFluxDrop } from '@/hooks/fluxdrop/use-fluxdrop'
 import { useKeyboardShortcuts } from '@/hooks/fluxdrop/use-keyboard-shortcuts'
 import { useSessionStore } from '@/stores/session-store'
@@ -181,6 +182,14 @@ export default function Home() {
       <TransferAnnouncer />
       <OnboardingTour />
       <ConnectionRipple />
+
+      {/* Receiver consent dialog */}
+      <ConsentDialog
+        manifest={flux.session.pendingManifest}
+        peerAlias={flux.session.peers[0]?.alias ?? 'Unknown'}
+        onAccept={flux.acceptTransfer}
+        onReject={flux.rejectTransfer}
+      />
     </div>
   )
 }

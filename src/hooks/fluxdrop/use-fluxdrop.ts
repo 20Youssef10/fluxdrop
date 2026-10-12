@@ -585,9 +585,12 @@ export function useFluxDrop() {
   }, [])
 
   // ---- Receiver: handle incoming manifest (via DC or signaling) ----
+  // Instead of auto-accepting, set pendingManifest so the UI can show
+  // a consent dialog for the user to accept or reject.
   const handleIncomingManifest = useCallback(async (m: TransferManifest) => {
     if (!m || !m.transferId) return
     if (manifestRef.current?.transferId === m.transferId) {
+      // Already seen — re-ack.
       webrtcRef.current?.sendManifestAck(m.transferId, true)
       return
     }
@@ -597,6 +600,16 @@ export function useFluxDrop() {
     transferRef.current.resetProgress(m.totalChunks, m.totalSize)
     transferRef.current.initFiles(m.files)
     transferRef.current.setTransferState('MANIFEST_EXCHANGE')
+    // Set pending manifest so the ConsentDialog shows in the UI.
+    // The user must explicitly accept before transfer begins.
+    sessionRef.current.setPendingManifest(m)
+  }, [])
+
+  /** Called when the user accepts the transfer in the ConsentDialog. */
+  const acceptTransfer = useCallback(async () => {
+    const m = manifestRef.current
+    if (!m) return
+    sessionRef.current.setPendingManifest(null)
     transferRef.current.setTransferState('TRANSFERRING')
     transferRef.current.startTimer()
     webrtcRef.current?.sendManifestAck(m.transferId, true)
@@ -620,6 +633,23 @@ export function useFluxDrop() {
     }
     await saveTransferRecord(rec)
     toast.success(`Receiving ${m.files.length} file${m.files.length > 1 ? 's' : ''} (${formatBytes(m.totalSize)})`)
+  }, [])
+
+  /** Called when the user rejects the transfer in the ConsentDialog. */
+  const rejectTransfer = useCallback(() => {
+    const m = manifestRef.current
+    if (!m) return
+    sessionRef.current.setPendingManifest(null)
+    webrtcRef.current?.sendManifestAck(m.transferId, false, 'Rejected by user')
+    signalingRef.current?.sendTransferAccepted({
+      roomId: sessionRef.current.roomId!,
+      from: sessionRef.current.deviceId,
+      to: peerDeviceIdRef.current!,
+      accepted: false,
+      reason: 'Rejected by user',
+    })
+    transferRef.current.setTransferState('FAILED')
+    toast.info('Transfer rejected')
   }, [])
 
   // ---- Receiver: finish transfer (assemble + verify + save) ----
@@ -967,6 +997,8 @@ export function useFluxDrop() {
     startSend,
     startReceive,
     cancelTransfer,
+    acceptTransfer,
+    rejectTransfer,
     cleanup,
   }
 }
