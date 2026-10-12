@@ -130,28 +130,8 @@ export class FluxDropWebRTC {
   }
 
   // === SDP flow ===
-
-  /**
-   * Munge the SDP to negotiate a larger max-message-size for the SCTP transport.
-   * The WebRTC spec default is 64 KB, but most browsers support much more.
-   * We set it to 1 MB so we can use 256 KB chunks safely.
-   * This is a well-known SDP munging technique used by many WebRTC file transfer apps.
-   */
-  private mungeMaxMessageSize(sdp: string | undefined, maxSize: number): string | undefined {
-    if (!sdp) return sdp
-    const line = `a=max-message-size:${maxSize}`
-    // Replace existing max-message-size line, or add it if not present.
-    if (sdp.includes('a=max-message-size:')) {
-      return sdp.replace(/a=max-message-size:\d+/, line)
-    }
-    // Add before the end of the m=application section.
-    return sdp + '\r\n' + line
-  }
-
   async createOffer(): Promise<RTCSessionDescriptionInit> {
     const offer = await this.pc.createOffer()
-    // Munge SDP to negotiate 1 MB max-message-size (default is often only 64 KB).
-    offer.sdp = this.mungeMaxMessageSize(offer.sdp, 1024 * 1024)
     await this.pc.setLocalDescription(offer)
     return offer
   }
@@ -162,15 +142,11 @@ export class FluxDropWebRTC {
     // Flush any ICE candidates that arrived before the offer.
     await this.flushPendingCandidates()
     const answer = await this.pc.createAnswer()
-    // Munge SDP to negotiate 1 MB max-message-size on the answer side too.
-    answer.sdp = this.mungeMaxMessageSize(answer.sdp, 1024 * 1024)
     await this.pc.setLocalDescription(answer)
     return answer
   }
 
   async acceptAnswer(answer: RTCSessionDescriptionInit): Promise<void> {
-    // The answer's SDP should already have the munged max-message-size from the
-    // receiver's createAnswer call. We just set it as remote description.
     await this.pc.setRemoteDescription(answer)
     this.remoteDescriptionSet = true
     await this.flushPendingCandidates()
@@ -243,34 +219,34 @@ export class FluxDropWebRTC {
   }
 
   /**
-   * Send a chunk. Returns true on success, false if the channel is closed
-   * or the send throws (e.g. buffer overflow, message too large).
+   * Send a chunk. Returns true on success, false if the channel is closed.
+   * If the send fails due to buffer overflow ("Failure to send data"), waits
+   * for the buffer to drain and retries once before giving up.
    */
   sendChunkData(transferId: string, chunkIndex: number, payload: ArrayBuffer): boolean {
     if (!this.channel || this.channel.readyState !== 'open') return false
+    const msg = encodeChunkData(transferId, chunkIndex, payload)
     try {
-      const msg = encodeChunkData(transferId, chunkIndex, payload)
-      // Safety check: if the encoded message exceeds a safe size, log a warning.
-      // The chunk size should be 16 KB which is safe for all browsers, but
-      // if someone changes the constant, this catches it before the send throws.
-      if (msg.byteLength > 256 * 1024) {
-        console.warn(`[FluxDrop] Chunk ${chunkIndex} is ${msg.byteLength} bytes — may exceed browser max-message-size. Consider reducing CHUNK_SIZE.`)
-      }
       this.channel.send(msg)
       return true
     } catch (err: any) {
-      // "Trying to send message larger than max-message-size" — this means
-      // the chunk size exceeds the browser's negotiated SCTP max message size.
-      // This should not happen with the 16 KB default, but if it does, surface
-      // a clear error message.
-      const msg = err.message || ''
-      if (msg.includes('max-message-size') || msg.includes('larger than')) {
+      const errMsg = err.message || ''
+      // "Failure to send data" or buffer overflow — wait for drain, then retry.
+      if (errMsg.includes('Failure to send') || errMsg.includes('buffer') || errMsg.includes('send')) {
+        // Don't retry synchronously — just return false so the sender loop
+        // calls waitForDrain() and then retries this chunk on the next iteration.
+        console.warn(`[FluxDrop] Send failed for chunk ${chunkIndex} (${msg.byteLength} bytes), will retry after drain: ${errMsg}`)
+        return false
+      }
+      // Max-message-size error — surface a clear message.
+      if (errMsg.includes('max-message-size') || errMsg.includes('larger than')) {
         this.config.onError(new Error(
-          `Chunk ${chunkIndex} (${payload.byteLength + 9} bytes) exceeds browser max-message-size. ` +
-          `Reduce CHUNK_SIZE in protocol.ts (current: ${CONSTANTS.CHUNK_SIZE} bytes).`
+          `Chunk ${chunkIndex} (${msg.byteLength} bytes) exceeds max-message-size. ` +
+          `Current CHUNK_SIZE: ${CONSTANTS.CHUNK_SIZE} bytes.`
         ))
       } else {
-        this.config.onError(new Error(`Failed to send chunk ${chunkIndex}: ${msg}`))
+        // Unknown error — log but don't spam the error log.
+        console.warn(`[FluxDrop] Failed to send chunk ${chunkIndex}: ${errMsg}`)
       }
       return false
     }

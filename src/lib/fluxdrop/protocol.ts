@@ -70,11 +70,16 @@ export const TRANSFER_ID_BYTES = 4
 
 // === Tunables ===
 export const CONSTANTS = {
-  // Chunk size: 256 KB + 9-byte header = 262,153 bytes.
-  // We negotiate a=max-message-size:1048576 (1 MB) via SDP munging in
-  // webrtc.ts, so 256 KB chunks are well within the 1 MB limit.
-  // For a 1.5 GB file: 6,144 chunks — good throughput with manageable overhead.
-  CHUNK_SIZE: 256 * 1024,                       // 256 KB (with SDP-negotiated 1 MB max)
+  // Chunk size: 64 KB + 9-byte header = 65,545 bytes.
+  // This is the WebRTC spec DEFAULT max-message-size — guaranteed to work
+  // on every browser without any SDP munging.
+  // We tried 256 KB with SDP munging (a=max-message-size:1MB) but some
+  // browsers/networks still reject it with "Failure to send data".
+  // 64 KB is the sweet spot: large enough for good throughput, small
+  // enough to work everywhere without negotiation.
+  // For a 1.5 GB file: 24,576 chunks (vs 98,304 at 16 KB) — 4x fewer.
+  // Throughput is maintained via aggressive buffering (32 MB target).
+  CHUNK_SIZE: 64 * 1024,                        // 64 KB (WebRTC spec default max)
   MAX_BUFFERED_BYTES: 32 * 1024 * 1024,        // 32 MB backpressure threshold
   TARGET_BUFFERED_BYTES: 8 * 1024 * 1024,      // 8 MB target (higher = more throughput)
   MAX_FILE_SIZE: 10 * 1024 * 1024 * 1024,      // 10 GB

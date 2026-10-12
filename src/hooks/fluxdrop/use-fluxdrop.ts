@@ -721,10 +721,22 @@ export function useFluxDrop() {
         const buf = await slice.arrayBuffer()
         const sent = rtc.sendChunkData(m.transferId, i, buf)
         if (!sent) {
-          // Channel closed mid-send — enter resume state.
-          transferRef.current.setTransferState('RESUMING')
-          sendingRef.current = false
-          return
+          // Send failed. If channel is still open, wait for drain and retry.
+          if (rtc.isOpen) {
+            await rtc.waitForDrain()
+            const retried = rtc.sendChunkData(m.transferId, i, buf)
+            if (!retried) {
+              // Still failed after retry — channel is probably closing.
+              transferRef.current.setTransferState('RESUMING')
+              sendingRef.current = false
+              return
+            }
+          } else {
+            // Channel closed — enter resume state.
+            transferRef.current.setTransferState('RESUMING')
+            sendingRef.current = false
+            return
+          }
         }
         // Yield to event loop every 64 chunks so UI can update progress.
         if (i % 64 === 0) {
