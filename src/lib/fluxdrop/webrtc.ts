@@ -186,35 +186,51 @@ export class FluxDropWebRTC {
   // === Backpressure-aware chunk sending ===
   canSend(): boolean {
     if (!this.channel) return false
-    // Target: soft threshold for flow control.
-    // Hard guard: never exceed MAX_BUFFERED_BYTES to avoid unbounded buffering.
-    return (
-      this.channel.bufferedAmount < CONSTANTS.TARGET_BUFFERED_BYTES &&
-      this.channel.bufferedAmount < CONSTANTS.MAX_BUFFERED_BYTES
-    )
+    // Use a conservative threshold: only send when buffer is below 2 MB.
+    // The SCTP send queue has its own internal limit (~256 messages),
+    // so we need to stay well below it to avoid "send queue is full".
+    return this.channel.bufferedAmount < CONSTANTS.TARGET_BUFFERED_BYTES
   }
 
+  /**
+   * Wait for the DataChannel buffer to drain below the low threshold.
+   * Uses the `bufferedamountlow` event with a polling fallback.
+   * Properly handles the "send queue is full" error by waiting long enough
+   * for the queue to actually empty.
+   */
   async waitForDrain(): Promise<void> {
     const channel = this.channel
     if (!channel) return
     if (channel.bufferedAmount < CONSTANTS.TARGET_BUFFERED_BYTES) return
+
+    // Wait for bufferedamountlow event, with polling fallback.
+    // The key: poll every 50ms AND listen for the event, whichever fires first.
     await new Promise<void>((resolve) => {
       let resolved = false
-      const cleanup = () => {
+      const finish = () => {
         if (resolved) return
         resolved = true
         channel.removeEventListener('bufferedamountlow', onLow)
         channel.removeEventListener('close', onClose)
-        if (timerId) clearTimeout(timerId)
+        if (pollId) clearInterval(pollId)
+        if (timeoutId) clearTimeout(timeoutId)
         resolve()
       }
-      const onLow = () => cleanup()
-      const onClose = () => cleanup()
+      const onLow = () => finish()
+      const onClose = () => finish()
+
       channel.addEventListener('bufferedamountlow', onLow)
       channel.addEventListener('close', onClose)
-      // Safety timeout: 500ms is enough — the browser flushes the buffer quickly.
-      // 2s was too long and stalled the pipeline on every backpressure event.
-      const timerId = setTimeout(cleanup, 500)
+
+      // Poll every 50ms — more reliable than just the event in some browsers.
+      const pollId = setInterval(() => {
+        if (channel.bufferedAmount < CONSTANTS.TARGET_BUFFERED_BYTES) {
+          finish()
+        }
+      }, 50)
+
+      // Safety timeout: 10 seconds (for very slow connections).
+      const timeoutId = setTimeout(finish, 10000)
     })
   }
 
@@ -231,11 +247,16 @@ export class FluxDropWebRTC {
       return true
     } catch (err: any) {
       const errMsg = err.message || ''
-      // "Failure to send data" or buffer overflow — wait for drain, then retry.
-      if (errMsg.includes('Failure to send') || errMsg.includes('buffer') || errMsg.includes('send')) {
-        // Don't retry synchronously — just return false so the sender loop
-        // calls waitForDrain() and then retries this chunk on the next iteration.
-        console.warn(`[FluxDrop] Send failed for chunk ${chunkIndex} (${msg.byteLength} bytes), will retry after drain: ${errMsg}`)
+      // "send queue is full", "Failure to send data", buffer overflow —
+      // these are transient errors. Return false so the sender loop calls
+      // waitForDrain() and retries.
+      if (
+        errMsg.includes('send queue') ||
+        errMsg.includes('Failure to send') ||
+        errMsg.includes('buffer') ||
+        errMsg.includes('send')
+      ) {
+        console.warn(`[FluxDrop] Send failed for chunk ${chunkIndex}, will retry after drain: ${errMsg}`)
         return false
       }
       // Max-message-size error — surface a clear message.
@@ -245,7 +266,6 @@ export class FluxDropWebRTC {
           `Current CHUNK_SIZE: ${CONSTANTS.CHUNK_SIZE} bytes.`
         ))
       } else {
-        // Unknown error — log but don't spam the error log.
         console.warn(`[FluxDrop] Failed to send chunk ${chunkIndex}: ${errMsg}`)
       }
       return false

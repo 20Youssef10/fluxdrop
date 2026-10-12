@@ -692,6 +692,20 @@ export function useFluxDrop() {
     if (!rtc) { sendingRef.current = false; return }
 
     try {
+      // Pipelined send loop: read the next chunk while sending the current one.
+      // This eliminates the "speed goes 0 between chunks" problem where
+      // await slice.arrayBuffer() creates gaps between sends.
+
+      // Pre-read the first chunk.
+      let nextResolved = resolveChunk(plan, resumeFrom, m.chunkSize)
+      let nextBuf: ArrayBuffer | null = null
+      if (nextResolved) {
+        const file = files[nextResolved.fileIndex]
+        if (file) {
+          nextBuf = await file.slice(nextResolved.localStart, nextResolved.localEnd).arrayBuffer()
+        }
+      }
+
       for (let i = resumeFrom; i < m.totalChunks; i++) {
         if (!rtc.isOpen) {
           transferRef.current.setTransferState('RESUMING')
@@ -710,36 +724,51 @@ export function useFluxDrop() {
           })
           return
         }
-        // Backpressure: only wait when buffer is full, not on every chunk.
-        // This lets us send bursts of chunks at full speed.
+
+        // Use the pre-read buffer.
+        const buf = nextBuf
+        if (!buf) { continue }
+
+        // Pre-read the NEXT chunk while we send the current one.
+        // This is the key to keeping the pipeline full — no gaps between chunks.
+        const nextI = i + 1
+        const readNext = (async () => {
+          if (nextI >= m.totalChunks) return null
+          const r = resolveChunk(plan, nextI, m.chunkSize)
+          if (!r) return null
+          const f = files[r.fileIndex]
+          if (!f) return null
+          return await f.slice(r.localStart, r.localEnd).arrayBuffer()
+        })()
+
+        // Backpressure: wait if buffer is full.
         if (!rtc.canSend()) await rtc.waitForDrain()
-        const resolved = resolveChunk(plan, i, m.chunkSize)
-        if (!resolved) continue
-        const file = files[resolved.fileIndex]
-        if (!file) continue
-        const slice = file.slice(resolved.localStart, resolved.localEnd)
-        const buf = await slice.arrayBuffer()
-        const sent = rtc.sendChunkData(m.transferId, i, buf)
+
+        // Send the current chunk.
+        let sent = rtc.sendChunkData(m.transferId, i, buf)
         if (!sent) {
-          // Send failed. If channel is still open, wait for drain and retry.
+          // Send failed (queue full or transient error). Wait for drain and retry.
           if (rtc.isOpen) {
             await rtc.waitForDrain()
-            const retried = rtc.sendChunkData(m.transferId, i, buf)
-            if (!retried) {
-              // Still failed after retry — channel is probably closing.
+            sent = rtc.sendChunkData(m.transferId, i, buf)
+            if (!sent) {
               transferRef.current.setTransferState('RESUMING')
               sendingRef.current = false
               return
             }
           } else {
-            // Channel closed — enter resume state.
             transferRef.current.setTransferState('RESUMING')
             sendingRef.current = false
             return
           }
         }
-        // Yield to event loop every 64 chunks so UI can update progress.
-        if (i % 64 === 0) {
+
+        // Wait for the pre-read to complete (it's probably already done
+        // since we were sending while it was reading).
+        nextBuf = await readNext
+
+        // Yield to event loop periodically so UI can update.
+        if (i % 128 === 0) {
           await new Promise((r) => setTimeout(r, 0))
         }
       }
