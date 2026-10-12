@@ -15,6 +15,7 @@ import { FluxDropSignaling } from '@/lib/fluxdrop/signaling'
 import { FluxDropWebRTC } from '@/lib/fluxdrop/webrtc'
 import { buildManifest, buildSlicePlan, resolveChunk } from '@/lib/fluxdrop/manifest'
 import { verifyChecksum } from '@/lib/fluxdrop/checksum'
+import { verifyChecksumWorker, destroyHashWorker } from '@/lib/fluxdrop/hash-worker-client'
 import { validateFiles, formatBytes } from '@/lib/fluxdrop/format'
 import {
   saveTransferRecord,
@@ -109,7 +110,6 @@ export function useFluxDrop() {
 
   // ---- Cleanup on unmount ----
   useEffect(() => {
-    // Flush pending IndexedDB writes on page unload.
     const onBeforeUnload = () => { void flushAllPendingAcks() }
     window.addEventListener('beforeunload', onBeforeUnload)
     return () => {
@@ -117,6 +117,7 @@ export function useFluxDrop() {
       void flushAllPendingAcks()
       webrtcRef.current?.close()
       signalingRef.current?.disconnect()
+      destroyHashWorker()
     }
   }, [])
 
@@ -327,6 +328,70 @@ export function useFluxDrop() {
     }, delay)
   }, [])
 
+  // ---- Real resume: attempt to reconnect after DataChannel loss ----
+  // On DC close during TRANSFERRING, persist state and try to restart ICE.
+  // The sender re-creates the offer; the receiver re-answers.
+  // After reconnection, the receiver sends RESUME_REQUEST with the last
+  // acked chunk index, and the sender resumes from there.
+  const attemptResume = useCallback(async () => {
+    const m = manifestRef.current
+    if (!m) return
+
+    console.log('[FluxDrop] Attempting resume after DataChannel loss...')
+    toast.info('Connection lost — attempting to resume...', { duration: 5000 })
+
+    // Persist current state for resume.
+    const isSender = filesRef.current.length > 0
+    await saveTransferRecord({
+      transferId: m.transferId,
+      role: isSender ? 'sender' : 'receiver',
+      manifest: m,
+      status: 'RESUMING',
+      chunksAcked: [],
+      bytesTransferred: transferRef.current.bytesTransferred,
+      peerAlias: sessionRef.current.peers[0]?.alias ?? 'peer',
+      peerDeviceId: peerDeviceIdRef.current ?? '',
+      startedAt: transferRef.current.startedAt ?? Date.now(),
+      updatedAt: Date.now(),
+    })
+
+    // Wait 2 seconds before attempting reconnection (backoff).
+    await new Promise((r) => setTimeout(r, 2000))
+
+    // Check if we still have a signaling connection.
+    if (!signalingRef.current?.isConnected) {
+      // Reconnect to signaling first.
+      connect()
+      await new Promise((r) => setTimeout(r, 3000))
+    }
+
+    // If we have a room ID and peer, try to re-establish WebRTC.
+    if (sessionRef.current.roomId && peerDeviceIdRef.current) {
+      if (isSender) {
+        // Sender: re-initiate WebRTC (new offer with ICE restart).
+        try {
+          // Close the old connection first.
+          webrtcRef.current?.close()
+          // Create a new connection and offer.
+          // The signaling relay will forward the new offer to the receiver.
+          initiateWebRTCAsSender()
+          toast.info('Reconnecting to peer...', { duration: 3000 })
+        } catch (err: any) {
+          console.warn('[FluxDrop] Resume failed:', err.message)
+          transferRef.current.setTransferState('FAILED')
+          toast.error('Resume failed', { description: err.message })
+        }
+      } else {
+        // Receiver: wait for the sender to re-offer.
+        // The sender's new offer will trigger handleOfferAsReceiver.
+        toast.info('Waiting for sender to reconnect...', { duration: 3000 })
+      }
+    } else {
+      transferRef.current.setTransferState('FAILED')
+      toast.error('Cannot resume — no room or peer available')
+    }
+  }, [connect])
+
   // ---- Helper: get effective ICE servers ----
   const getEffectiveIceServers = useCallback((): RTCIceServer[] | undefined => {
     const s = sessionRef.current
@@ -375,11 +440,32 @@ export function useFluxDrop() {
           transferRef.current.setTransferState('MANIFEST_EXCHANGE')
           const m = manifestRef.current
           if (m) {
-            // Send manifest via DataChannel only (not via signaling).
-            // The signaling relay was redundant — the DataChannel is the
-            // secure transport. Sending via signaling exposed file metadata
-            // (names, sizes, checksums) to the server unnecessarily.
-            webrtcRef.current?.sendManifest(m.transferId, m)
+            // Check if this is a resume (state was RESUMING before reconnection).
+            const wasResuming = transferRef.current.transferState === 'RESUMING'
+            if (wasResuming && filesRef.current.length === 0) {
+              // Receiver resume: send RESUME_REQUEST with last acked chunk.
+              const lastAcked = transferRef.current.chunksAcked - 1 // chunksAcked is a count, not index
+              const lastChunkIndex = Math.max(0, lastAcked)
+              console.log(`[FluxDrop] Resume: requesting from chunk ${lastChunkIndex}`)
+              webrtcRef.current?.sendResumeRequest(m.transferId, lastChunkIndex)
+              // Also send via signaling as backup.
+              signalingRef.current?.sendResumeRequest({
+                roomId: sessionRef.current.roomId!,
+                from: sessionRef.current.deviceId,
+                to: peerDeviceIdRef.current!,
+                transferId: m.transferId,
+                lastChunkIndex: lastChunkIndex,
+              })
+              transferRef.current.setTransferState('TRANSFERRING')
+            } else if (wasResuming) {
+              // Sender resume: wait for receiver's RESUME_REQUEST.
+              // The resume request handler will call beginSending(fromChunkIndex).
+              console.log('[FluxDrop] Sender resume: waiting for receiver request')
+              transferRef.current.setTransferState('TRANSFERRING')
+            } else {
+              // Normal (non-resume) flow: send manifest via DataChannel.
+              webrtcRef.current?.sendManifest(m.transferId, m)
+            }
           }
         },
         onDataChannelClose: () => {
@@ -387,6 +473,8 @@ export function useFluxDrop() {
           stopDiagnosticsPolling()
           if (transferRef.current.transferState === 'TRANSFERRING') {
             transferRef.current.setTransferState('RESUMING')
+            // Real resume: persist state and attempt ICE restart.
+            void attemptResume()
           }
         },
         onDataChannelMessage: (msg) => handleDataChannelMessage(msg),
@@ -682,7 +770,9 @@ export function useFluxDrop() {
           fileChunks.push(buf.slice(localStart, localEnd))
         }
         const blob = assembleBlob(fileChunks, entry.type)
-        const verified = await verifyChecksum(blob, entry.checksum)
+        const verified = entry.size > 256 * 1024 * 1024
+          ? await verifyChecksumWorker(blob, entry.checksum)
+          : await verifyChecksum(blob, entry.checksum)
         if (!verified) {
           toast.error(`Checksum mismatch for ${entry.name}`)
           checksumVerifiedRef.current = false
@@ -827,26 +917,49 @@ export function useFluxDrop() {
         // Pre-read the NEXT chunk while we send the current one.
         const readNext = readChunk(i + 1)
 
-        // Backpressure: wait if buffer is full.
-        if (!rtc.canSend()) await rtc.waitForDrain()
+        // Parallel DataChannels (speed #8): round-robin chunks across open channels.
+        // Channel index = chunkIndex % openChannelCount. This spreads the load
+        // and reduces per-channel queuing.
+        const numChannels = rtc.openChannelCount
+        const channelIndex = numChannels > 1 ? i % numChannels : 0
 
-        // Send the current chunk.
-        let sent = rtc.sendChunkData(m.transferId, i, buf)
-        if (!sent) {
-          // Send failed (queue full or transient error). Wait for drain and retry.
-          if (rtc.isOpen) {
-            await rtc.waitForDrain()
-            sent = rtc.sendChunkData(m.transferId, i, buf)
-            if (!sent) {
+        // Backpressure: wait if the target channel's buffer is full.
+        if (numChannels > 1 && channelIndex > 0) {
+          if (!rtc.canSendOnChannel(channelIndex)) await rtc.waitForDrainOnChannel(channelIndex)
+        } else {
+          if (!rtc.canSend()) await rtc.waitForDrain()
+        }
+
+        // Send the chunk on the selected channel.
+        let sent: boolean
+        if (numChannels > 1 && channelIndex > 0) {
+          sent = rtc.sendChunkDataOnChannel(m.transferId, i, buf, channelIndex)
+          if (!sent && rtc.isOpen) {
+            await rtc.waitForDrainOnChannel(channelIndex)
+            sent = rtc.sendChunkDataOnChannel(m.transferId, i, buf, channelIndex)
+          }
+        } else {
+          sent = rtc.sendChunkData(m.transferId, i, buf)
+          if (!sent) {
+            if (rtc.isOpen) {
+              await rtc.waitForDrain()
+              sent = rtc.sendChunkData(m.transferId, i, buf)
+              if (!sent) {
+                transferRef.current.setTransferState('RESUMING')
+                sendingRef.current = false
+                return
+              }
+            } else {
               transferRef.current.setTransferState('RESUMING')
               sendingRef.current = false
               return
             }
-          } else {
-            transferRef.current.setTransferState('RESUMING')
-            sendingRef.current = false
-            return
           }
+        }
+        if (!sent) {
+          transferRef.current.setTransferState('RESUMING')
+          sendingRef.current = false
+          return
         }
 
         // Wait for the pre-read to complete.

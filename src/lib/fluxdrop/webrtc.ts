@@ -41,17 +41,27 @@ const DEFAULT_ICE: RTCIceServer[] = [
 export class FluxDropWebRTC {
   private pc: RTCPeerConnection
   private channel: RTCDataChannel | null = null
+  /** Secondary channels for parallel transfer (speed #8). */
+  private secondaryChannels: Map<number, RTCDataChannel> = new Map()
+  private numChannels: number = 2 // primary + 1 secondary
   private config: WebRTCConfig
   private isInitiator: boolean
-  /** Queue of ICE candidates that arrived before setRemoteDescription. */
   private pendingCandidates: RTCIceCandidateInit[] = []
   private remoteDescriptionSet = false
-  /** Chunk size negotiated from SCTP max-message-size (set on DC open). */
   private negotiatedChunkSize: number = CONSTANTS.CHUNK_SIZE
 
   /** Get the effective chunk size (negotiated or default). */
   get effectiveChunkSize(): number {
     return this.negotiatedChunkSize || CONSTANTS.CHUNK_SIZE
+  }
+
+  /** Get the number of open channels (for parallel sending). */
+  get openChannelCount(): number {
+    let count = this.channel?.readyState === 'open' ? 1 : 0
+    for (const ch of this.secondaryChannels.values()) {
+      if (ch.readyState === 'open') count++
+    }
+    return count
   }
 
   constructor(config: WebRTCConfig, isInitiator: boolean) {
@@ -94,17 +104,33 @@ export class FluxDropWebRTC {
     }
 
     this.pc.ondatachannel = (event) => {
-      // Non-initiator receives the data channel created by the initiator.
-      this.bindChannel(event.channel)
+      // Non-initiator receives data channels created by the initiator.
+      // The primary channel is 'fluxdrop-0', additional channels are 'fluxdrop-1', etc.
+      const label = event.channel.label
+      if (label === 'fluxdrop-0' || label === 'fluxdrop') {
+        this.bindChannel(event.channel)
+      } else if (label.startsWith('fluxdrop-')) {
+        this.bindSecondaryChannel(event.channel, parseInt(label.split('-')[1]) || 0)
+      }
     }
 
     if (isInitiator) {
-      // Initiator creates the data channel.
-      this.channel = this.pc.createDataChannel('fluxdrop', {
+      // Initiator creates the primary data channel.
+      this.channel = this.pc.createDataChannel('fluxdrop-0', {
         ordered: true,
         negotiated: false,
       })
       this.bindChannel(this.channel)
+
+      // Create secondary channels for parallel transfer (speed #8).
+      // Multiple DataChannels on one RTCPeerConnection share one SCTP
+      // association and congestion window, so they add limited bandwidth.
+      // However, they can reduce per-message queuing and improve utilization.
+      // Default: 2 channels (primary + 1 secondary). Configurable via NUM_CHANNELS.
+      for (let i = 1; i < this.numChannels; i++) {
+        const ch = this.pc.createDataChannel(`fluxdrop-${i}`, { ordered: true })
+        this.bindSecondaryChannel(ch, i)
+      }
     }
   }
 
@@ -150,6 +176,102 @@ export class FluxDropWebRTC {
         this.config.onError(new Error(`Failed to decode message: ${err.message}`))
       }
     }
+  }
+
+  /** Bind a secondary channel (for parallel transfer). */
+  private bindSecondaryChannel(channel: RTCDataChannel, index: number) {
+    this.secondaryChannels.set(index, channel)
+    channel.binaryType = 'arraybuffer'
+    channel.bufferedAmountLowThreshold = CONSTANTS.TARGET_BUFFERED_BYTES
+
+    channel.onopen = () => {
+      console.log(`[FluxDrop] Secondary channel ${index} opened`)
+    }
+    channel.onclose = () => {
+      this.secondaryChannels.delete(index)
+    }
+    channel.onerror = (e: any) => {
+      const err = e?.error ?? e
+      console.warn(`[FluxDrop] Secondary channel ${index} error:`, err?.message ?? 'unknown')
+    }
+    channel.onmessage = (event) => {
+      // Secondary channels use the same message handler (for ACKs, etc.)
+      if (!(event.data instanceof ArrayBuffer)) return
+      try {
+        const msg = decodeMessage(event.data)
+        this.config.onDataChannelMessage(msg)
+      } catch (err: any) {
+        console.warn(`[FluxDrop] Failed to decode message on channel ${index}:`, err.message)
+      }
+    }
+  }
+
+  /**
+   * Send a chunk on a specific channel (for parallel transfer).
+   * Channel 0 = primary, 1+ = secondary.
+   */
+  sendChunkDataOnChannel(transferId: string, chunkIndex: number, payload: ArrayBuffer, channelIndex: number): boolean {
+    let ch: RTCDataChannel | null = null
+    if (channelIndex === 0) {
+      ch = this.channel
+    } else {
+      ch = this.secondaryChannels.get(channelIndex) ?? null
+    }
+    if (!ch || ch.readyState !== 'open') return false
+    const msg = encodeChunkData(transferId, chunkIndex, payload)
+    try {
+      ch.send(msg)
+      return true
+    } catch (err: any) {
+      const errMsg = err.message || ''
+      if (errMsg.includes('max-message-size') || errMsg.includes('larger than')) {
+        this.config.onError(new Error(
+          `Chunk ${chunkIndex} (${msg.byteLength} bytes) exceeds max-message-size.`
+        ))
+        return false
+      }
+      if (errMsg.includes('send queue') || errMsg.includes('Failure to send') || errMsg.includes('buffer')) {
+        console.warn(`[FluxDrop] Send failed on channel ${channelIndex} for chunk ${chunkIndex}: ${errMsg}`)
+        return false
+      }
+      console.warn(`[FluxDrop] Failed to send chunk ${chunkIndex} on channel ${channelIndex}: ${errMsg}`)
+      return false
+    }
+  }
+
+  /** Check if a specific channel can send (backpressure). */
+  canSendOnChannel(channelIndex: number): boolean {
+    if (channelIndex === 0) return this.canSend()
+    const ch = this.secondaryChannels.get(channelIndex)
+    return !!ch && ch.readyState === 'open' && ch.bufferedAmount < CONSTANTS.TARGET_BUFFERED_BYTES
+  }
+
+  /** Wait for a specific channel to drain. */
+  async waitForDrainOnChannel(channelIndex: number): Promise<void> {
+    if (channelIndex === 0) return this.waitForDrain()
+    const ch = this.secondaryChannels.get(channelIndex)
+    if (!ch) return
+    if (ch.bufferedAmount < CONSTANTS.TARGET_BUFFERED_BYTES) return
+    await new Promise<void>((resolve) => {
+      let resolved = false
+      const finish = () => {
+        if (resolved) return
+        resolved = true
+        ch.removeEventListener('bufferedamountlow', onLow)
+        ch.removeEventListener('close', onClose)
+        if (pollId) clearInterval(pollId)
+        if (timeoutId) clearTimeout(timeoutId)
+        resolve()
+      }
+      const onLow = () => finish()
+      const onClose = () => finish()
+      ch.addEventListener('bufferedamountlow', onLow)
+      ch.addEventListener('close', onClose)
+      const pollId = setInterval(() => {
+        if (ch.bufferedAmount < CONSTANTS.TARGET_BUFFERED_BYTES) finish()
+      }, 50)
+      const timeoutId = setTimeout(finish, 10000)
+    })
   }
 
   // === SDP flow ===
@@ -423,7 +545,7 @@ export class FluxDropWebRTC {
   }
 
   close(): void {
-    // Null out handlers to prevent stale callbacks during retry/reconnect.
+    // Close primary channel.
     if (this.channel) {
       this.channel.onopen = null
       this.channel.onclose = null
@@ -432,6 +554,16 @@ export class FluxDropWebRTC {
       try { this.channel.close() } catch { /* noop */ }
       this.channel = null
     }
+    // Close secondary channels.
+    for (const [idx, ch] of this.secondaryChannels) {
+      ch.onopen = null
+      ch.onclose = null
+      ch.onerror = null
+      ch.onmessage = null
+      try { ch.close() } catch { /* noop */ }
+    }
+    this.secondaryChannels.clear()
+    // Close peer connection.
     this.pc.onicecandidate = null
     this.pc.onicegatheringstatechange = null
     this.pc.oniceconnectionstatechange = null

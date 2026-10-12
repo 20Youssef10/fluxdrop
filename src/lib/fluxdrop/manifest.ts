@@ -4,6 +4,7 @@ import type { FileManifestEntry, TransferManifest } from './protocol'
 import { CONSTANTS } from './protocol'
 import { computeTotalChunks } from './format'
 import { hashFile } from './checksum'
+import { hashFileWorker } from './hash-worker-client'
 
 export interface ManifestProgress {
   current: number
@@ -37,7 +38,19 @@ export async function buildManifest(
       totalBytes,
     })
 
-    const checksum = await hashFile(file)
+    // Use worker-based hashing for large files (off main thread, true incremental SHA-256).
+    // Falls back to main-thread crypto.subtle.digest for small files.
+    const checksum = file.size > 256 * 1024 * 1024
+      ? await hashFileWorker(file, (p) => {
+          onProgress?.({
+            current: i + 1,
+            total: files.length,
+            fileName: file.name,
+            bytesProcessed: p.bytesProcessed,
+            totalBytes,
+          })
+        })
+      : await hashFile(file)
     entries.push({
       name: file.name,
       size: file.size,
