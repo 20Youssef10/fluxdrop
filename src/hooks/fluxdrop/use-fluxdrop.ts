@@ -19,6 +19,7 @@ import { verifyChecksumWorker, destroyHashWorker } from '@/lib/fluxdrop/hash-wor
 import { validateFiles, formatBytes } from '@/lib/fluxdrop/format'
 import {
   saveTransferRecord,
+  getTransferRecord,
   markChunkAcked,
   saveChunk,
   getChunk,
@@ -29,7 +30,7 @@ import { assembleBlob, saveBlobWithPicker, saveFilesToDirectory } from '@/lib/fl
 import { addRecentRoom } from '@/lib/fluxdrop/recent-rooms'
 import { isTrustedPeer, addTrustedPeer } from '@/lib/fluxdrop/trusted-peers'
 import { playSuccess, playError, playConnect, playPause, playResume } from '@/lib/fluxdrop/sound'
-import { MessageType, CONSTANTS, type TransferManifest, type TransferSummary } from '@/lib/fluxdrop/protocol'
+import { MessageType, CONSTANTS, type TransferManifest, type TransferSummary, type TransferState } from '@/lib/fluxdrop/protocol'
 import { toast } from 'sonner'
 
 export function useFluxDrop() {
@@ -58,6 +59,38 @@ export function useFluxDrop() {
   const pausePeerRef = useRef<boolean>(false)
 
   const isPaused = () => pauseLocalRef.current || pausePeerRef.current
+
+  // ---- Transfer-history persistence ----
+  // Single helper that records every transfer lifecycle transition so the
+  // landing-page history shows the real outcome (COMPLETE / ERROR / CANCELLED).
+  // Merges with any existing record to preserve receiver chunk-ack data.
+  const persistTransferRecord = useCallback(async (
+    role: 'sender' | 'receiver',
+    status: TransferState,
+    extra?: { checksumVerified?: boolean }
+  ) => {
+    const m = manifestRef.current
+    if (!m) return
+    try {
+      const existing = await getTransferRecord(m.transferId)
+      const finished = status === 'COMPLETE' || status === 'ERROR' || status === 'CANCELLED' || status === 'FAILED'
+      const rec: StoredTransfer = {
+        transferId: m.transferId,
+        role,
+        manifest: m,
+        status,
+        chunksAcked: existing?.chunksAcked ?? [],
+        bytesTransferred: transferRef.current.bytesTransferred || existing?.bytesTransferred || 0,
+        peerAlias: existing?.peerAlias ?? sessionRef.current.peers[0]?.alias ?? 'peer',
+        peerDeviceId: existing?.peerDeviceId ?? peerDeviceIdRef.current ?? '',
+        startedAt: existing?.startedAt ?? transferRef.current.startedAt ?? Date.now(),
+        updatedAt: Date.now(),
+        finishedAt: finished ? Date.now() : existing?.finishedAt,
+        checksumVerified: extra?.checksumVerified ?? existing?.checksumVerified,
+      }
+      await saveTransferRecord(rec)
+    } catch { /* best-effort — history must never break transfers */ }
+  }, [])
   const clearPaused = () => { pauseLocalRef.current = false; pausePeerRef.current = false }
 
   // ---- Speed ticker ----
@@ -238,8 +271,11 @@ export function useFluxDrop() {
         }
       },
       onTransferComplete: () => {
+        // Signaling-relayed completion (fires on the peer of whoever sent it —
+        // normally the receiver, after the sender relays the verified ack).
         transferRef.current.setTransferState('COMPLETE')
         playSuccess()
+        void persistTransferRecord(filesRef.current.length > 0 ? 'sender' : 'receiver', 'COMPLETE', { checksumVerified: true })
         const m = manifestRef.current
         toast.success('Transfer complete!', {
           description: m
@@ -263,6 +299,7 @@ export function useFluxDrop() {
         transferRef.current.setTransferState('CANCELLED')
         transferRef.current.setError(payload.reason ?? 'Transfer cancelled')
         playError()
+        void persistTransferRecord(filesRef.current.length > 0 ? 'sender' : 'receiver', 'CANCELLED')
         toast.error('Transfer cancelled', { description: payload.reason })
       },
       onResumeRequest: (payload) => {
@@ -283,7 +320,7 @@ export function useFluxDrop() {
     })
     sig.connect()
     signalingRef.current = sig
-  }, [])
+  }, [persistTransferRecord])
 
   // ---- Diagnostics polling (ICE candidate pair + bytes) ----
   const diagnosticsRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -351,20 +388,9 @@ export function useFluxDrop() {
     console.log('[FluxDrop] Attempting resume after DataChannel loss...')
     toast.info('Connection lost — attempting to resume...', { duration: 5000 })
 
-    // Persist current state for resume.
+    // Persist current state for resume (preserve existing acked chunks!).
     const isSender = filesRef.current.length > 0
-    await saveTransferRecord({
-      transferId: m.transferId,
-      role: isSender ? 'sender' : 'receiver',
-      manifest: m,
-      status: 'RESUMING',
-      chunksAcked: [],
-      bytesTransferred: transferRef.current.bytesTransferred,
-      peerAlias: sessionRef.current.peers[0]?.alias ?? 'peer',
-      peerDeviceId: peerDeviceIdRef.current ?? '',
-      startedAt: transferRef.current.startedAt ?? Date.now(),
-      updatedAt: Date.now(),
-    })
+    await persistTransferRecord(isSender ? 'sender' : 'receiver', 'RESUMING')
 
     // Wait 2 seconds before attempting reconnection (backoff).
     await new Promise((r) => setTimeout(r, 2000))
@@ -401,7 +427,7 @@ export function useFluxDrop() {
       transferRef.current.setTransferState('FAILED')
       toast.error('Cannot resume — no room or peer available')
     }
-  }, [connect])
+  }, [connect, persistTransferRecord])
 
   // ---- Helper: get effective ICE servers ----
   const getEffectiveIceServers = useCallback((): RTCIceServer[] | undefined => {
@@ -656,6 +682,7 @@ export function useFluxDrop() {
         if (msg.body?.verified) {
           transferRef.current.setTransferState('COMPLETE')
           playSuccess()
+          void persistTransferRecord('sender', 'COMPLETE', { checksumVerified: true })
           toast.success('Transfer complete & verified!')
           signalingRef.current?.sendTransferComplete({
             roomId: sessionRef.current.roomId!,
@@ -669,6 +696,7 @@ export function useFluxDrop() {
         transferRef.current.setTransferState('CANCELLED')
         transferRef.current.setError(msg.body?.reason ?? 'Cancelled by peer')
         playError()
+        void persistTransferRecord(filesRef.current.length > 0 ? 'sender' : 'receiver', 'CANCELLED')
         toast.error('Transfer cancelled', { description: msg.body?.reason })
         break
       }
@@ -707,7 +735,7 @@ export function useFluxDrop() {
         break
       }
     }
-  }, [])
+  }, [persistTransferRecord])
 
   // ---- Receiver: handle incoming manifest (via DC or signaling) ----
   // Shared accept pipeline — used by the manual consent dialog AND the
@@ -846,6 +874,8 @@ export function useFluxDrop() {
           transferRef.current.setChecksumVerified(false)
           transferRef.current.setTransferState('ERROR')
           webrtcRef.current?.sendTransferCompleteAck(m.transferId, false)
+          await persistTransferRecord('receiver', 'ERROR', { checksumVerified: false })
+          void flushAllPendingAcks()
           return
         }
         assembledFiles.push({ name: entry.name, blob, relativePath: entry.relativePath })
@@ -871,6 +901,9 @@ export function useFluxDrop() {
       transferRef.current.setTransferState('COMPLETE')
       webrtcRef.current?.sendTransferCompleteAck(m.transferId, true)
       playSuccess()
+      // Record the outcome in transfer history (COMPLETE + verified).
+      await persistTransferRecord('receiver', 'COMPLETE', { checksumVerified: true })
+      void flushAllPendingAcks()
       toast.success('All files received and verified!', {
         description: `${m.files.length} file${m.files.length > 1 ? 's' : ''} saved · SHA-256 ✓`,
       })
@@ -890,12 +923,13 @@ export function useFluxDrop() {
       toast.error('Failed to save file', { description: err.message })
       transferRef.current.setTransferState('ERROR')
       transferRef.current.setError(err.message)
+      await persistTransferRecord('receiver', 'ERROR')
       return false
     }
     })()
     verificationPromiseRef.current = verifyPromise
     await verifyPromise
-  }, [])
+  }, [persistTransferRecord])
 
   // ---- Receiver: verify final checksum ----
   // This is called when the sender sends TRANSFER_COMPLETE.
@@ -983,18 +1017,7 @@ export function useFluxDrop() {
             // Channel died while paused — fall through to the resume path below.
             transferRef.current.setTransferState('RESUMING')
             sendingRef.current = false
-            await saveTransferRecord({
-              transferId: m.transferId,
-              role: 'sender',
-              manifest: m,
-              status: 'RESUMING',
-              chunksAcked: [],
-              bytesTransferred: transferRef.current.bytesTransferred,
-              peerAlias: sessionRef.current.peers[0]?.alias ?? 'peer',
-              peerDeviceId: peerDeviceIdRef.current ?? '',
-              startedAt: transferRef.current.startedAt ?? Date.now(),
-              updatedAt: Date.now(),
-            })
+            await persistTransferRecord('sender', 'RESUMING')
             return
           }
           transferRef.current.setTransferState('TRANSFERRING')
@@ -1003,18 +1026,7 @@ export function useFluxDrop() {
         if (!rtc.isOpen) {
           transferRef.current.setTransferState('RESUMING')
           sendingRef.current = false
-          await saveTransferRecord({
-            transferId: m.transferId,
-            role: 'sender',
-            manifest: m,
-            status: 'RESUMING',
-            chunksAcked: [],
-            bytesTransferred: transferRef.current.bytesTransferred,
-            peerAlias: sessionRef.current.peers[0]?.alias ?? 'peer',
-            peerDeviceId: peerDeviceIdRef.current ?? '',
-            startedAt: transferRef.current.startedAt ?? Date.now(),
-            updatedAt: Date.now(),
-          })
+          await persistTransferRecord('sender', 'RESUMING')
           return
         }
 
@@ -1088,8 +1100,9 @@ export function useFluxDrop() {
       transferRef.current.addErrorLog({ message: `Send error: ${err.message}` })
       transferRef.current.setTransferState('FAILED')
       transferRef.current.setError(err.message)
+      await persistTransferRecord('sender', 'FAILED')
     }
-  }, [])
+  }, [persistTransferRecord])
 
   // ---- Public API: start a send session ----
   const startSend = useCallback(async (files: File[]) => {
@@ -1240,6 +1253,10 @@ export function useFluxDrop() {
     })
     transferRef.current.setTransferState('CANCELLED')
     transferRef.current.setError(reason)
+    if (m) {
+      void persistTransferRecord(filesRef.current.length > 0 ? 'sender' : 'receiver', 'CANCELLED')
+      void flushAllPendingAcks()
+    }
   }, [])
   // ---- Public API: leave room / reset ----
   const cleanup = useCallback(() => {

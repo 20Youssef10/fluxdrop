@@ -4,6 +4,8 @@ import { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, ArrowRight, Check } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { useSessionStore } from '@/stores/session-store'
+import { useTransferStore } from '@/stores/transfer-store'
 
 const STORAGE_KEY = 'fluxdrop:onboarding-completed'
 
@@ -24,6 +26,16 @@ const STEPS = [
     accent: 'Press R to start receiving',
   },
   {
+    title: 'Pause, resume & snippets',
+    body: 'Either side can pause mid-transfer and pick up again. Share text snippets instantly with a built-in preview on arrival — no files needed.',
+    accent: 'New · Pause / Resume / Snippets',
+  },
+  {
+    title: 'Trust the devices you own',
+    body: 'Tick "Trust this device" when accepting a transfer, then enable auto-accept in Settings → Privacy. Future transfers from that device start without asking.',
+    accent: 'Trusted devices · Auto-accept',
+  },
+  {
     title: 'Keyboard shortcuts',
     body: 'S sends, R receives, Esc goes back. ⌘K toggles diagnostics, ⌘J toggles theme. Look for the shortcut hints at the bottom of each page.',
     accent: 'Power-user friendly',
@@ -35,20 +47,68 @@ const STEPS = [
   },
 ]
 
+// Transfer states during which the tour must never appear.
+const BUSY_STATES = new Set(['TRANSFERRING', 'PAUSED', 'VERIFYING', 'RESUMING'])
+
 export function OnboardingTour() {
   const [open, setOpen] = useState(false)
   const [step, setStep] = useState(0)
+  const [deferred, setDeferred] = useState(false)
+  const view = useSessionStore((s) => s.view)
+  const pendingManifest = useSessionStore((s) => s.pendingManifest)
+  const transferState = useTransferStore((s) => s.transferState)
 
   useEffect(() => {
     if (typeof window === 'undefined') return
+    let seen = false
     try {
-      if (!localStorage.getItem(STORAGE_KEY)) {
-        // Small delay so it doesn't compete with the hero animation
-        const id = setTimeout(() => setOpen(true), 1200)
-        return () => clearTimeout(id)
-      }
+      seen = !!localStorage.getItem(STORAGE_KEY)
     } catch { /* ignore */ }
+    if (seen) return
+    // Deep-link join: the user came here to receive a specific transfer.
+    // Defer the tour so it never blocks the incoming-transfer consent dialog.
+    if (window.location.hash.includes('join=')) {
+      const id = setTimeout(() => setDeferred(true), 0)
+      return () => clearTimeout(id)
+    }
+    // Small delay so it doesn't compete with the hero animation
+    const id = setTimeout(() => setOpen(true), 1200)
+    return () => clearTimeout(id)
   }, [])
+
+  // A transfer is asking for consent (or already streaming) — get out of the
+  // way. State updates are deferred via setTimeout to avoid cascading renders.
+  useEffect(() => {
+    if (!open && !deferred) return
+    if (!pendingManifest && !BUSY_STATES.has(transferState)) return
+    const id = setTimeout(() => {
+      setOpen(false)
+      setDeferred(true)
+    }, 0)
+    return () => clearTimeout(id)
+  }, [open, deferred, pendingManifest, transferState])
+
+  // Deferred tour: show it once the user is back on the landing page with
+  // nothing in flight and they still haven't seen it.
+  useEffect(() => {
+    if (!deferred) return
+    if (view !== 'landing') return
+    if (pendingManifest) return
+    if (BUSY_STATES.has(transferState)) return
+    let seen = false
+    try {
+      seen = !!localStorage.getItem(STORAGE_KEY)
+    } catch { /* ignore */ }
+    if (seen) {
+      const clear = setTimeout(() => setDeferred(false), 0)
+      return () => clearTimeout(clear)
+    }
+    const id = setTimeout(() => {
+      setDeferred(false)
+      setOpen(true)
+    }, 600)
+    return () => clearTimeout(id)
+  }, [deferred, view, pendingManifest, transferState])
 
   const close = () => {
     setOpen(false)
