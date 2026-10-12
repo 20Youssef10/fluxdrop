@@ -221,16 +221,34 @@ export class FluxDropWebRTC {
 
   /**
    * Send a chunk. Returns true on success, false if the channel is closed
-   * or the send throws (e.g. buffer overflow).
+   * or the send throws (e.g. buffer overflow, message too large).
    */
   sendChunkData(transferId: string, chunkIndex: number, payload: ArrayBuffer): boolean {
     if (!this.channel || this.channel.readyState !== 'open') return false
     try {
       const msg = encodeChunkData(transferId, chunkIndex, payload)
+      // Safety check: if the encoded message exceeds a safe size, log a warning.
+      // The chunk size should be 16 KB which is safe for all browsers, but
+      // if someone changes the constant, this catches it before the send throws.
+      if (msg.byteLength > 256 * 1024) {
+        console.warn(`[FluxDrop] Chunk ${chunkIndex} is ${msg.byteLength} bytes — may exceed browser max-message-size. Consider reducing CHUNK_SIZE.`)
+      }
       this.channel.send(msg)
       return true
     } catch (err: any) {
-      this.config.onError(new Error(`Failed to send chunk ${chunkIndex}: ${err.message}`))
+      // "Trying to send message larger than max-message-size" — this means
+      // the chunk size exceeds the browser's negotiated SCTP max message size.
+      // This should not happen with the 16 KB default, but if it does, surface
+      // a clear error message.
+      const msg = err.message || ''
+      if (msg.includes('max-message-size') || msg.includes('larger than')) {
+        this.config.onError(new Error(
+          `Chunk ${chunkIndex} (${payload.byteLength + 9} bytes) exceeds browser max-message-size. ` +
+          `Reduce CHUNK_SIZE in protocol.ts (current: ${CONSTANTS.CHUNK_SIZE} bytes).`
+        ))
+      } else {
+        this.config.onError(new Error(`Failed to send chunk ${chunkIndex}: ${msg}`))
+      }
       return false
     }
   }

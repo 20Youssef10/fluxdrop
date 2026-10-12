@@ -70,7 +70,12 @@ export const TRANSFER_ID_BYTES = 4
 
 // === Tunables ===
 export const CONSTANTS = {
-  CHUNK_SIZE: 1 * 1024 * 1024,                 // 1 MB
+  // Chunk size: 16 KB is safe across ALL browsers (Safari's default is ~256 KB
+  // but some older browsers/edge cases cap at 64 KB). 16 KB + 9-byte header
+  // is well within any negotiated max-message-size.
+  // For Chrome/Firefox with renegotiation, this could be larger, but 16 KB
+  // is the universal safe default that never triggers "max-message-size" errors.
+  CHUNK_SIZE: 16 * 1024,                        // 16 KB (safe for all browsers)
   MAX_BUFFERED_BYTES: 16 * 1024 * 1024,        // 16 MB backpressure threshold
   TARGET_BUFFERED_BYTES: 4 * 1024 * 1024,      // 4 MB target
   MAX_FILE_SIZE: 10 * 1024 * 1024 * 1024,      // 10 GB
