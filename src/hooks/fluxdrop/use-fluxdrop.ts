@@ -24,6 +24,8 @@ import {
   saveChunk,
   getChunk,
   flushAllPendingAcks,
+  saveSenderFiles,
+  deleteSenderFiles,
   type StoredTransfer,
 } from '@/lib/fluxdrop/resume'
 import { assembleBlob, saveBlobWithPicker, saveFilesToDirectory } from '@/lib/fluxdrop/file-io'
@@ -57,6 +59,9 @@ export function useFluxDrop() {
   // Pause/Resume flow control: either side can pause the stream.
   const pauseLocalRef = useRef<boolean>(false)
   const pausePeerRef = useRef<boolean>(false)
+  // Next chunk the sender loop should push. Updated by the loop itself so a
+  // dead loop can be restarted from the right position (see kickSenderLoop).
+  const senderNextIndexRef = useRef<number>(0)
 
   const isPaused = () => pauseLocalRef.current || pausePeerRef.current
 
@@ -277,6 +282,8 @@ export function useFluxDrop() {
         playSuccess()
         void persistTransferRecord(filesRef.current.length > 0 ? 'sender' : 'receiver', 'COMPLETE', { checksumVerified: true })
         const m = manifestRef.current
+        // Sender files were persisted for history-resume; done means done.
+        if (m && filesRef.current.length > 0) void deleteSenderFiles(m.transferId)
         toast.success('Transfer complete!', {
           description: m
             ? `${m.files.length} file${m.files.length > 1 ? 's' : ''} · ${formatBytes(m.totalSize)} verified`
@@ -683,6 +690,7 @@ export function useFluxDrop() {
           transferRef.current.setTransferState('COMPLETE')
           playSuccess()
           void persistTransferRecord('sender', 'COMPLETE', { checksumVerified: true })
+          if (manifestRef.current) void deleteSenderFiles(manifestRef.current.transferId)
           toast.success('Transfer complete & verified!')
           signalingRef.current?.sendTransferComplete({
             roomId: sessionRef.current.roomId!,
@@ -722,6 +730,8 @@ export function useFluxDrop() {
           playResume()
           toast.info('Transfer resumed by peer')
         }
+        // If the loop died while paused, restart it from the recorded position.
+        kickSenderLoop()
         break
       }
       case MessageType.RESUME_REQUEST: {
@@ -907,14 +917,17 @@ export function useFluxDrop() {
       toast.success('All files received and verified!', {
         description: `${m.files.length} file${m.files.length > 1 ? 's' : ''} saved · SHA-256 ✓`,
       })
-      // Snippet preview: a single small text file shared via "Share text
-      // snippet" gets an instant read/copy dialog instead of a silent save.
-      if (assembledFiles.length === 1) {
-        const f = assembledFiles[0]
-        if (/^snippet-.*\.txt$/i.test(f.name) && f.blob.size <= 100 * 1024) {
+      // Snippet preview: a small text snippet shared via "Share text snippet"
+      // gets an instant read/copy dialog instead of a silent save. In multi-file
+      // transfers, the first snippet found is previewed.
+      {
+        const snippet = assembledFiles.find(
+          (f) => /^snippet-.*\.txt$/i.test(f.name) && f.blob.size <= 100 * 1024
+        )
+        if (snippet) {
           try {
-            const text = await f.blob.text()
-            transferRef.current.setSnippetPreview({ name: f.name, text })
+            const text = await snippet.blob.text()
+            transferRef.current.setSnippetPreview({ name: snippet.name, text })
           } catch { /* ignore — preview is best-effort */ }
         }
       }
@@ -958,6 +971,7 @@ export function useFluxDrop() {
     if (!m || files.length === 0) return
     if (sendingRef.current) return
     sendingRef.current = true
+    senderNextIndexRef.current = resumeFrom
     transferRef.current.setTransferState('TRANSFERRING')
     transferRef.current.startTimer()
     const plan = slicePlanRef.current
@@ -1085,6 +1099,9 @@ export function useFluxDrop() {
         // Wait for the pre-read to complete.
         nextBuf = await readNext
 
+        // Record progress for dead-loop restarts.
+        senderNextIndexRef.current = i + 1
+
         // Yield to event loop periodically so UI can update.
         if (i % 128 === 0) {
           await new Promise((r) => setTimeout(r, 0))
@@ -1104,8 +1121,26 @@ export function useFluxDrop() {
     }
   }, [persistTransferRecord])
 
+  // ---- Dead-loop watchdog ----
+  // The send loop can die silently (e.g. tab throttling, dev Fast Refresh)
+  // while the UI still shows TRANSFERRING/PAUSED. resumeTransfer and the
+  // peer's RESUME_STREAM then appear to do nothing. This helper detects the
+  // dead loop and restarts it from the last recorded position.
+  const kickSenderLoop = useCallback(() => {
+    if (sendingRef.current) return // loop alive — pause gate will handle waiting
+    const st = transferRef.current.transferState
+    if (st === 'TRANSFERRING' || st === 'PAUSED') {
+      console.log(`[FluxDrop] Send loop dead while ${st} — restarting from chunk ${senderNextIndexRef.current}`)
+      void beginSending(senderNextIndexRef.current)
+    }
+  }, [beginSending])
+
   // ---- Public API: start a send session ----
-  const startSend = useCallback(async (files: File[]) => {
+  // `resumeManifest` (optional) re-uses an earlier transfer's manifest so
+  // history-resume keeps the same transferId, checksums, and record. When
+  // provided, files must exactly match the manifest (name + size) and hashing
+  // is skipped — checksums are already baked into the manifest.
+  const startSend = useCallback(async (files: File[], resumeManifest?: TransferManifest) => {
     try {
       const validation = validateFiles(files)
       if (!validation.ok) {
@@ -1116,20 +1151,42 @@ export function useFluxDrop() {
       transferRef.current.setTransferState('VALIDATING')
       const totalBytes = files.reduce((s, f) => s + f.size, 0)
       const totalMB = (totalBytes / (1024 * 1024)).toFixed(1)
-      toast.info('Hashing files...', {
-        description: `${files.length} file${files.length > 1 ? 's' : ''} · ${totalMB} MB`,
-      })
       // Ensure device identity is ready BEFORE anything else.
       await ensureDeviceReady()
-      // Build manifest with progress updates.
-      const m = await buildManifest(files, (progress) => {
-        transferRef.current.setHashingProgress({
-          current: progress.current,
-          total: progress.total,
-          fileName: progress.fileName,
+      let m: TransferManifest
+      if (resumeManifest) {
+        // Validate the re-attached files still match the stored manifest.
+        const mismatch =
+          files.length !== resumeManifest.files.length ||
+          files.some((f, i) => f.name !== resumeManifest.files[i].name || f.size !== resumeManifest.files[i].size)
+        if (mismatch) {
+          transferRef.current.setTransferState('IDLE')
+          toast.error('Files no longer match this transfer', {
+            description: 'The original files were changed or replaced. Start a new transfer instead.',
+          })
+          return
+        }
+        m = { ...resumeManifest, expiresAt: Date.now() + CONSTANTS.RESUME_RECORD_TTL_MS }
+        toast.info('Resuming previous transfer', {
+          description: `${files.length} file${files.length > 1 ? 's' : ''} · ${totalMB} MB · checksums reused`,
         })
-      })
-      transferRef.current.setHashingProgress(null)
+      } else {
+        toast.info('Hashing files...', {
+          description: `${files.length} file${files.length > 1 ? 's' : ''} · ${totalMB} MB`,
+        })
+        // Build manifest with progress updates.
+        m = await buildManifest(files, (progress) => {
+          transferRef.current.setHashingProgress({
+            current: progress.current,
+            total: progress.total,
+            fileName: progress.fileName,
+          })
+        })
+        transferRef.current.setHashingProgress(null)
+      }
+      // Persist the files so history-resume can re-attach them later
+      // (removed automatically once the transfer completes).
+      void saveSenderFiles(m.transferId, files)
       manifestRef.current = m
       slicePlanRef.current = buildSlicePlan(m)
       transferRef.current.setManifest(m)
@@ -1236,9 +1293,11 @@ export function useFluxDrop() {
     if (!pausePeerRef.current && transferRef.current.transferState === 'PAUSED') {
       transferRef.current.setTransferState('TRANSFERRING')
     }
+    // If the send loop died while paused, restart it from the last chunk.
+    kickSenderLoop()
     playResume()
     toast.info('Transfer resumed')
-  }, [])
+  }, [kickSenderLoop])
 
   // ---- Public API: cancel ----
   const cancelTransfer = useCallback((reason: string = 'Cancelled by user') => {

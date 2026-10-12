@@ -347,9 +347,11 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
               </div>
             ) : (
               filteredRecords.map((rec) => {
+                // Incomplete transfers AND cancelled sends are resumable —
+                // the sender's files stay persisted until the transfer completes.
                 const isResumable =
                   rec.status !== 'COMPLETE' &&
-                  rec.status !== 'CANCELLED' &&
+                  (rec.status !== 'CANCELLED' || rec.role === 'sender') &&
                   rec.chunksAcked.length < rec.manifest.totalChunks
                 const isSelected = selectedIds.has(rec.transferId)
                 return (

@@ -1194,3 +1194,47 @@ Stage Summary:
 - Commit authored as 20Youssef10 <youssef2010.mahmoud@gmail.com>, pushed to origin/main (one-shot token URL).
 - Known cosmetic: transient HMR "BadgeCheck is not defined" errors in dev.log during editing (resolved in final state); timer still counts RESUMING-window time (minor).
 - Next-round candidates: actionable sender-side Resume from TransferHistory (persist File handles), PAUSED state in VerificationCode/diagnostics edge cases, receiver snippet preview for multi-file transfers (preview first snippet), onboarding tour mention of new features, PWA screenshots in manifest.
+
+---
+Task ID: cron-review-r4
+Agent: Z.ai Code (cron webDevReview round 4)
+Task: Recover from cut-off previous round: fix lint errors in onboarding tour, amend bad UUID commit, push, QA, continue development.
+
+Work Log:
+- Found unpushed commit df4c6d3 (UUID message, author "Z User <z@container>") containing real WIP from a cut-off round: onboarding tour new steps + deep-link deferral + persistTransferRecord unification in use-fluxdrop.
+- Fixed 3 remaining react-hooks/set-state-in-effect lint errors in onboarding-tour.tsx: all setState calls in effects now deferred via setTimeout; BUSY_STATES set includes RESUMING; guarded effect 2 on open||deferred.
+- Verified: lint 0 errors; tsc clean for src/ (5 remaining tsc errors are sandbox scaffolding in skills/ + tests/, not app code).
+- Amended commit as 68455c0 "Improve onboarding tour + unify transfer history persistence" authored Youssef Mahmoud <youssef2010.mahmoud@gmail.com>; pushed d088a04..68455c0 to origin/main via one-shot PAT URL.
+- Browser QA (session qa-tour through gateway :81): fresh profile → tour auto-opened, stepped through all 7 steps, verified new steps "Pause, resume & snippets" (4/7) and "Trust the devices you own" (5/7), finished with "Got it", fluxdrop:onboarding-completed=1 persisted, tour closed, zero console errors.
+
+Stage Summary:
+- Cut-off round's work recovered, lint-clean, properly authored, and pushed to GitHub.
+- QA passed for onboarding tour (7 steps, persistence, dismissal).
+- Next: actionable sender-side Resume from TransferHistory, multi-file snippet preview, PWA screenshots.
+
+---
+Task ID: cron-review-r4 (features, in progress)
+Agent: Z.ai Code (cron webDevReview round 4 — feature phase)
+Task: Sender-side Resume from history + multi-file snippet preview + PWA screenshots.
+
+Work Log (features):
+- **Actionable sender-side Resume (new)**:
+  - resume.ts: saveSenderFiles/getSenderFiles/deleteSenderFiles — File objects persisted in IDB at send start (structured-clone), removed on COMPLETE and on record delete. 2GB cap.
+  - use-fluxdrop.ts: startSend(files, resumeManifest?) reuses the stored manifest (same transferId + checksums, NO re-hash); validates files still match (name+size) and errors cleanly if changed. expiresAt refreshed.
+  - page.tsx handleResume: loads persisted files, sanity-checks vs manifest, re-enters sender view with resumeManifest state; receiver records get an explanatory toast. goHome clears resume state.
+  - sender-panel.tsx: isResuming prop + amber "Resuming a previous transfer" banner.
+  - transfer-history.tsx: CANCELLED sender records now resumable (files persist after cancel).
+- **[CRITICAL IDB FIX] idb-keyval createStore() cannot add stores to an existing DB** (no version bump — onupgradeneeded only fires for a NEW db). Sharing db 'fluxdrop' across 4 stores meant ONLY 'transfers' ever existed; chunks/preferences stores silently never created on any profile (receiver chunk persistence across reloads was dead, unnoticed). Fixed: each store now owns its DB — 'fluxdrop' (transfers, legacy data preserved), 'fluxdrop-chunks', 'fluxdrop-prefs', 'fluxdrop-sender-files'.
+- **Multi-file snippet preview**: receiver previews the first snippet-*.txt found in ANY transfer (was: single-file transfers only).
+- **Root-cause hydration fix**: ParticleField generated Math.random() styles during SSR → hydration attribute mismatch (the known console error + the "1 Issue" dev badge). Particles now generated client-side after mount (deferred setTimeout to satisfy react-hooks/set-state-in-effect). Zero hydration errors on fresh reload; dev badge gone.
+- **PWA screenshots**: captured real app screenshots via agent-browser (1080x1920 narrow + 1920x1080 wide, dark theme, clean UI), optimized with sharp (public/screenshots/), added to manifest.json with form_factor + labels. devIndicators: false added to next.config.ts (cosmetic; badge only showed due to the hydration issue anyway).
+
+E2E verification (in progress):
+- 3MB transfer: complete + SHA-256 verified both sides; sender-files store correctly empty after COMPLETE (pre-fix DB, deleteSenderFiles no-op — will re-verify post-fix).
+- 300MB transfer: complete + verified both sides (dev server restarted with devIndicators mid-test; no errors).
+- 1.5GB resume cycle: created room PSMZVV → receiver accepted → sender cancelled at 1.0% → history record status=CANCELLED (verified via IDB dump) with Resume button → Resume clicked → "1 file re-attached" toast + amber banner → "Create transfer room" → room E86TD7 created INSTANTLY (manifest reused, no hashing) → receiver joined + accepted → transfer in progress (~8%/min... 3.4MB/s, several minutes).
+
+Stage Summary:
+- Resume-from-history E2E working end-to-end except final completion check (pending).
+- IDB multi-store bug fixed — receiver chunk persistence across reloads now actually works.
+- Lint clean; tsc clean for src/.

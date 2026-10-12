@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { ArrowLeft, Send } from 'lucide-react'
+import { ArrowLeft, Send, RotateCcw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { FilePicker } from './file-picker'
 import { QRDisplay } from './qr-display'
@@ -27,9 +27,11 @@ interface SenderPanelProps {
   onBack: () => void
   onPause?: () => void
   onResume?: () => void
+  /** True when the queue was restored from transfer history (resume). */
+  isResuming?: boolean
 }
 
-export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, onBack, onPause, onResume }: SenderPanelProps) {
+export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, onBack, onPause, onResume, isResuming }: SenderPanelProps) {
   const session = useSessionStore()
   const transfer = useTransferStore()
   const [showFiles, setShowFiles] = useState(false)
@@ -64,6 +66,19 @@ export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, on
       {/* Hashing progress (during VALIDATING state) */}
       {isValidating && (
         <HashingProgress />
+      )}
+
+      {/* Resume banner — queue was restored from transfer history */}
+      {isResuming && !hasRoom && !isValidating && !isTransferring && !isDone && (
+        <div className="flex items-center gap-2.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3.5 py-2.5">
+          <RotateCcw className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium text-amber-700 dark:text-amber-300">Resuming a previous transfer</p>
+            <p className="text-[11px] text-amber-600/80 dark:text-amber-400/70">
+              Original checksums are reused — files must be unchanged since then.
+            </p>
+          </div>
+        </div>
       )}
 
       {/* Pre-room: file picker */}

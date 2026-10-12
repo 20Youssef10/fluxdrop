@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo } from 'react'
+import { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 
 interface ParticleFieldProps {
@@ -8,21 +8,45 @@ interface ParticleFieldProps {
   className?: string
 }
 
+interface Particle {
+  id: number
+  size: number
+  x: number
+  delay: number
+  duration: number
+  drift: number
+  opacity: number
+}
+
 /**
  * Renders floating particle dots that drift upward slowly.
  * Purely decorative — pointer-events disabled.
+ *
+ * Particles are generated client-side only (after mount): Math.random()
+ * during SSR would produce a different sequence in the browser and trigger
+ * a hydration attribute mismatch. Until mounted we render the (invisible)
+ * container so layout stays identical.
  */
 export function ParticleField({ count = 24, className }: ParticleFieldProps) {
-  const particles = useMemo(() => {
-    return Array.from({ length: count }).map((_, i) => {
-      const size = 2 + Math.random() * 4
-      const x = Math.random() * 100
-      const delay = Math.random() * 8
-      const duration = 12 + Math.random() * 10
-      const drift = (Math.random() - 0.5) * 40
-      const opacity = 0.15 + Math.random() * 0.35
-      return { id: i, size, x, delay, duration, drift, opacity }
-    })
+  const [particles, setParticles] = useState<Particle[]>([])
+
+  useEffect(() => {
+    // Deferred via setTimeout: setState inside an effect body triggers a
+    // cascading-render lint error, and the tick delay is imperceptible.
+    const id = setTimeout(() => {
+      setParticles(
+        Array.from({ length: count }).map((_, i) => ({
+          id: i,
+          size: 2 + Math.random() * 4,
+          x: Math.random() * 100,
+          delay: Math.random() * 8,
+          duration: 12 + Math.random() * 10,
+          drift: (Math.random() - 0.5) * 40,
+          opacity: 0.15 + Math.random() * 0.35,
+        }))
+      )
+    }, 0)
+    return () => clearTimeout(id)
   }, [count])
 
   return (

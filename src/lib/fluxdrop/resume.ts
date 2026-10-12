@@ -6,25 +6,28 @@ import { get, set, del, keys, createStore } from 'idb-keyval'
 import type { TransferManifest, TransferRecord, TransferState, DeviceRole } from './protocol'
 
 // Separate stores for clarity.
-// These are created lazily by idb-keyval on first access; if the DB already
-// exists with a different schema, the store creation may fail. All public
-// functions below catch and return safe defaults so the app degrades
-// gracefully to in-memory-only mode.
+// NOTE: idb-keyval's createStore() can only create a store when the DATABASE
+// itself is new — it never upgrades an existing DB. Sharing one DB name meant
+// only the first store ('transfers') ever existed and every other store
+// silently failed. Each store therefore gets its OWN database now, which
+// works for fresh profiles AND preserves existing 'fluxdrop' transfer records.
 let transfersStore: ReturnType<typeof createStore> | null = null
 let chunksStore: ReturnType<typeof createStore> | null = null
 let prefsStore: ReturnType<typeof createStore> | null = null
+let filesStore: ReturnType<typeof createStore> | null = null
 
 function getStores() {
   if (!transfersStore) {
     try {
       transfersStore = createStore('fluxdrop', 'transfers')
-      chunksStore = createStore('fluxdrop', 'chunks')
-      prefsStore = createStore('fluxdrop', 'preferences')
+      chunksStore = createStore('fluxdrop-chunks', 'chunks')
+      prefsStore = createStore('fluxdrop-prefs', 'preferences')
+      filesStore = createStore('fluxdrop-sender-files', 'sender-files')
     } catch {
       // IndexedDB unavailable — app will run in memory-only mode.
     }
   }
-  return { transfersStore, chunksStore, prefsStore }
+  return { transfersStore, chunksStore, prefsStore, filesStore }
 }
 
 export interface StoredTransfer {
@@ -89,6 +92,46 @@ export async function deleteTransferRecord(transferId: string): Promise<void> {
         }
       }
     }
+    await deleteSenderFiles(transferId)
+  } catch { /* ignore */ }
+}
+
+// === Sender file persistence ===
+// File objects are structured-cloneable, so they can live in IndexedDB and
+// survive page reloads. This powers "Resume" from transfer history: the
+// sender's original files are re-attached without re-picking them.
+// Files stay on the user's own device — same privacy posture as receiver chunks.
+const FILE_PREFIX = 'file:'
+// Cap on total stored size per transfer (2 GB). Larger queues skip persistence
+// gracefully — resume then falls back to the "files unavailable" toast.
+const MAX_PERSIST_BYTES = 2 * 1024 * 1024 * 1024
+
+export async function saveSenderFiles(transferId: string, files: File[]): Promise<boolean> {
+  const { filesStore } = getStores()
+  if (!filesStore || files.length === 0) return false
+  try {
+    const total = files.reduce((s, f) => s + f.size, 0)
+    if (total > MAX_PERSIST_BYTES) return false
+    await set(`${FILE_PREFIX}${transferId}`, files, filesStore)
+    return true
+  } catch { return false }
+}
+
+export async function getSenderFiles(transferId: string): Promise<File[] | null> {
+  const { filesStore } = getStores()
+  if (!filesStore) return null
+  try {
+    const files = await get(`${FILE_PREFIX}${transferId}`, filesStore)
+    if (!Array.isArray(files) || files.length === 0) return null
+    return files as File[]
+  } catch { return null }
+}
+
+export async function deleteSenderFiles(transferId: string): Promise<void> {
+  const { filesStore } = getStores()
+  if (!filesStore) return
+  try {
+    await del(`${FILE_PREFIX}${transferId}`, filesStore)
   } catch { /* ignore */ }
 }
 

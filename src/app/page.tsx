@@ -25,13 +25,16 @@ import { useSessionStore } from '@/stores/session-store'
 import { useTransferStore } from '@/stores/transfer-store'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
-import type { StoredTransfer } from '@/lib/fluxdrop/resume'
+import { getSenderFiles, type StoredTransfer } from '@/lib/fluxdrop/resume'
+import { formatBytes } from '@/lib/fluxdrop/format'
+import type { TransferManifest } from '@/lib/fluxdrop/protocol'
 
 export default function Home() {
   const flux = useFluxDrop()
   const [files, setFiles] = useState<File[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
+  const [resumeManifest, setResumeManifest] = useState<TransferManifest | null>(null)
   const view = useSessionStore((s) => s.view)
   const setView = useSessionStore((s) => s.setView)
   const transferState = useTransferStore((s) => s.transferState)
@@ -61,6 +64,7 @@ export default function Home() {
   const goHome = useCallback(() => {
     flux.cleanup()
     setFiles([])
+    setResumeManifest(null)
     setView('landing')
     if (typeof window !== 'undefined' && window.location.hash) {
       window.history.replaceState(null, '', window.location.pathname)
@@ -81,13 +85,44 @@ export default function Home() {
     view
   )
 
-  // Resume handler: re-enter sender mode with the record's files (if available)
+  // Resume handler: re-enter sender mode with the record's persisted files.
+  // Files are stored in IndexedDB when a send starts and removed on completion.
   const handleResume = useCallback(
-    (record: StoredTransfer) => {
-      toast.info('Resume transfer', {
-        description: `Re-creating room for transfer ${record.transferId.slice(0, 8)}…`,
-      })
-      setView('sender')
+    async (record: StoredTransfer) => {
+      if (record.role === 'sender') {
+        const stored = await getSenderFiles(record.transferId)
+        if (!stored || stored.length === 0) {
+          toast.error('Original files unavailable', {
+            description: 'They may have been cleared by the browser or the transfer already completed.',
+          })
+          return
+        }
+        // Sanity-check against the manifest: count, names and sizes must match.
+        const mismatched =
+          stored.length !== record.manifest.files.length ||
+          stored.some(
+            (f, i) => f.name !== record.manifest.files[i].name || f.size !== record.manifest.files[i].size
+          )
+        if (mismatched) {
+          toast.error('Files no longer match this transfer', {
+            description: 'Start a new transfer instead — the stored files were changed or replaced.',
+          })
+          return
+        }
+        const pct = Math.round((record.chunksAcked.length / Math.max(1, record.manifest.totalChunks)) * 100)
+        setFiles(stored)
+        setResumeManifest(record.manifest)
+        setView('sender')
+        toast.success(`${stored.length} file${stored.length > 1 ? 's' : ''} re-attached`, {
+          description: `${formatBytes(record.manifest.totalSize)} · ${pct}% was transferred before. Create a room to continue.`,
+        })
+      } else {
+        // Receiver-side resume needs the sender to re-send with the same
+        // transfer ID — once they do, stored chunks are reused automatically.
+        toast.info('Waiting for the sender to resume', {
+          description: 'Ask the sender to resume this transfer from their history — received chunks will be reused.',
+        })
+      }
     },
     [setView]
   )
@@ -143,7 +178,12 @@ export default function Home() {
                 <SenderPanel
                   files={files}
                   setFiles={setFiles}
-                  onStartSend={flux.startSend}
+                  isResuming={!!resumeManifest}
+                  onStartSend={(fs) => {
+                    const rm = resumeManifest
+                    setResumeManifest(null)
+                    void flux.startSend(fs, rm ?? undefined)
+                  }}
                   onCancel={() => flux.cancelTransfer('Sender cancelled')}
                   onDone={goHome}
                   onBack={goHome}

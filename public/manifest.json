@@ -9,6 +9,22 @@
   "theme_color": "#0d6e6e",
   "orientation": "any",
   "categories": ["productivity", "utilities"],
+  "screenshots": [
+    {
+      "src": "/screenshots/wide.png",
+      "sizes": "1920x1080",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "FluxDrop on desktop — send files peer-to-peer"
+    },
+    {
+      "src": "/screenshots/narrow.png",
+      "sizes": "1080x1920",
+      "type": "image/png",
+      "form_factor": "narrow",
+      "label": "FluxDrop on mobile — scan a QR and receive"
+    }
+  ],
   "icons": [
     {
       "src": "/icons/icon-192.png",
