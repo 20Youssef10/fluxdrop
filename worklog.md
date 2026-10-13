@@ -1319,3 +1319,36 @@ Stable and feature-rich. Round-6 QA found NO runtime breakage: full E2E transfer
 
 ## Recommendation for next phase
 Stable phase — record-integrity layer is now bulletproof. Next-round candidates: live byte-overshoot display fix (dedupe CHUNK_ACK byte accounting), 'skipped' segment rendering in the chunk map (visualize skipped vs streamed chunks), bandwidth-saved eco badge on the landing hero, PWA offline e2e in a prod build.
+
+---
+Task ID: cron-review-r7
+Agent: Z.ai Code (cron webDevReview round 7)
+Task: Assess status, QA via agent-browser, fix byte-overshoot bug, add chunk-map skip visualization + hero eco badge + copy receipt + P shortcut.
+
+## Current project status
+Stable and feature-complete through round 6. Round-7 QA found NO breakage: four full E2E transfers (16MB, 30MB, plus three cancel→resume cycles) all completed with SHA-256 verified on both sides and ZERO console errors. Lint + tsc clean for src/. Committed fd7e641 and pushed to origin/main (one-shot PAT URL, author Youssef Mahmoud). No sandbox auto-commits occurred this round.
+
+## Completed this round (all browser-verified)
+1. **[BUG FIX] Live byte-overshoot dedupe**: `ackChunk(chunkIndex, bytes)` in transfer-store now dedupes via an internal `_ackedSet` — duplicate CHUNK_ACKs (send-retry double-sends) and re-delivered CHUNK_DATA no longer double-count bytes or per-file progress. Defensive caps (`Math.min(totalBytes/totalChunks, ...)`) on every 100ms flush so the UI can never exceed 100%. Returns boolean isNew, consumed by both call sites in use-fluxdrop.
+2. **Chunk map 3-state visualization**: new `ackedSet` (live bitmap snapshot per flush) + `skippedIndices` (skip bitmap) in the store, plumbed from both RESUME_QUERY (receiver) and RESUME_RESPONSE (sender) handlers via `setSkipped(chunks, bytes, indices)`. ChunkGrid renders skipped chunks as ring-outlined cells (bg-flux-500/15 + ring-inset) vs solid streamed cells vs muted pending, with a legend ("skipped (already had) / streamed now / pending") + "· N skipped" counter in the header. Falls back to the old `i < acked` heuristic when no bitmap exists. Verified visually: sender screenshot shows crisp ring/solid distinction mid-resume.
+3. **Hero eco badge (new component eco-badge.tsx)**: landing hero shows "N MB of bandwidth saved · N resumes" leaf pill when cumulative resumedSavedBytes > 0, loads from listTransfers and refreshes every 10s (live-verified 24.5 → 29.8 MB across resume cycles). Hidden when 0 (first-time visitors see a clean hero). Dark + light themes verified.
+4. **Sender per-file progress (new)**: CHUNK_ACK handler now maps newly-acked chunks to file segments (resolveChunk → addFileBytes) — the sender's FILES card fills up live (was stuck at "0 B" forever, receiver-only before). All files marked complete on TRANSFER_COMPLETE_ACK verified. Receiver FILES card also seeds skipped chunks' bytes in RESUME_QUERY for parity.
+5. **Copy receipt (new)**: TransferSummaryCard gains a "Copy receipt" ghost button — copies a plain-text receipt (files+sizes, total, duration, avg/peak speed, SHA-256 verified, resume skips) with a 2s "Copied" state. Uses navigator.clipboard with a textarea+execCommand fallback (sandbox browser denies clipboard permission — fallback verified working there) and an error toast if both fail.
+6. **P keyboard shortcut (new)**: press P during a transfer to toggle pause/resume (state-aware, sender & receiver views). Wired through useKeyboardShortcuts (new onTogglePause handler) + ShortcutsHint row ("P Pause / resume").
+7. **Milestone pulse micro-interaction**: progress bar markers at 25/50/75% flash + emit a ping dot when freshly crossed upward while transferring (deferred setTimeout for the lint rule). Verified visually at 25% and 50%.
+
+## E2E verification highlights
+- 16MB transfer: complete + verified both sides, "Copy receipt" clicked → "Copied" state (fallback path).
+- 30MB transfer with P-shortcut pause at ~20%: both sides flipped to Paused, P again → resumed, completed + verified.
+- Cancel at 81.7% → history Resume → room created instantly → consent "You already have 82%" → 392/480 chunks skipped → complete + verified, receiver summary "Resume skip — 392 chunks never re-sent · 24.5 MB saved".
+- Cancel at 3-4% → resume ×2 more cycles: chunk map legend seen mid-transfer on BOTH sides ("LEGEND-SEEN at 1.7s" poll), 54 chunks skipped ring cells, completion + verification each time.
+- Stats dashboard: "Bandwidth saved 29.8 MB · 3 resumes skipped", success rate 100%, history rows show "N MB saved" badges.
+
+## Unresolved issues / risks
+- Same sandbox caveats as before (do NOT re-debug): IDB wiped on browser-session reloads; keep resume E2E ≤ 30MB; deep-link join needs a full page load (hash-only nav on an already-loaded page does nothing — always `reload` after changing the hash).
+- Cosmetic: "Resumed" badge vs "skipped" counter both derive from the same bitmap — consistent by construction now.
+- The receiver consent dialog shows "You already have N%" only when the sender's room was re-created BEFORE the receiver joins (normal flow) — unchanged behavior.
+- Eco badge + stats refresh on 10s/5s polls — a completed transfer reflects within ~10s without reload (acceptable).
+
+## Recommendation for next phase
+Stable phase continues. Next-round candidates: receiver-side "auto-accept resumed transfers from trusted senders" (skip consent when transferId is known and peer trusted), service-worker offline page e2e in a production build, storage-quota guard before persisting sender files (navigator.storage.estimate), export/import of transfer history (Export button already stubbed in history header), light-theme screenshot pass for PWA manifest (screenshots currently dark-only).
