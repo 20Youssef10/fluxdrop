@@ -10,6 +10,7 @@ import { ReceiverPanel } from '@/components/fluxdrop/receiver-panel'
 import { TransferHistory } from '@/components/fluxdrop/transfer-history'
 import { StatsDashboard } from '@/components/fluxdrop/stats-dashboard'
 import { ShortcutsHint } from '@/components/fluxdrop/shortcuts-hint'
+import { ShortcutsDialog } from '@/components/fluxdrop/shortcuts-dialog'
 import { FullPageDropZone } from '@/components/fluxdrop/full-page-drop-zone'
 import { HelpDialog } from '@/components/fluxdrop/help-dialog'
 import { TransferAnnouncer } from '@/components/fluxdrop/transfer-announcer'
@@ -34,6 +35,7 @@ export default function Home() {
   const [files, setFiles] = useState<File[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [resumeManifest, setResumeManifest] = useState<TransferManifest | null>(null)
   const view = useSessionStore((s) => s.view)
   const setView = useSessionStore((s) => s.setView)
@@ -70,6 +72,71 @@ export default function Home() {
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [flux, handleDeepLink])
 
+  // Web Share Target ingestion: the service worker receives the OS share-sheet
+  // POST /share-target, stashes the payload in IndexedDB and redirects here
+  // with ?shared=<token>. Retrieve the payload, feed it through the same
+  // paths as clipboard paste (files → send queue, text → snippet composer),
+  // then clean the URL and delete the stash. Runs once per real page load.
+  const sharedHandled = useRef<string | null>(null)
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const token = new URLSearchParams(window.location.search).get('shared')
+    if (!token || sharedHandled.current === token) return
+    sharedHandled.current = token
+    window.history.replaceState(null, '', window.location.pathname)
+    let cancelled = false
+    void (async () => {
+      try {
+        const { getSharedPayload, deleteSharedPayload, sweepStaleShares } = await import(
+          '@/lib/fluxdrop/share-target'
+        )
+        void sweepStaleShares()
+        const payload = await getSharedPayload(token)
+        await deleteSharedPayload(token)
+        if (cancelled || !payload) {
+          if (!cancelled && token !== 'empty' && token !== 'error') {
+            toast.error('Shared content expired', { description: 'Please share again.' })
+          } else if (!cancelled && token === 'empty') {
+            toast.info('Nothing shareable', { description: 'The shared item had no files or text.' })
+          } else if (!cancelled && token === 'error') {
+            toast.error('Could not read shared content', { description: 'The share handoff failed.' })
+          }
+          return
+        }
+        if (payload.files.length > 0) {
+          const incoming = payload.files.map(
+            (f) => new File([f.data], f.name, { type: f.type, lastModified: f.lastModified })
+          )
+          setFiles((prev) => {
+            const seen = new Set(prev.map((x) => `${x.name}:${x.size}`))
+            const fresh = incoming.filter((f) => !seen.has(`${f.name}:${f.size}`))
+            if (fresh.length === 0) {
+              toast.info('Already in the queue', { description: incoming[0]?.name })
+              return prev
+            }
+            toast.success(`Added ${fresh.length} shared file${fresh.length > 1 ? 's' : ''}`, {
+              description: `${fresh.length} item${fresh.length > 1 ? 's' : ''} received from the share sheet · ${formatBytes(fresh.reduce((n, f) => n + f.size, 0))}`,
+            })
+            return [...prev, ...fresh]
+          })
+          setView('sender')
+        } else if (payload.text.trim()) {
+          // The snippet composer lives in sender view — switch first, then
+          // dispatch on the next tick so the listener is attached.
+          setView('sender')
+          setTimeout(() => {
+            window.dispatchEvent(new CustomEvent('fluxdrop:paste-snippet', { detail: { text: payload.text } }))
+          }, 400)
+        }
+      } catch {
+        if (!cancelled) toast.error('Could not read shared content')
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [setView])
+
   const goSend = useCallback(() => setView('sender'), [setView])
   const goReceive = useCallback(() => setView('receiver'), [setView])
   const goHome = useCallback(() => {
@@ -98,6 +165,8 @@ export default function Home() {
         if (st === 'PAUSED') flux.resumeTransfer()
         else flux.pauseTransfer()
       },
+      // "?" opens the keyboard shortcuts dialog from any view.
+      onShowShortcuts: () => setShortcutsOpen(true),
     },
     view
   )
@@ -220,7 +289,7 @@ export default function Home() {
                 <StatsDashboard />
                 <TransferHistory onResume={handleResume} />
                 <div className="flex justify-center">
-                  <ShortcutsHint view={view} />
+                  <ShortcutsHint view={view} onOpenShortcuts={() => setShortcutsOpen(true)} />
                 </div>
               </div>
             </motion.div>
@@ -256,7 +325,7 @@ export default function Home() {
                 />
               </FullPageDropZone>
               <div className="mt-6 flex justify-center">
-                <ShortcutsHint view={view} />
+                <ShortcutsHint view={view} onOpenShortcuts={() => setShortcutsOpen(true)} />
               </div>
             </motion.div>
           )}
@@ -279,7 +348,7 @@ export default function Home() {
                 onResume={flux.resumeTransfer}
               />
               <div className="mt-6 flex justify-center">
-                <ShortcutsHint view={view} />
+                <ShortcutsHint view={view} onOpenShortcuts={() => setShortcutsOpen(true)} />
               </div>
             </motion.div>
           )}
@@ -290,6 +359,7 @@ export default function Home() {
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
       <HelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
+      <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
       <TransferAnnouncer />
       <OnboardingTour />
       <ConnectionRipple />

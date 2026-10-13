@@ -10,6 +10,7 @@ export interface ShortcutHandlers {
   onToggleTheme?: () => void
   onToggleDiagnostics?: () => void
   onTogglePause?: () => void
+  onShowShortcuts?: () => void
 }
 
 /**
@@ -20,6 +21,7 @@ export interface ShortcutHandlers {
  *  - P          → pause / resume the active transfer (sender & receiver views)
  *  - Cmd/Ctrl+K → toggle diagnostics panel
  *  - Cmd/Ctrl+J → toggle theme
+ *  - ? (Shift+/)→ keyboard shortcuts dialog
  * Ignores shortcuts when focus is in an input/textarea/contenteditable.
  */
 export function useKeyboardShortcuts(handlers: ShortcutHandlers, view: string) {
@@ -48,6 +50,13 @@ export function useKeyboardShortcuts(handlers: ShortcutHandlers, view: string) {
       }
 
       if (isTyping) return
+
+      // "?" (Shift+/) opens the shortcuts dialog from any view.
+      if (e.key === '?') {
+        e.preventDefault()
+        handlers.onShowShortcuts?.()
+        return
+      }
 
       if (e.key === 'Escape') {
         e.preventDefault()

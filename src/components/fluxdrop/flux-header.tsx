@@ -19,6 +19,7 @@ import { Switch } from '@/components/ui/switch'
 import { Separator } from '@/components/ui/separator'
 import { useState, useEffect } from 'react'
 import { useSessionStore, type IceServerConfig } from '@/stores/session-store'
+import { useTransferStore } from '@/stores/transfer-store'
 import { setSoundEnabled, unlockAudio } from '@/lib/fluxdrop/sound'
 import { getTrustedPeers, removeTrustedPeer, clearTrustedPeers, type TrustedPeer } from '@/lib/fluxdrop/trusted-peers'
 import { FluxLogo, FluxWordmark } from './flux-logo'
@@ -29,6 +30,14 @@ export function FluxHeader({ onOpenSettings, onOpenHelp }: { onOpenSettings?: ()
   const signalingConnected = useSessionStore((s) => s.signalingConnected)
   const rtcState = useSessionStore((s) => s.rtcState)
   const dataChannelOpen = useSessionStore((s) => s.dataChannelOpen)
+  const transferState = useTransferStore((s) => s.transferState)
+  // A terminal transfer means the P2P session is over — "Reconnecting" would
+  // imply an auto-recovery that is never coming (e.g. expired-room view).
+  const transferTerminal =
+    transferState === 'COMPLETE' ||
+    transferState === 'CANCELLED' ||
+    transferState === 'FAILED' ||
+    transferState === 'ERROR'
 
   // Mounted flag is the canonical next-themes pattern for avoiding hydration mismatch.
   useEffect(() => {
@@ -50,13 +59,18 @@ export function FluxHeader({ onOpenSettings, onOpenHelp }: { onOpenSettings?: ()
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Connection status badge */}
+          {/* Connection status badge.
+              rtcState mirrors RTCPeerConnectionState: 'new' means "no P2P session yet"
+              (NOT connecting) — only 'connecting', or 'connected' with the DataChannel
+              still closed, represent genuine negotiation. */}
           <Badge
             variant="outline"
             className={`hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 transition-colors ${
               dataChannelOpen
                 ? 'border-flux-500/50 bg-flux-500/15 text-flux-700 dark:text-flux-300'
-                : rtcState === 'connecting' || rtcState === 'new'
+                : rtcState === 'connecting' || rtcState === 'connected'
+                ? 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400'
+                : rtcState === 'disconnected' || (rtcState === 'failed' && !transferTerminal)
                 ? 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400'
                 : signalingConnected
                 ? 'border-flux-500/40 bg-flux-500/10 text-flux-700 dark:text-flux-300'
@@ -72,7 +86,12 @@ export function FluxHeader({ onOpenSettings, onOpenHelp }: { onOpenSettings?: ()
                 </span>
                 <span className="text-[11px] font-medium">P2P live</span>
               </>
-            ) : rtcState === 'connecting' || rtcState === 'new' ? (
+            ) : rtcState === 'disconnected' || (rtcState === 'failed' && !transferTerminal) ? (
+              <>
+                <WifiOff className="h-3 w-3 animate-pulse" />
+                <span className="text-[11px] font-medium">Reconnecting</span>
+              </>
+            ) : rtcState === 'connecting' || rtcState === 'connected' ? (
               <>
                 <span className="relative flex h-2 w-2">
                   <span className="absolute inline-flex h-full w-full rounded-full bg-amber-500 opacity-75 flux-pulse-dot" />

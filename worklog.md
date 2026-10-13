@@ -1468,3 +1468,56 @@ Candidates: multi-file (folder) resume E2E with per-file badges; light-theme PWA
 
 ## Commit
 - This round's changes committed after this entry; pushed to origin/main with one-shot PAT URL, author Youssef Mahmoud <youssef2010.mahmoud@gmail.com>. Token never persisted.
+---
+Task ID: cron-review-r11
+Agent: Z.ai Code (cron webDevReview round 11)
+Task: Assess status, QA via agent-browser, fix bugs, ship new features + styling polish.
+
+## Current project status
+Stable through round 10. Baseline QA was fully clean (12MB E2E, SHA-256 verified both sides, zero console errors). This round's deep QA then surfaced ONE CRITICAL data-integrity bug (false completion on resumed transfers) plus FOUR smaller real bugs — all fixed and E2E-verified. Three new features shipped and verified. Lint exit 0, tsc clean for src/.
+
+## Bugs found & fixed (all browser-verified)
+1. **[CRITICAL] False completion on resumed transfers (data loss + fake "verified")**: on a resumed send, the sender announced TRANSFER_COMPLETE as soon as the DC send buffer accepted all chunks — while the receiver was still ~9 seconds behind (observed: assembly attempted with 969/1088 chunks missing). Three stacked failures then produced a record stamped "COMPLETE · SHA-256 verified ✓" with only 119/1088 chunks actually stored:
+   - The 15s completeness poll gave up and assembled with holes → false "Checksum mismatch" → ERROR state → subsequent chunks DROPPED (CHUNK_DATA guard) → received chunks lost (ERROR path never flushed memory to IDB).
+   - The signaling onTransferComplete handler then stamped COMPLETE+verified unconditionally, without any real assembly/verification.
+   Fixes (defense in depth):
+   a. Sender now WAITS for `chunksAcked + skipped >= totalChunks` (500ms poll, 120s cap, PAUSED/DC-closed escape) before announcing TRANSFER_COMPLETE — completion is receipt-based, not buffer-based.
+   b. Receiver completeness poll NEVER assembles while the missing set keeps shrinking (progress-wait with 10s stall detection, 90s hard cap) — premature announcements are absorbed, not error-fataled.
+   c. Signaling onTransferComplete on the RECEIVER now routes through verifyReceiverTransfer (real assembly + checksum + save) via a late-bound ref; it can no longer stamp unverified completion.
+   d. The genuine-mismatch ERROR path now flushes received chunks to IDB before returning (previously silently dropped everything buffered).
+   Verified: full resume E2E after fixes → receiver toast "All files received and verified! 1 file saved · SHA-256 ✓" from the REAL pipeline, zero mismatches/watchdogs in console, and **Re-download reassembled the 20MB file from local chunks with SHA-256 verified, 0 bytes over the network**.
+   NOTE: the pre-fix poisoned record ("2 files", 68MB) remains in test histories — its "verified" flag is false; delete it manually.
+2. **[BUG] Redundant WebRTC offer clobbered a live transfer**: a re-offer arriving while the DC was open and streaming (resume renegotiation race) rebuilt the peer connection and reset transferState to CONNECTING — the receiver UI fell back to "Waiting for sender" for the whole transfer while chunks flowed on the old channel. Fix: ignore redundant offers while a transfer is live on an open DC; on legitimate resume re-offers, the receiver's new-DC-open handler now restores TRANSFERRING from CONNECTING/RESUMING. Verified: receiver progress view stays live during resumed transfer ("Transferring… 5%" + "115 of 544 chunks already on this device").
+3. **[BUG] Header badge showed "Connecting" forever**: rtcState 'new' (no P2P session yet) was treated as negotiation. Fix: only 'connecting'/'connected' (DC not yet open) → Connecting; 'disconnected'/'failed' (non-terminal) → new "Reconnecting" state (pulsing WifiOff); 'new' falls through to signaling state → truthful "Online". Also: signaling now connects proactively on mount (silent — no toast) and re-arms silently after cleanup, so landing shows real connectivity; deep-link joins start instantly.
+4. **[BUG] Service worker pinned stale chunks forever**: static assets were cache-first with a never-bumped cache name — after a deploy, same-URL content-changed chunks were served stale to installed PWAs indefinitely (observed live: new code refused to load until the SW was manually purged). Fix: CACHE_NAME → fluxdrop-v3 + stale-while-revalidate for same-origin assets (serve cached instantly, refresh in background — next load is always fresh).
+5. **[BUG] Sender wait-block starvation edge**: none found; the new sender wait has PAUSED/DC-closed escapes (resume path re-enters).
+
+## New features (all browser-verified)
+1. **Web Share Target (share INTO FluxDrop)**: manifest `share_target` (POST /share-target, multipart, files+text+title); the service worker stashes the payload in IndexedDB under a one-time token and redirects to /?shared=<token>; the app ingests it through the same paths as clipboard paste (files → send queue with dedupe + toast, text → snippet composer pre-filled) then cleans the URL and deletes the stash; stale stashes (>10min) swept. E2E-verified in-sandbox by POSTing FormData through the registered SW: 2 files → sender queue + toast "Added 2 shared files · 28 B"; text-only → composer pre-filled; stash deleted after handoff; URL cleaned. (OS-level share sheet itself can't be triggered in the sandbox — the SW relay + ingestion are fully verified.)
+2. **Keyboard shortcuts dialog**: press `?` (Shift+/) anywhere, or click the footer hint bar (now a real button with hover reveal "⌘ ? all shortcuts"); grouped list (landing / in-transfer) with kbd chips, hints, and a pointer to the FAQ dialog. Verified: opens via key + via click, Esc closes.
+3. **History sort control**: Recent / Largest first / File name (A–Z) dropdown in the history header (flux-tinted when non-default, aria-label reflects state). Verified: menu opens, options apply, label updates.
+4. **Light-theme PWA screenshots**: captured 1920x1080 (sender room: QR, PIN, devices, queued files) and 1080x1920 (landing hero) in light mode; added to manifest screenshots (4 total: 2 dark + 2 light).
+
+## Styling polish
+- Stat tiles: hover lift (-translate-y + shadow) + border intensification on highlight tiles.
+- History rows: "Resumed" badge now shows on COMPLETE rows too (with explanatory tooltip) + the "N saved" leaf is visible on mobile as well (was hidden <sm). Verified on a real resumed+completed row: badge + "7.4 MB saved" + complete icon.
+- ShortcutsHint: interactive button styling with hover-revealed affordance.
+- Header badge: truthful states incl. new "Reconnecting" (amber pulse) and terminal-transfer suppression (expired-room view shows Online instead of a misleading Reconnecting).
+
+## E2E verification highlights
+- 5 full transfer cycles this round (12/18/34/40/20MB incl. one accidental multi-file 68MB resume that completed 1088/1088 verified — bonus multi-file resume coverage), cancel→resume→auto-accept with skip bitmaps, Re-download byte-verified twice.
+- Share-target SW relay + both ingestion paths; shortcuts dialog; sort menu; light screenshots; badge states across landing/expired-room/session views.
+- Zero unexpected console errors after fixes (pre-fix mismatch errors were the bug itself, now gone).
+
+## Unresolved issues / risks
+- Sandbox caveats unchanged: IDB wiped on page reloads; keep E2E files ≤40MB; gateway :81 required (direct :3000 breaks signaling); deep-link needs full page load (hashchange join works but dedupes a re-set identical hash by design).
+- Turbopack dev watcher went stale twice this round (served chunks missing new code) — fixed by restarting dev server AND purging .next; also remember manual SW registration in QA sessions caches chunks (purge via unregister+caches.delete when chasing stale UI).
+- The pre-fix false-complete record ("2 files", 68MB, marked verified though only 119 chunks stored) is still in test histories on both sessions — harmless, delete manually.
+- Sender wait-block: if the receiver's acks are permanently lost, the sender falls back to announcing completion after 120s (receiver-side authority + fixes b/c make this safe).
+- Web Share Target OS-level behavior (real Android/desktop share sheet) untestable in sandbox — SW relay and ingestion verified programmatically.
+
+## Recommendation for next phase
+Candidates: prod-build offline e2e; multi-file folder resume with per-file skip viz; retry/backoff for signaling reconnects; "Send again" for COMPLETE records; per-transfer speed sparkline in history rows; iOS Safari save-flow fallback testing.
+
+## Commit
+- This round's changes committed and pushed to origin/main (one-shot PAT URL, author Youssef Mahmoud <youssef2010.mahmoud@gmail.com>). Token never persisted; verified no sandbox auto-commits before pushing.

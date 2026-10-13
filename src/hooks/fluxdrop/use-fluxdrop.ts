@@ -59,6 +59,7 @@ export function useFluxDrop() {
   const speedTickerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const peerDeviceIdRef = useRef<string | null>(null)
   const checksumVerifiedRef = useRef<boolean | null>(null)
+  const silentConnectRef = useRef(false)
   // Pause/Resume flow control: either side can pause the stream.
   const pauseLocalRef = useRef<boolean>(false)
   const pausePeerRef = useRef<boolean>(false)
@@ -70,6 +71,10 @@ export function useFluxDrop() {
   // loops racing after a watchdog force-restart).
   const sendLoopGenRef = useRef<number>(0)
   const beginSendingRef = useRef<((resumeFrom?: number) => Promise<void>) | null>(null)
+  // Late-bound ref for verifyReceiverTransfer (declared further below — the
+  // signaling onTransferComplete handler runs long after render, so a ref
+  // avoids the temporal-dead-zone of a direct reference from connect()).
+  const verifyReceiverTransferRef = useRef<(() => Promise<void>) | null>(null)
   // Watchdog bookkeeping: last chunk index seen + consecutive stalled ticks.
   const stallLastIdxRef = useRef<number>(-1)
   const stallTicksRef = useRef<number>(0)
@@ -227,20 +232,23 @@ export function useFluxDrop() {
   }, [])
 
   // ---- Connect to signaling server ----
-  const connect = useCallback(() => {
+  // silent=true suppresses the connect/disconnect toasts (used for the
+  // proactive mount-time connection; user-initiated flows stay verbose).
+  const connect = useCallback((silent = false) => {
     if (signalingRef.current) return
+    silentConnectRef.current = silent
     const sig = new FluxDropSignaling({
       onConnect: () => {
         sessionRef.current.setSignalingConnected(true)
-        toast.success('Connected to FluxDrop network')
+        if (!silentConnectRef.current) toast.success('Connected to FluxDrop network')
       },
       onDisconnect: () => {
         sessionRef.current.setSignalingConnected(false)
-        toast.warning('Disconnected from signaling server')
+        if (!silentConnectRef.current) toast.warning('Disconnected from signaling server')
       },
       onConnectError: (err) => {
         sessionRef.current.setSignalingConnected(false)
-        toast.error('Signaling connection failed', { description: err.message })
+        if (!silentConnectRef.current) toast.error('Signaling connection failed', { description: err.message })
       },
       onRoomCreated: (payload) => {
         sessionRef.current.setRoom({
@@ -340,6 +348,15 @@ export function useFluxDrop() {
         // signaling as a redundant reliable path). Idempotent: skip the
         // fanfare when the DC ack already completed this transfer.
         const alreadyComplete = transferRef.current.transferState === 'COMPLETE'
+        // RECEIVER: never stamp COMPLETE without real verification. The sender
+        // can announce completion while chunks are still in flight (DC send-
+        // buffer drain lag) — routing through verifyReceiverTransfer runs the
+        // assembly + checksum pipeline with its completeness poll. A previous
+        // bug stamped verified=true here, producing FALSE completion records.
+        if (!alreadyComplete && filesRef.current.length === 0 && manifestRef.current) {
+          void verifyReceiverTransferRef.current?.()
+          return
+        }
         transferRef.current.setTransferState('COMPLETE')
         if (!alreadyComplete) {
           playSuccess()
@@ -394,6 +411,13 @@ export function useFluxDrop() {
     sig.connect()
     signalingRef.current = sig
   }, [persistTransferRecord, flushReceiverBuffers])
+
+  // Proactively connect to signaling on mount (silent — no toast). Signaling only
+  // carries pairing metadata, this makes the header badge truthful ("Online"), and
+  // deep-link joins start negotiating instantly instead of waiting for a flow.
+  useEffect(() => {
+    connect(true)
+  }, [connect])
 
   // ---- Diagnostics polling (ICE candidate pair + bytes) ----
   const diagnosticsRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -637,6 +661,20 @@ export function useFluxDrop() {
 
   // ---- Receiver: handle incoming offer ----
   const handleOfferAsReceiver = useCallback(async (sdp: RTCSessionDescriptionInit) => {
+    // Ignore a redundant re-offer while a transfer is live on an OPEN
+    // DataChannel — renegotiating would clobber the running state machine
+    // (UI falls back to "Waiting for sender" while chunks keep flowing on
+    // the old channel). Legit resume re-offers arrive with the DC closed.
+    const st = transferRef.current.transferState
+    const transferLive =
+      st === 'TRANSFERRING' ||
+      st === 'PAUSED' ||
+      st === 'VERIFYING' ||
+      st === 'MANIFEST_EXCHANGE'
+    if (transferLive && sessionRef.current.dataChannelOpen) {
+      console.warn('[FluxDrop] Ignoring redundant offer — transfer already streaming on an open DataChannel')
+      return
+    }
     if (webrtcRef.current) webrtcRef.current.close()
     const rtc = new FluxDropWebRTC(
       {
@@ -669,6 +707,16 @@ export function useFluxDrop() {
         onDataChannelOpen: () => {
           sessionRef.current.setDataChannelOpen(true)
           sessionRef.current.setRetryCount(0)
+          // Receiver-side re-offer (resume path): restore the live-transfer
+          // state so the progress view and the completion poll stay alive.
+          // Without this the UI stayed on "Waiting for sender" for the whole
+          // resumed leg even while chunks streamed and acked.
+          if (manifestRef.current) {
+            const st = transferRef.current.transferState
+            if (st === 'CONNECTING' || st === 'RESUMING') {
+              transferRef.current.setTransferState('TRANSFERRING')
+            }
+          }
         },
         onDataChannelClose: () => {
           sessionRef.current.setDataChannelOpen(false)
@@ -1172,14 +1220,28 @@ export function useFluxDrop() {
       // Completeness check (ALWAYS — parallel channels reorder chunks, so the
       // last INDEX can arrive while earlier chunks are still in flight; the
       // old lastChunkSeenRef gate skipped this poll and assembled with holes).
+      // NEVER assemble while progress continues: a premature TRANSFER_COMPLETE
+      // (sender's DC send-buffer drained before the receiver finished reading)
+      // used to hit the 15s cap and produce a FALSE checksum-mismatch ERROR
+      // that dropped every subsequent chunk. Now: wait while the missing set
+      // keeps shrinking; only give up after ~10s of ZERO progress (hard cap 90s).
       {
         let storedIdx = await getStoredChunkIndices(m.transferId)
-        for (let attempt = 0; attempt < 15; attempt++) {
+        let lastMissing = -1
+        let stallTicks = 0
+        for (let attempt = 0; attempt < 90; attempt++) {
           const missing: number[] = []
           for (let c = 0; c < m.totalChunks; c++) {
             if (!receiverBuffersRef.current.has(c) && !storedIdx.has(c)) missing.push(c)
           }
           if (missing.length === 0) break
+          if (missing.length === lastMissing) {
+            stallTicks++
+            if (stallTicks >= 10) break // no progress for ~10s — genuinely stalled
+          } else {
+            stallTicks = 0
+            lastMissing = missing.length
+          }
           if (attempt === 0) {
             console.warn(`[FluxDrop] Assembly waiting for ${missing.length} in-flight chunk(s) (e.g. ${missing.slice(0, 5).join(',')})`)
           }
@@ -1229,6 +1291,11 @@ export function useFluxDrop() {
           transferRef.current.setChecksumVerified(false)
           transferRef.current.setTransferState('ERROR')
           webrtcRef.current?.sendTransferCompleteAck(m.transferId, false)
+          // Persist every received chunk BEFORE returning — the pre-fix path
+          // returned without flushing and silently dropped everything the
+          // receiver had buffered (a later resume re-sent it all).
+          flushReceiverBuffers()
+          try { await flushChainRef.current } catch { /* best-effort */ }
           await persistTransferRecord('receiver', 'ERROR', { checksumVerified: false })
           void flushAllPendingAcks()
           return
@@ -1336,6 +1403,11 @@ export function useFluxDrop() {
     }
     await verificationPromiseRef.current
   }, [finishReceiverTransfer])
+
+  // Expose to the signaling completion handler (late-bound).
+  useEffect(() => {
+    verifyReceiverTransferRef.current = verifyReceiverTransfer
+  }, [verifyReceiverTransfer])
 
   // ---- Receiver: self-completion poll ----
   // The old completion triggers were fragile on resumed sends: the literal
@@ -1536,6 +1608,24 @@ export function useFluxDrop() {
         }
       }
       const combined = m.files.map((f) => f.checksum).join('')
+      // The loop finishing means every chunk was ACCEPTED BY THE DC SEND
+      // BUFFER — not that the receiver has read them (the bufferedAmount
+      // watermarks let the sender run many seconds ahead, especially on
+      // resumed sends). Wait until the receiver's ACK count (plus the
+      // skipped chunks already known to be stored there) covers the whole
+      // transfer before announcing TRANSFER_COMPLETE. Bounded: lost ACKs
+      // must not hang the sender forever — the receiver's own completion
+      // poll is the authority and its ack arrives via signaling too.
+      {
+        const skipped = skipIndicesRef.current.size
+        for (let w = 0; w < 240; w++) {
+          const acked = transferRef.current.chunksAcked
+          if (acked + skipped >= m.totalChunks) break
+          const st = transferRef.current.transferState
+          if (!rtc.isOpen || st === 'PAUSED') break // resume path re-enters the wait
+          await new Promise((r) => setTimeout(r, 500))
+        }
+      }
       rtc.sendTransferComplete(m.transferId, combined)
     } catch (err: any) {
       playError()
@@ -1888,7 +1978,10 @@ export function useFluxDrop() {
     flushedChunkIdsRef.current = new Set()
     sendingRef.current = false
     checksumVerifiedRef.current = null
-  }, [])
+    // Silently re-arm the signaling socket so the landing page shows the real
+    // (connected) state instead of "Offline" after leaving a room.
+    connect(true)
+  }, [connect])
 
   return {
     session,

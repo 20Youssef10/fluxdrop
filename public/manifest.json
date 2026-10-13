@@ -23,6 +23,20 @@
       "type": "image/png",
       "form_factor": "narrow",
       "label": "FluxDrop on mobile — scan a QR and receive"
+    },
+    {
+      "src": "/screenshots/wide-light.png",
+      "sizes": "1920x1080",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "FluxDrop in light mode — a room with QR, PIN and queued files"
+    },
+    {
+      "src": "/screenshots/narrow-light.png",
+      "sizes": "1080x1920",
+      "type": "image/png",
+      "form_factor": "narrow",
+      "label": "FluxDrop in light mode — fast, private, peer-to-peer"
     }
   ],
   "icons": [
@@ -66,5 +80,20 @@
       "url": "/?action=receive",
       "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }]
     }
-  ]
+  ],
+  "share_target": {
+    "action": "/share-target",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "files": [
+        {
+          "name": "files",
+          "accept": ["*/*"]
+        }
+      ]
+    }
+  }
 }

@@ -197,10 +197,10 @@ function StatTile({
 }) {
   return (
     <div
-      className={`rounded-lg border p-3.5 transition-colors ${
+      className={`rounded-lg border p-3.5 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-sm ${
         highlight
-          ? 'border-flux-500/30 bg-flux-500/5 hover:bg-flux-500/10'
-          : 'border-border/50 bg-card/40 hover:bg-card/70'
+          ? 'border-flux-500/30 bg-flux-500/5 hover:border-flux-500/50 hover:bg-flux-500/10'
+          : 'border-border/50 bg-card/40 hover:border-border hover:bg-card/70'
       }`}
     >
       <div className={`flex items-center gap-1.5 ${color}`}>

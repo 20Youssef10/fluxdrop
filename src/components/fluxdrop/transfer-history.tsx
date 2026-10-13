@@ -1,10 +1,16 @@
 'use client'
 
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
-import { History, Trash2, ArrowUp, ArrowDown, CheckCircle2, AlertCircle, RotateCcw, Info, Download, Upload, FileJson, CheckSquare, Square, Search, X, Leaf, Loader2 } from 'lucide-react'
+import { History, Trash2, ArrowUp, ArrowDown, CheckCircle2, AlertCircle, RotateCcw, Info, Download, Upload, FileJson, CheckSquare, Square, Search, X, Leaf, Loader2, ArrowUpDown, Clock3, Database, ArrowDownAZ, Check } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { listTransfers, deleteTransferRecord, saveTransferRecord, type StoredTransfer } from '@/lib/fluxdrop/resume'
@@ -28,6 +34,7 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
   const [selectMode, setSelectMode] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [searchQuery, setSearchQuery] = useState('')
+  const [sortKey, setSortKey] = useState<'recent' | 'size' | 'name'>('recent')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [importing, setImporting] = useState(false)
 
@@ -76,8 +83,16 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
         r.transferId.toLowerCase().includes(q)
       )
     }
+    // Apply sort ('recent' keeps listTransfers' updatedAt-desc order)
+    if (sortKey === 'size') {
+      result = [...result].sort((a, b) => b.manifest.totalSize - a.manifest.totalSize)
+    } else if (sortKey === 'name') {
+      result = [...result].sort((a, b) =>
+        (a.manifest.files[0]?.name ?? '').localeCompare(b.manifest.files[0]?.name ?? '')
+      )
+    }
     return result
-  }, [records, activeFilter, searchQuery])
+  }, [records, activeFilter, searchQuery, sortKey])
 
   const filterCounts = useMemo(() => ({
     all: records.length,
@@ -451,6 +466,40 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
               )
             })}
           </div>
+          {/* Sort control */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className={`h-7 text-xs shrink-0 ${sortKey === 'recent' ? 'text-muted-foreground hover:text-foreground' : 'text-flux-600 dark:text-flux-400'}`}
+                title="Sort records"
+                aria-label={`Sort: ${sortKey === 'recent' ? 'most recent' : sortKey === 'size' ? 'largest first' : 'file name'}`}
+              >
+                <ArrowUpDown className="h-3.5 w-3.5" />
+                <span className="hidden md:inline ml-1">
+                  {sortKey === 'recent' ? 'Recent' : sortKey === 'size' ? 'Size' : 'Name'}
+                </span>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-44">
+              <DropdownMenuItem onClick={() => setSortKey('recent')} className="text-xs">
+                <Clock3 className="mr-2 h-3.5 w-3.5" />
+                Most recent
+                {sortKey === 'recent' && <Check className="ml-auto h-3.5 w-3.5 text-flux-500" />}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => setSortKey('size')} className="text-xs">
+                <Database className="mr-2 h-3.5 w-3.5" />
+                Largest first
+                {sortKey === 'size' && <Check className="ml-auto h-3.5 w-3.5 text-flux-500" />}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => setSortKey('name')} className="text-xs">
+                <ArrowDownAZ className="mr-2 h-3.5 w-3.5" />
+                File name (A–Z)
+                {sortKey === 'name' && <Check className="ml-auto h-3.5 w-3.5 text-flux-500" />}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           {/* Search input */}
           <div className="relative shrink-0 w-full sm:w-48">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
@@ -589,10 +638,15 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
                         {rec.status === 'FAILED' || rec.status === 'ERROR' ? (
                           <AlertCircle className="h-3.5 w-3.5 text-destructive shrink-0" />
                         ) : null}
-                        {rec.resumedAt && rec.status !== 'COMPLETE' && (
+                        {rec.resumedAt && (
                           <Badge
                             variant="outline"
                             className="shrink-0 border-flux-500/40 bg-flux-500/10 text-[9px] uppercase tracking-wide px-1.5 py-0 text-flux-600 dark:text-flux-400"
+                            title={
+                              rec.status === 'COMPLETE'
+                                ? 'This transfer was resumed after an interruption — it completed with a checksum match'
+                                : 'Continued from a previous attempt — only missing chunks are re-sent'
+                            }
                           >
                             <RotateCcw className="mr-0.5 h-2.5 w-2.5" />
                             Resumed
@@ -608,7 +662,7 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
                         <span>·</span>
                         <span>{formatRelative(rec.updatedAt)}</span>
                         {!!rec.resumedSavedBytes && rec.resumedSavedBytes > 0 && (
-                          <span className="hidden sm:inline-flex items-center gap-0.5 text-flux-600 dark:text-flux-400 font-medium">
+                          <span className="inline-flex items-center gap-0.5 text-flux-600 dark:text-flux-400 font-medium">
                             <Leaf className="h-2.5 w-2.5" aria-hidden />
                             {formatBytes(rec.resumedSavedBytes)} saved
                           </span>
