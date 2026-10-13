@@ -1,13 +1,14 @@
 'use client'
 
 import { motion, AnimatePresence } from 'framer-motion'
-import { Gauge, Timer, Hash, CheckCircle2, AlertTriangle, Loader2, ShieldCheck, TrendingUp, Pause, Play, RotateCcw, SkipForward } from 'lucide-react'
+import { Gauge, Timer, Hash, CheckCircle2, AlertTriangle, Loader2, ShieldCheck, TrendingUp, Pause, Play, RotateCcw, SkipForward, Leaf } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useTransferStore } from '@/stores/transfer-store'
 import { formatBytes, formatSpeed, formatEta, formatDuration } from '@/lib/fluxdrop/format'
+import { buildSlicePlan } from '@/lib/fluxdrop/manifest'
 import { FileIcon, getFileCategoryColors } from './file-icon'
 import { AnimatedNumber } from './animated-number'
 import { SpeedSparkline } from './speed-sparkline'
@@ -15,7 +16,7 @@ import { Celebration } from './celebration'
 import { ConnectionViz } from './connection-viz'
 import { TransferSummaryCard } from './transfer-summary-card'
 import { ErrorLogPanel } from './error-log-panel'
-import { useState, useEffect, useRef, memo } from 'react'
+import { useState, useEffect, useRef, useMemo, memo } from 'react'
 
 interface TransferProgressProps {
   onCancel: () => void
@@ -62,6 +63,31 @@ export function TransferProgress({ onCancel, onDone, onPause, onResume }: Transf
       clearTimeout(hide)
     }
   }, [pct, isTransferring])
+
+  // Per-file skip breakdown (resumed transfers): map the global skip bitmap
+  // onto each file's byte range so the FILES card can visualize which portion
+  // of each file was already on this device (never travelled the wire).
+  const fileSkips = useMemo(() => {
+    const out = new Map<number, { skippedBytes: number; skippedChunks: number; totalChunks: number }>()
+    const m = t.manifest
+    if (!m || t.skippedIndices.size === 0) return out
+    const plan = buildSlicePlan(m)
+    for (const seg of plan) {
+      const startChunk = Math.floor(seg.startByte / m.chunkSize)
+      const endChunk = Math.floor((seg.endByte - 1) / m.chunkSize)
+      let skippedBytes = 0
+      let skippedChunks = 0
+      for (let c = startChunk; c <= endChunk; c++) {
+        if (!t.skippedIndices.has(c)) continue
+        skippedChunks++
+        const overlapStart = Math.max(seg.startByte, c * m.chunkSize)
+        const overlapEnd = Math.min(seg.endByte, (c + 1) * m.chunkSize)
+        skippedBytes += Math.max(0, overlapEnd - overlapStart)
+      }
+      out.set(seg.fileIndex, { skippedBytes, skippedChunks, totalChunks: endChunk - startChunk + 1 })
+    }
+    return out
+  }, [t.manifest, t.skippedIndices])
 
   return (
     <div className="space-y-4">
@@ -271,6 +297,8 @@ export function TransferProgress({ onCancel, onDone, onPause, onResume }: Transf
             {t.files.map((f) => {
               const filePct = f.entry.size > 0 ? (f.receivedBytes / f.entry.size) * 100 : 0
               const colors = getFileCategoryColors(f.entry.type, f.entry.name)
+              const skip = fileSkips.get(f.index)
+              const skipPct = f.entry.size > 0 && skip ? Math.min(100, (skip.skippedBytes / f.entry.size) * 100) : 0
               return (
                 <div key={f.index} className="rounded-lg border border-border/50 bg-card/60 p-3">
                   <div className="flex items-center gap-3">
@@ -284,7 +312,29 @@ export function TransferProgress({ onCancel, onDone, onPause, onResume }: Transf
                           {formatBytes(f.receivedBytes)} / {formatBytes(f.entry.size)}
                         </span>
                       </div>
-                      <Progress value={filePct} className="h-1.5 mt-1.5" />
+                      {/* Stacked bar on resumed transfers: the leading muted-ring
+                          segment is data that was ALREADY on this device (resume
+                          skip) — it never travelled the wire this session. */}
+                      {skipPct > 0 ? (
+                        <div className="relative h-1.5 mt-1.5 w-full overflow-hidden rounded-full bg-muted" role="progressbar" aria-valuenow={Math.round(filePct)} aria-valuemin={0} aria-valuemax={100}>
+                          <div
+                            className="absolute inset-y-0 left-0 rounded-full bg-flux-500/20 ring-1 ring-inset ring-flux-500/50"
+                            style={{ width: `${skipPct}%` }}
+                          />
+                          <div
+                            className="absolute inset-y-0 rounded-full bg-flux-500 transition-all duration-300"
+                            style={{ left: `${skipPct}%`, width: `${Math.max(0, Math.min(100, filePct) - skipPct)}%` }}
+                          />
+                        </div>
+                      ) : (
+                        <Progress value={filePct} className="h-1.5 mt-1.5" />
+                      )}
+                      {skip && skip.skippedChunks > 0 && (
+                        <p className="mt-1 flex items-center gap-1 text-[10px] text-flux-600 dark:text-flux-400">
+                          <Leaf className="h-2.5 w-2.5 shrink-0" aria-hidden />
+                          {skip.skippedChunks} of {skip.totalChunks} chunks already on this device — never re-sent
+                        </p>
+                      )}
                     </div>
                     {f.complete ? (
                       <CheckCircle2 className="h-4 w-4 text-flux-500 shrink-0" />

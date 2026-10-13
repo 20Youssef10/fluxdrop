@@ -10,7 +10,8 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { ArrowUp, ArrowDown, CheckCircle2, AlertCircle, Clock, Hash, Database, RotateCcw, Leaf } from 'lucide-react'
+import { ArrowUp, ArrowDown, CheckCircle2, AlertCircle, Clock, Hash, Database, RotateCcw, Leaf, Download, Loader2 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 import { FileIcon } from './file-icon'
 import type { StoredTransfer } from '@/lib/fluxdrop/resume'
 import { formatBytes, formatDuration, fileTypeCategory } from '@/lib/fluxdrop/format'
@@ -19,9 +20,13 @@ interface TransferDetailDialogProps {
   record: StoredTransfer | null
   open: boolean
   onOpenChange: (open: boolean) => void
+  /** Reassemble + save the files from locally stored chunks (receiver, COMPLETE). */
+  onRedownload?: (rec: StoredTransfer) => void
+  /** True while a re-download is assembling in the background. */
+  redownloading?: boolean
 }
 
-export function TransferDetailDialog({ record, open, onOpenChange }: TransferDetailDialogProps) {
+export function TransferDetailDialog({ record, open, onOpenChange, onRedownload, redownloading }: TransferDetailDialogProps) {
   if (!record) return null
 
   const isSender = record.role === 'sender'
@@ -141,6 +146,33 @@ export function TransferDetailDialog({ record, open, onOpenChange }: TransferDet
               </div>
             </ScrollArea>
           </div>
+
+          {/* Re-download action: receiver + completed → chunks may still be local */}
+          {record.role === 'receiver' && isComplete && onRedownload && (
+            <div className="rounded-lg border border-flux-500/30 bg-flux-500/5 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-medium">Still have the local copy?</p>
+                  <p className="text-[10px] text-muted-foreground">
+                    Received chunks may still be stored — reassemble without the sender, zero network.
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  onClick={() => onRedownload(record)}
+                  disabled={redownloading}
+                  className="shrink-0 bg-flux-600 hover:bg-flux-700 text-white"
+                >
+                  {redownloading ? (
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Download className="mr-1.5 h-3.5 w-3.5" />
+                  )}
+                  {redownloading ? 'Reassembling…' : 'Re-download'}
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
       </DialogContent>
     </Dialog>

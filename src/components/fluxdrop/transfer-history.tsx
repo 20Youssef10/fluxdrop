@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
-import { History, Trash2, ArrowUp, ArrowDown, CheckCircle2, AlertCircle, RotateCcw, Info, Download, Upload, FileJson, CheckSquare, Square, Search, X, Leaf } from 'lucide-react'
+import { History, Trash2, ArrowUp, ArrowDown, CheckCircle2, AlertCircle, RotateCcw, Info, Download, Upload, FileJson, CheckSquare, Square, Search, X, Leaf, Loader2 } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -112,12 +112,89 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
     }
   }
 
-  const handleRedownload = (rec: StoredTransfer) => {
+  const [redownloadingId, setRedownloadingId] = useState<string | null>(null)
+  const handleRedownload = useCallback(async (rec: StoredTransfer) => {
     if (rec.role !== 'receiver' || rec.status !== 'COMPLETE') return
-    toast.info('Re-download requires the sender', {
-      description: 'Ask the sender to re-send the files, or check your downloads folder.',
-    })
-  }
+    if (redownloadingId) return
+    setRedownloadingId(rec.transferId)
+    const restoreId = rec.transferId
+    try {
+      const { getStoredChunkIndices, getChunk } = await import('@/lib/fluxdrop/resume')
+      const { buildSlicePlan } = await import('@/lib/fluxdrop/manifest')
+      const { assembleBlob, saveBlobWithPicker, saveFilesToDirectory } = await import('@/lib/fluxdrop/file-io')
+      const { verifyChecksum } = await import('@/lib/fluxdrop/checksum')
+
+      const m = rec.manifest
+      const stored = await getStoredChunkIndices(restoreId)
+      if (stored.size === 0) {
+        toast.error('Local copy no longer available', {
+          description: 'The received chunks were cleared by the browser. Ask the sender to re-send the files.',
+        })
+        return
+      }
+      if (stored.size < m.totalChunks) {
+        const pct = Math.round((stored.size / m.totalChunks) * 100)
+        toast.error(`Only ${pct}% of the data is still stored`, {
+          description: `${m.totalChunks - stored.size} chunk(s) were purged. Ask the sender to resume this transfer instead.`,
+        })
+        return
+      }
+
+      toast.info('Reassembling from local chunks…', {
+        description: `${m.files.length} file${m.files.length > 1 ? 's' : ''} · ${formatBytes(m.totalSize)} — no network needed`,
+      })
+
+      const plan = buildSlicePlan(m)
+      const assembled: { name: string; blob: Blob; relativePath: string }[] = []
+      for (let i = 0; i < m.files.length; i++) {
+        const entry = m.files[i]
+        const seg = plan.find((s) => s.fileIndex === i)
+        if (!seg) continue
+        const startChunk = Math.floor(seg.startByte / m.chunkSize)
+        const endChunk = Math.floor((seg.endByte - 1) / m.chunkSize)
+        const fileChunks: ArrayBuffer[] = []
+        for (let c = startChunk; c <= endChunk; c++) {
+          const buf = await getChunk(restoreId, c)
+          if (!buf) continue
+          const globalStart = c * m.chunkSize
+          let localStart = 0
+          let localEnd = buf.byteLength
+          if (c === startChunk) localStart = seg.startByte - globalStart
+          if (c === endChunk) localEnd = seg.endByte - globalStart
+          fileChunks.push(buf.slice(localStart, localEnd))
+        }
+        const blob = assembleBlob(fileChunks, entry.type)
+        const ok = await verifyChecksum(blob, entry.checksum)
+        if (!ok) {
+          toast.error(`Integrity check failed for ${entry.name}`, {
+            description: 'The stored data was modified after receipt. Please ask the sender to re-send.',
+          })
+          return
+        }
+        assembled.push({ name: entry.name, blob, relativePath: entry.relativePath })
+      }
+
+      let result: 'saved' | 'fallback' | 'cancelled' = 'saved'
+      if (assembled.length > 1) {
+        result = await saveFilesToDirectory(assembled)
+        if (result === 'cancelled') toast.info('Save cancelled — files not saved')
+      } else if (assembled.length === 1) {
+        result = await saveBlobWithPicker(assembled[0].blob, assembled[0].name)
+        if (result === 'cancelled') toast.info('Save cancelled — file not saved')
+      }
+      if (result !== 'cancelled') {
+        toast.success('Saved from local chunks', {
+          description: `${assembled.length} file${assembled.length > 1 ? 's' : ''} · SHA-256 verified · 0 bytes over the network`,
+        })
+      }
+    } catch (err) {
+      toast.error('Re-download failed', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      })
+    } finally {
+      if (restoreId === rec.transferId) setRedownloadingId(null)
+    }
+  }, [redownloadingId])
 
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) => {
@@ -454,15 +531,18 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
               filteredRecords.map((rec, index) => {
                 // Incomplete transfers AND cancelled sends are resumable —
                 // the sender's files stay persisted until the transfer completes.
+                // NOTE: even a fully-acked (100%) non-COMPLETE record (a zombie
+                // left by a lost TRANSFER_COMPLETE_ACK) is resumable — the
+                // sender re-sends nothing (skip bitmap covers everything) and
+                // the receiver's completion poll finishes it cleanly.
                 const isResumable =
                   rec.status !== 'COMPLETE' &&
-                  (rec.status !== 'CANCELLED' || rec.role === 'sender') &&
-                  rec.chunksAcked.length < rec.manifest.totalChunks
+                  (rec.status !== 'CANCELLED' || rec.role === 'sender')
                 const isSelected = selectedIds.has(rec.transferId)
                 return (
                   <div
                     key={rec.transferId}
-                    className={`group flux-slide-up flex items-center gap-3 rounded-lg border p-3 transition-all ${
+                    className={`group flux-slide-up flex items-center gap-3 rounded-lg border p-3 transition-all duration-200 hover:-translate-y-px hover:shadow-sm ${
                       selectMode && isSelected
                         ? 'border-flux-500/40 bg-flux-500/5'
                         : 'border-border/50 bg-card/60 hover:border-flux-500/30'
@@ -568,12 +648,17 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
                           <Button
                             variant="ghost"
                             size="icon"
-                            onClick={() => handleRedownload(rec)}
+                            onClick={() => void handleRedownload(rec)}
+                            disabled={redownloadingId === rec.transferId}
                             className="h-7 w-7 text-flux-600 dark:text-flux-400 hover:bg-flux-500/10"
-                            aria-label="Re-download"
-                            title="Re-download"
+                            aria-label="Re-download from locally stored chunks"
+                            title="Re-download — reassemble from locally stored chunks (no network)"
                           >
-                            <Download className="h-3.5 w-3.5" />
+                            {redownloadingId === rec.transferId ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Download className="h-3.5 w-3.5" />
+                            )}
                           </Button>
                         )}
                         <Button
@@ -610,6 +695,8 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
         record={selected}
         open={detailOpen}
         onOpenChange={setDetailOpen}
+        onRedownload={(r) => void handleRedownload(r)}
+        redownloading={!!selected && redownloadingId === selected.transferId}
       />
 
       {/* Shared import input (main view) */}

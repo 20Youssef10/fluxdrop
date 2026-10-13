@@ -41,23 +41,34 @@ export default function Home() {
   const { theme, setTheme } = useTheme()
 
   // Deep-link parsing: if URL has #join=ROOM&pin=PIN, auto-switch to receiver mode.
-  const deepLinkHandled = useRef(false)
-  useEffect(() => {
-    if (deepLinkHandled.current) return
-    if (typeof window === 'undefined') return
-    const hash = window.location.hash
-    if (!hash) return
-    const match = hash.match(/join=([A-Za-z0-9]+)&pin=(\d+)/)
-    if (match) {
-      deepLinkHandled.current = true
+  // Handles BOTH a full page load and hash-only navigation (hashchange), and
+  // each distinct link is handled exactly once. startReceive waits for the
+  // signaling socket internally, so no fixed delay is needed here.
+  const deepLinkHandled = useRef('') // hash of the last handled link
+  const handleDeepLink = useCallback(
+    (fluxApi: ReturnType<typeof useFluxDrop>) => {
+      if (typeof window === 'undefined') return
+      const hash = window.location.hash
+      if (!hash) return
+      const match = hash.match(/join=([A-Za-z0-9]+)&pin=(\d+)/)
+      if (!match) return
+      if (deepLinkHandled.current === hash) return
+      deepLinkHandled.current = hash
       const [, roomId, pin] = match
+      // Clean the hash so a reload doesn't re-join a (probably expired) room.
+      window.history.replaceState(null, '', window.location.pathname + window.location.search)
       setView('receiver')
-      setTimeout(() => {
-        flux.startReceive(roomId, pin)
-      }, 500)
+      void fluxApi.startReceive(roomId, pin)
       toast.info('Joining room from link…', { description: `Room ${roomId}` })
-    }
-  }, [flux, setView])
+    },
+    [setView]
+  )
+  useEffect(() => {
+    handleDeepLink(flux)
+    const onHashChange = () => handleDeepLink(flux)
+    window.addEventListener('hashchange', onHashChange)
+    return () => window.removeEventListener('hashchange', onHashChange)
+  }, [flux, handleDeepLink])
 
   const goSend = useCallback(() => setView('sender'), [setView])
   const goReceive = useCallback(() => setView('receiver'), [setView])

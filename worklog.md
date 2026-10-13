@@ -1389,3 +1389,39 @@ Stable through round 7. This round's QA found ONE environment gotcha and TWO REA
 
 ## Recommendation for next phase
 Candidates: deep-link join race fix (retry join emit when socket connects), light-theme PWA screenshots, prod-build offline e2e, per-file resume-skip visualization, "Re-download" for completed receiver records (chunks may still be in IDB).
+---
+Task ID: cron-review-r9
+Agent: Z.ai Code (cron webDevReview round 9)
+Task: Assess status, QA via agent-browser, fix discovered bugs (deep-link race + 4 more), ship Re-download + per-file skip viz + styling polish.
+
+## Current project status
+Stable through round 8. This round's QA found SIX REAL BUGS (all fixed + E2E-verified), including one CRITICAL deadlock. Baseline QA was clean (16MB E2E, SHA-256 verified both sides, zero unexpected console errors). Lint + tsc clean for src/ (the only tsc error is the pre-existing unrelated skills/stock-analysis-skill folder). NOT committed this round until after worklog entry — see commit note below.
+
+## Bugs found & fixed (all browser-verified)
+1. **[CRITICAL] Second transfer in a page lifetime deadlocked at 100% forever**: `verificationPromiseRef` was set in finishReceiverTransfer and NEVER cleared — the receiver self-completion poll (`if (verificationPromiseRef.current) return`) was permanently blocked and TRANSFER_COMPLETE awaited the stale resolved promise. Every transfer after the first one in the same page lifetime stuck at 100% TRANSFERRING on BOTH peers (sender watchdog correctly silent since idx >= totalChunks). Fix: clear the ref in a `.finally()` when the verify promise settles + terminal-state guard (COMPLETE/ERROR) at the top of finishReceiverTransfer so a late duplicate trigger can't re-run assembly+save. Verified: 3 consecutive transfers completed in one page lifetime (previously the 2nd always hung).
+2. **[BUG] Stall watchdog ran on receivers**: the 30s no-progress watchdog is hook-level (runs on every page). On a receiver, senderNextIndexRef stays 0 < totalChunks so the idx-guard never fired → "Send loop stalled — auto-restarted from chunk 0" logged every 30s + beginSending(0)'d on the receiver (no-op only because filesRef is empty). Fix: sender-only guard `filesRef.current.length === 0 → reset & return`. Verified: zero watchdog spam across all subsequent transfers.
+3. **[BUG] Deep-link join race**: startSend/startReceive emitted createRoom/joinRoom via a blind setTimeout(300ms) after connect() — raced cold connects (deep links observed to miss). Fixes: (a) signaling.ts gained `waitUntilConnected(timeoutMs)` — both start paths now await it (8s cap, socket.io buffers anyway); (b) page.tsx deep-link effect now ALSO listens to `hashchange` (hash-only navigation previously did NOTHING — user had to fully reload) and cleans the hash after handling so a reload can't re-join an expired room. Verified BOTH paths: full-page-load join AND `location.hash = 'join=...'` on an already-loaded page (used for every subsequent receiver join this round — worked every time).
+4. **[BUG] Sender FILES card under-counted on resume**: skipped chunks never produce CHUNK_ACKs, so per-file bytes stayed below the skipped amount forever (observed 6.8/16 MB with 256/256 acked). Fix: RESUME_RESPONSE handler now maps each skipped index through resolveChunk → addFileBytes. Verified: FILES card showed 29.9/30.0 MB mid-resume.
+5. **[BUG] Chunks streamed in the final stretch were lost on completion**: finishReceiverTransfer cleared receiverBuffersRef WITHOUT flushing to IDB first (lazy flush only fired at 1024-chunk boundaries / cancel / unload — never on success). Re-download after a normal completion found 0 chunks. Fix: flushReceiverBuffers() + await flushChainRef BEFORE clearing. Verified: Re-download of a completed 8MB transfer reassembled, SHA-256 verified, saved to /home/z/Downloads with md5 EXACTLY matching the source — 0 bytes over the network.
+6. **[BUG] Sender could hang at 100% when the DC TRANSFER_COMPLETE_ACK was lost** (observed once: sender 480/480 TRANSFERRING while receiver COMPLETE). Fixes: (a) receiver now ALSO announces completion via signaling TRANSFER_COMPLETE (TCP through the gateway — reliable); (b) both the sender's DC-ack handler and the signaling onTransferComplete handler are idempotent (alreadyComplete guard skips duplicate sound/toast/relay). Verified: subsequent completes show exactly one fanfare; no hangs.
+
+Also fixed: **zombie records unresumable** — isResumable excluded records with acked == totalChunks (100%-stuck zombies had no Resume button). Removed that condition; resuming a fully-acked record re-sends nothing (skip bitmap covers all) and the receiver's completion poll finishes it cleanly. Verified: resumed the 100%-stuck zombie record successfully.
+
+## New features (all browser-verified)
+1. **Re-download (receiver, COMPLETE records)**: real implementation replacing the stub toast. Assembles files from locally stored IDB chunks (slice plan + per-file slicing), SHA-256 verifies each, saves via directory/save picker. Graceful degradation: 0 chunks → "Local copy no longer available"; partial → "Only N% still stored" + resume suggestion; checksum failure → integrity error + re-send advice. Spinner + disabled state while working; button in history rows AND a new action card in the detail dialog ("Still have the local copy? — reassemble without the sender, zero network"). Verified byte-perfect (md5 match).
+2. **Per-file resume-skip visualization**: FILES card rows on resumed transfers show a STACKED progress bar — leading ring-outlined segment = bytes already on this device (never re-sent), solid segment = streamed now — plus a leaf note "N of M chunks already on this device — never re-sent" (per-file skip bytes computed via buildSlicePlan × skippedIndices overlap). Captured live mid-resume: "85 of 480 chunks already on this device — never re-sent".
+3. **Styling polish**: consent dialog gained Esc-to-reject keyboard support, animated incoming pulse ring behind the shield icon, hover tint on file rows; join form room input gets flux focus ring + autofocus + spellcheck off; history rows hover-lift (translate-y + shadow); Re-download detail-dialog action card.
+
+## E2E verification highlights
+- Full cycle ×9 across the round (16/30MB): every completion SHA-256 verified both sides; 3 consecutive completes in one page lifetime (deadlock fix); zombie-record resume; cancel→resume×4 with auto-accept + skip bitmap (74-149 chunks skipped, exact saved bytes); Re-download md5-identical; per-file viz captured mid-resume.
+- Deep-link: full-load AND hashchange paths verified repeatedly (receiver joined every resume via `location.hash = 'join=...'` without reload).
+- Light theme screenshot verified (summary card + celebration render cleanly).
+
+## Unresolved issues / risks
+- Sandbox caveats unchanged (do NOT re-debug): IDB wiped on page reloads; large-file File-persistence corruption; keep resume E2E ≤30MB; deep-link needs the gateway :81 (direct :3000 breaks signaling).
+- The receiver can still show both devices as "Sender" in DEVICES IN ROOM in some join orders (role display quirk, cosmetic, pre-existing).
+- Historical console errors from re-download attempts on pre-fix records are expected (integrity check correctly rejected them) — they clear on reload.
+- Auto-accept-resume OFF negative path still only verified by code reading, not E2E.
+
+## Recommendation for next phase
+Stable phase continues; record-integrity + completion paths are now robust. Candidates: light-theme PWA screenshots, prod-build offline e2e, role display fix in device list, "N% already had" per-file badge in the SUMMARY card (currently only mid-transfer), multi-file resume E2E (folder transfer with skip bitmap).

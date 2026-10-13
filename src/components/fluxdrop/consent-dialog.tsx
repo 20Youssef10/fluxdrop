@@ -31,6 +31,18 @@ interface ConsentDialogProps {
  */
 export function ConsentDialog({ manifest, peerAlias, peerDeviceId, onAccept, onReject }: ConsentDialogProps) {
   const [trust, setTrust] = useState(false)
+  // Keyboard: Esc rejects (never silently accepts), Enter accepts via autoFocus.
+  useEffect(() => {
+    if (!manifest) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        onReject()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [manifest, onReject])
   // Partial-progress lookup: if we already stored chunks for this transferId
   // (previous interrupted attempt), tell the user the re-send will skip ahead.
   const [partial, setPartial] = useState<{ id: string; pct: number } | null>(null)
@@ -86,9 +98,11 @@ export function ConsentDialog({ manifest, peerAlias, peerDeviceId, onAccept, onR
       >
         <Card className="flux-glass overflow-hidden">
           {/* Header */}
-          <div className="border-b border-border/50 p-5">
-            <div className="flex items-center gap-3">
-              <div className={`flex h-10 w-10 items-center justify-center rounded-lg ${alreadyTrusted ? 'bg-flux-500/15 text-flux-600 dark:text-flux-400' : 'bg-flux-500/10 text-flux-600 dark:text-flux-400'}`}>
+          <div className="relative border-b border-border/50 p-5">
+            {/* Incoming pulse — animated ring behind the shield icon */}
+            <div className="pointer-events-none absolute left-[26px] top-[30px] h-10 w-10 rounded-lg bg-flux-500/20 animate-ping [animation-duration:2s]" aria-hidden />
+            <div className="relative flex items-center gap-3">
+              <div className={`relative flex h-10 w-10 items-center justify-center rounded-lg ${alreadyTrusted ? 'bg-flux-500/15 text-flux-600 dark:text-flux-400' : 'bg-flux-500/10 text-flux-600 dark:text-flux-400'}`}>
                 {alreadyTrusted ? <BadgeCheck className="h-5 w-5" /> : <ShieldCheck className="h-5 w-5" />}
               </div>
               <div className="min-w-0">
@@ -142,7 +156,7 @@ export function ConsentDialog({ manifest, peerAlias, peerDeviceId, onAccept, onR
                 {manifest.files.map((f, i) => {
                   const cat = fileTypeCategory(f.type, f.name)
                   return (
-                    <div key={i} className="flex items-center gap-2.5 rounded-md border border-border/40 bg-card/40 p-2">
+                    <div key={i} className="flex items-center gap-2.5 rounded-md border border-border/40 bg-card/40 p-2 transition-colors hover:border-flux-500/30 hover:bg-flux-500/5">
                       <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded bg-muted text-muted-foreground">
                         <FileIcon mime={f.type} name={f.name} className="h-3.5 w-3.5" />
                       </div>

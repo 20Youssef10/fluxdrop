@@ -336,29 +336,34 @@ export function useFluxDrop() {
       },
       onTransferComplete: () => {
         // Signaling-relayed completion (fires on the peer of whoever sent it —
-        // normally the receiver, after the sender relays the verified ack).
+        // normally the sender; the receiver now also announces completion via
+        // signaling as a redundant reliable path). Idempotent: skip the
+        // fanfare when the DC ack already completed this transfer.
+        const alreadyComplete = transferRef.current.transferState === 'COMPLETE'
         transferRef.current.setTransferState('COMPLETE')
-        playSuccess()
-        void persistTransferRecord(filesRef.current.length > 0 ? 'sender' : 'receiver', 'COMPLETE', { checksumVerified: true })
-        const m = manifestRef.current
-        // Sender files were persisted for history-resume; done means done.
-        if (m && filesRef.current.length > 0) void deleteSenderFiles(m.transferId)
-        toast.success('Transfer complete!', {
-          description: m
-            ? `${m.files.length} file${m.files.length > 1 ? 's' : ''} · ${formatBytes(m.totalSize)} verified`
-            : 'All files verified',
-        })
-        // Browser notification for background tabs (respects user preference)
-        const notifEnabled = sessionRef.current.notificationsEnabled
-        if (notifEnabled && typeof document !== 'undefined' && document.hidden && 'Notification' in window && Notification.permission === 'granted') {
-          try {
-            const n = new Notification('FluxDrop — Transfer complete', {
-              body: m ? `${m.files.length} file${m.files.length > 1 ? 's' : ''} · ${formatBytes(m.totalSize)} verified` : 'All files verified',
-              icon: '/logo.svg',
-            })
-            setTimeout(() => n.close(), 8000)
-            n.onclick = () => { window.focus(); n.close() }
-          } catch { /* ignore */ }
+        if (!alreadyComplete) {
+          playSuccess()
+          void persistTransferRecord(filesRef.current.length > 0 ? 'sender' : 'receiver', 'COMPLETE', { checksumVerified: true })
+          const m = manifestRef.current
+          // Sender files were persisted for history-resume; done means done.
+          if (m && filesRef.current.length > 0) void deleteSenderFiles(m.transferId)
+          toast.success('Transfer complete!', {
+            description: m
+              ? `${m.files.length} file${m.files.length > 1 ? 's' : ''} · ${formatBytes(m.totalSize)} verified`
+              : 'All files verified',
+          })
+          // Browser notification for background tabs (respects user preference)
+          const notifEnabled = sessionRef.current.notificationsEnabled
+          if (notifEnabled && typeof document !== 'undefined' && document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+            try {
+              const n = new Notification('FluxDrop — Transfer complete', {
+                body: m ? `${m.files.length} file${m.files.length > 1 ? 's' : ''} · ${formatBytes(m.totalSize)} verified` : 'All files verified',
+                icon: '/logo.svg',
+              })
+              setTimeout(() => n.close(), 8000)
+              n.onclick = () => { window.focus(); n.close() }
+            } catch { /* ignore */ }
+          }
         }
       },
       onTransferCancel: (payload) => {
@@ -805,8 +810,16 @@ export function useFluxDrop() {
       }
       case MessageType.TRANSFER_COMPLETE_ACK: {
         if (msg.body?.verified) {
+          // IDEMPOTENCY: completion can already have arrived via the
+          // signaling TRANSFER_COMPLETE path (receiver announces it there
+          // too — the DC ack may be lost or simply arrive second). Skip the
+          // duplicate fanfare; the record persist below is a guarded no-op.
+          const alreadyComplete = transferRef.current.transferState === 'COMPLETE'
           transferRef.current.setTransferState('COMPLETE')
-          playSuccess()
+          if (!alreadyComplete) {
+            playSuccess()
+            toast.success('Transfer complete & verified!')
+          }
           // Sender FILES card: every file is now delivered on the peer.
           for (let fi = 0; fi < (manifestRef.current?.files.length ?? 0); fi++) {
             transferRef.current.markFileComplete(fi)
@@ -816,12 +829,13 @@ export function useFluxDrop() {
           // reflects the true chunk count immediately (not just after cleanup).
           void flushAllPendingAcks()
           if (manifestRef.current) void deleteSenderFiles(manifestRef.current.transferId)
-          toast.success('Transfer complete & verified!')
-          signalingRef.current?.sendTransferComplete({
-            roomId: sessionRef.current.roomId!,
-            from: sessionRef.current.deviceId,
-            to: peerDeviceIdRef.current!,
-          })
+          if (!alreadyComplete) {
+            signalingRef.current?.sendTransferComplete({
+              roomId: sessionRef.current.roomId!,
+              from: sessionRef.current.deviceId,
+              to: peerDeviceIdRef.current!,
+            })
+          }
         } else {
           // Receiver's checksum didn't match. On a resumed send this usually
           // means the source files changed since the original transfer.
@@ -970,6 +984,17 @@ export function useFluxDrop() {
               // record — without this the record under-reports progress even
               // after the transfer completes (e.g. 82/960 instead of 960/960).
               void markChunksAcked(m.transferId, acked)
+              // Sender per-file progress: skipped chunks never produce
+              // CHUNK_ACKs, so credit their bytes to the FILES card here —
+              // otherwise it stayed stuck below the skipped amount forever.
+              for (const idx of acked) {
+                const resolved = resolveChunk(slicePlanRef.current, idx, m.chunkSize)
+                if (resolved) {
+                  for (const seg of resolved.segments) {
+                    transferRef.current.addFileBytes(seg.fileIndex, seg.length)
+                  }
+                }
+              }
               toast.info(`Skipping ${acked.length} of ${m.totalChunks} chunks`, {
                 description: `${Math.round((acked.length / m.totalChunks) * 100)}% was already received by the peer.`,
               })
@@ -1123,6 +1148,12 @@ export function useFluxDrop() {
   const finishReceiverTransfer = useCallback(async () => {
     const m = manifestRef.current
     if (!m) return
+    // Idempotency: since the verification ref now self-clears when the promise
+    // settles, a LATE duplicate trigger (TRANSFER_COMPLETE arriving after the
+    // poll already finished) would re-run assembly + save. Terminal states
+    // never re-enter the pipeline; a later resume sets a fresh state first.
+    const st = transferRef.current.transferState
+    if (st === 'COMPLETE' || st === 'ERROR') return
     // Guard against double-run (last-chunk trigger racing TRANSFER_COMPLETE).
     if (verificationPromiseRef.current) {
       await verificationPromiseRef.current
@@ -1217,6 +1248,13 @@ export function useFluxDrop() {
         await saveBlobWithPicker(assembledFiles[0].blob, assembledFiles[0].name)
       }
 
+      // Persist every remaining in-memory chunk BEFORE freeing them — without
+      // this the final stretch (everything since the last lazy flush) was lost
+      // on completion, breaking Re-download from local chunks and any future
+      // resume of this transfer (observed: only the pre-cancel chunks survived).
+      flushReceiverBuffers()
+      try { await flushChainRef.current } catch { /* best-effort */ }
+
       // Free memory: clear receiver buffers after saving.
       receiverBuffersRef.current.clear()
 
@@ -1224,6 +1262,19 @@ export function useFluxDrop() {
       transferRef.current.setChecksumVerified(true)
       transferRef.current.setTransferState('COMPLETE')
       webrtcRef.current?.sendTransferCompleteAck(m.transferId, true)
+      // REDUNDANT RELIABLE PATH: also announce completion via signaling (TCP
+      // through the gateway). The DataChannel ack can be lost to a DC race at
+      // the very end of the stream — observed once in QA (sender stuck at
+      // 100% TRANSFERRING while the receiver showed COMPLETE). The sender's
+      // onTransferComplete handler finishes it from this message; when the DC
+      // ack DID arrive the handler is idempotent (state guard on the sender).
+      try {
+        signalingRef.current?.sendTransferComplete({
+          roomId: sessionRef.current.roomId!,
+          from: sessionRef.current.deviceId,
+          to: peerDeviceIdRef.current!,
+        })
+      } catch { /* DC ack is the primary path */ }
       playSuccess()
       // Record the outcome in transfer history (COMPLETE + verified).
       await persistTransferRecord('receiver', 'COMPLETE', { checksumVerified: true })
@@ -1255,8 +1306,14 @@ export function useFluxDrop() {
       return false
     }
     })()
-    verificationPromiseRef.current = verifyPromise
-    await verifyPromise
+    // Clear the ref once the promise settles. The self-completion poll and the
+    // TRANSFER_COMPLETE handler early-return while this ref is non-null — a
+    // stale RESOLVED promise here dead-locked every transfer AFTER the first
+    // one in the same page lifetime (both peers stuck at 100% TRANSFERRING).
+    verificationPromiseRef.current = verifyPromise.finally(() => {
+      verificationPromiseRef.current = null
+    })
+    await verificationPromiseRef.current
   }, [persistTransferRecord])
 
   // ---- Receiver: verify final checksum ----
@@ -1527,6 +1584,14 @@ export function useFluxDrop() {
         stallTicksRef.current = 0
         return
       }
+      // SENDER-ONLY: this hook mounts on every page (receiver included), where
+      // senderNextIndexRef stays 0 and the manifest still exists — the old
+      // idx >= totalChunks guard never fired, so receivers logged "Send loop
+      // stalled" every 30s and even beganSending(0)'d themselves.
+      if (filesRef.current.length === 0) {
+        stallTicksRef.current = 0
+        return
+      }
       const idx = senderNextIndexRef.current
       // Loop already streamed every chunk — it is waiting for the receiver's
       // TRANSFER_COMPLETE_ACK, not stalled. Force-restarting from here would
@@ -1667,8 +1732,10 @@ export function useFluxDrop() {
         } catch { /* ignore */ }
       }
       connect()
-      // Small delay to let the socket connect before emitting.
-      setTimeout(() => {
+      // Wait until the socket is ACTUALLY connected (up to 8s) before
+      // emitting — a blind 300ms delay raced cold connects and deep links.
+      await signalingRef.current?.waitUntilConnected(8000)
+      {
         const alias = sessionRef.current.alias
         const deviceId = sessionRef.current.deviceId
         if (!alias || !deviceId) {
@@ -1682,7 +1749,7 @@ export function useFluxDrop() {
           role: 'sender',
           withPin: true,
         })
-      }, 300)
+      }
     } catch (err: any) {
       toast.error('Failed to start transfer', { description: err?.message ?? 'Unknown error' })
       transferRef.current.setTransferState('FAILED')
@@ -1697,7 +1764,10 @@ export function useFluxDrop() {
       // Ensure device identity is ready before connecting.
       await ensureDeviceReady()
       connect()
-      setTimeout(() => {
+      // Wait until the socket is ACTUALLY connected (up to 8s) before
+      // emitting — a blind 300ms delay raced cold connects and deep links.
+      await signalingRef.current?.waitUntilConnected(8000)
+      {
         const alias = sessionRef.current.alias
         const deviceId = sessionRef.current.deviceId
         if (!alias || !deviceId) {
@@ -1712,7 +1782,7 @@ export function useFluxDrop() {
           deviceId,
           role: 'receiver',
         })
-      }, 300)
+      }
     } catch (err: any) {
       toast.error('Failed to join room', { description: err?.message ?? 'Unknown error' })
       transferRef.current.setTransferState('FAILED')

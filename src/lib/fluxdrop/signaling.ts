@@ -84,6 +84,39 @@ export class FluxDropSignaling {
     return !!this.socket?.connected
   }
 
+  /**
+   * Resolves once the socket is actually connected (or immediately if it
+   * already is). Falls back to resolving after `timeoutMs` so callers never
+   * hang — socket.io buffers emits sent while disconnected, so emitting
+   * after the fallback is still safe, just potentially delayed.
+   *
+   * This eliminates the createRoom/joinRoom race where a blind 300ms delay
+   * wasn't enough on a cold connect (deep links were observed to miss).
+   */
+  waitUntilConnected(timeoutMs = 8000): Promise<void> {
+    const s = this.socket
+    if (!s || s.connected) return Promise.resolve()
+    return new Promise((resolve) => {
+      let settled = false
+      const done = () => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        s.off('connect', done)
+        s.off('connect_error', fail)
+        resolve()
+      }
+      const fail = () => {
+        // A connection attempt failed — socket.io will retry (reconnection:
+        // true). Don't wait for `connect` exclusively; keep the timeout as a
+        // safety net but don't resolve early on transient errors.
+      }
+      const timer = setTimeout(done, timeoutMs)
+      s.on('connect', done)
+      s.on('connect_error', fail)
+    })
+  }
+
   get currentRoomId(): string | null {
     return this.roomId
   }

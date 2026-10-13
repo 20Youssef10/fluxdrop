@@ -67,9 +67,12 @@ export function JoinForm({ onJoin, onBack }: JoinFormProps) {
               value={roomId}
               onChange={(e) => setRoomId(e.target.value.toUpperCase())}
               placeholder="e.g. AB3K7Q"
-              className="font-mono text-lg tracking-widest uppercase h-12"
+              className="font-mono text-lg tracking-widest uppercase h-12 focus-visible:ring-flux-500/40 focus-visible:border-flux-500/50"
               maxLength={8}
               autoComplete="off"
+              autoFocus
+              inputMode="text"
+              spellCheck={false}
             />
             <p className="text-xs text-muted-foreground">
               The 6-character code shown on the sender's screen
