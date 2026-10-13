@@ -76,6 +76,13 @@ interface TransferStoreState {
   resumeAvailable: boolean
   setResumeAvailable: (v: boolean) => void
 
+  // Resume-skip stats: chunks/bytes that never travelled the wire because the
+  // receiver already stored them from a previous attempt. Shown in the
+  // progress card, the summary card, and the stats dashboard.
+  skippedChunks: number
+  skippedBytes: number
+  setSkipped: (chunks: number, bytes: number) => void
+
   // Hashing progress (pre-transfer, during buildManifest)
   hashingProgress: { current: number; total: number; fileName: string } | null
   setHashingProgress: (p: { current: number; total: number; fileName: string } | null) => void
@@ -142,6 +149,10 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
       _flushTimer: null,
     }),
 
+  // NOTE: resetProgress deliberately leaves skippedChunks/skippedBytes alone —
+  // it runs when a manifest arrives, BEFORE the RESUME_QUERY handshake reports
+  // skips. startSend zeroes them explicitly so a fresh send never inherits a
+  // previous transfer's stats; resetTransfer also clears them.
   seedProgress: (chunks, bytes) =>
     set((st) => ({
       chunksAcked: chunks,
@@ -227,6 +238,10 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
   resumeAvailable: false,
   setResumeAvailable: (v) => set({ resumeAvailable: v }),
 
+  skippedChunks: 0,
+  skippedBytes: 0,
+  setSkipped: (chunks, bytes) => set({ skippedChunks: chunks, skippedBytes: bytes }),
+
   hashingProgress: null,
   setHashingProgress: (p) => set({ hashingProgress: p }),
 
@@ -255,5 +270,7 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
       _pendingChunks: 0,
       _pendingBytes: 0,
       _flushTimer: null,
+      skippedChunks: 0,
+      skippedBytes: 0,
     }),
 }))

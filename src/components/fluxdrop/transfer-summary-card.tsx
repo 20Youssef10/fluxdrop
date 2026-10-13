@@ -1,7 +1,7 @@
 'use client'
 
 import { motion } from 'framer-motion'
-import { CheckCircle2, ShieldCheck, Clock, Database, FileStack, Gauge } from 'lucide-react'
+import { CheckCircle2, ShieldCheck, Clock, Database, FileStack, Gauge, Leaf } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -79,6 +79,25 @@ export function TransferSummaryCard({ onDone, onSendAnother }: TransferSummaryCa
             value={formatBytes(effectiveSpeed) + '/s'}
           />
         </div>
+
+        {/* Resume-skip note (only when the resume-skip bitmap saved bandwidth) */}
+        {t.skippedChunks > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mb-6 rounded-lg border border-flux-500/30 bg-flux-500/5 p-3 text-xs text-muted-foreground flex items-center justify-between gap-2"
+          >
+            <span className="flex items-center gap-1.5 min-w-0">
+              <Leaf className="h-3.5 w-3.5 text-flux-500 shrink-0" />
+              <span className="truncate">
+                Resume skip — {t.skippedChunks} chunk{t.skippedChunks !== 1 ? 's' : ''} never re-sent
+              </span>
+            </span>
+            <span className="font-mono font-semibold text-flux-600 dark:text-flux-400 shrink-0">
+              {formatBytes(t.skippedBytes)} saved
+            </span>
+          </motion.div>
+        )}
 
         {/* Peak speed note (only if we have history) */}
         {peakSpeed > 0 && (

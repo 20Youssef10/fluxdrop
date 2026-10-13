@@ -10,7 +10,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { ArrowUp, ArrowDown, CheckCircle2, AlertCircle, Clock, Hash, Database } from 'lucide-react'
+import { ArrowUp, ArrowDown, CheckCircle2, AlertCircle, Clock, Hash, Database, RotateCcw, Leaf } from 'lucide-react'
 import { FileIcon } from './file-icon'
 import type { StoredTransfer } from '@/lib/fluxdrop/resume'
 import { formatBytes, formatDuration, fileTypeCategory } from '@/lib/fluxdrop/format'
@@ -74,6 +74,27 @@ export function TransferDetailDialog({ record, open, onOpenChange }: TransferDet
               </p>
             </div>
           </div>
+
+          {/* Resume info */}
+          {(record.resumedAt || (record.resumedSavedBytes && record.resumedSavedBytes > 0)) && (
+            <div className="rounded-lg border border-flux-500/30 bg-flux-500/5 p-3 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <RotateCcw className="h-3.5 w-3.5 text-flux-500 shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-xs font-medium">Resumed transfer</p>
+                  <p className="text-[10px] text-muted-foreground">
+                    {record.resumedAt ? `Continued ${new Date(record.resumedAt).toLocaleString()}` : 'Continued from a previous attempt'}
+                  </p>
+                </div>
+              </div>
+              {!!record.resumedSavedBytes && record.resumedSavedBytes > 0 && (
+                <span className="flex items-center gap-1 text-xs font-mono font-semibold text-flux-600 dark:text-flux-400 shrink-0">
+                  <Leaf className="h-3 w-3" aria-hidden />
+                  {formatBytes(record.resumedSavedBytes)} saved
+                </span>
+              )}
+            </div>
+          )}
 
           {/* Meta grid */}
           <div className="grid grid-cols-2 gap-3">

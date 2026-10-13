@@ -15,13 +15,20 @@ export function ServiceWorkerRegister() {
 
     const register = async () => {
       try {
-        await navigator.serviceWorker.register('/sw.js', { scope: '/' })
+        const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' })
+        // Poll for a new worker on each visit so updates ship without
+        // waiting for all tabs to close (skipWaiting handles activation).
+        setInterval(() => void reg.update().catch(() => {}), 60 * 60 * 1000)
       } catch {
         // Silent fail — SW is a progressive enhancement
       }
     }
-    window.addEventListener('load', register)
-    return () => window.removeEventListener('load', register)
+    if (document.readyState === 'complete') {
+      void register()
+    } else {
+      window.addEventListener('load', register)
+      return () => window.removeEventListener('load', register)
+    }
   }, [])
 
   return null

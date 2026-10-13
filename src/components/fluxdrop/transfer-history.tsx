@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useMemo, useCallback } from 'react'
-import { History, Trash2, ArrowUp, ArrowDown, CheckCircle2, AlertCircle, RotateCcw, Info, Download, FileJson, CheckSquare, Square, Search, X } from 'lucide-react'
+import { History, Trash2, ArrowUp, ArrowDown, CheckCircle2, AlertCircle, RotateCcw, Info, Download, FileJson, CheckSquare, Square, Search, X, Leaf } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -422,6 +422,12 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
                         <span>{rec.peerAlias}</span>
                         <span>·</span>
                         <span>{formatRelative(rec.updatedAt)}</span>
+                        {!!rec.resumedSavedBytes && rec.resumedSavedBytes > 0 && (
+                          <span className="hidden sm:inline-flex items-center gap-0.5 text-flux-600 dark:text-flux-400 font-medium">
+                            <Leaf className="h-2.5 w-2.5" aria-hidden />
+                            {formatBytes(rec.resumedSavedBytes)} saved
+                          </span>
+                        )}
                       </div>
                     </button>
                     {rec.status !== 'COMPLETE' && rec.manifest.totalChunks > 0 && (

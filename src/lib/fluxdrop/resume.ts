@@ -45,16 +45,33 @@ export interface StoredTransfer {
   checksumVerified?: boolean
   /** Set when a transfer was continued from history via Resume. */
   resumedAt?: number
+  /** Bytes that never travelled the wire thanks to the resume-skip bitmap. */
+  resumedSavedBytes?: number
 }
 
 const CHUNK_PREFIX = 'chunk:'
+
+// --- Record write serialization ---
+// Transfer records are read-modify-written from multiple async paths (ack
+// flushes, status transitions, cancel). Two overlapping read-modify-writes
+// could clobber each other (e.g. a stale ack flush resurrecting TRANSFERRING
+// over a fresh CANCELLED). All record writes go through this queue so each
+// read-modify-write completes before the next begins.
+let recordWriteChain: Promise<unknown> = Promise.resolve()
+function enqueueRecordWrite<T>(fn: () => Promise<T>): Promise<T> {
+  const next = recordWriteChain.then(fn, fn)
+  recordWriteChain = next.catch(() => undefined)
+  return next as Promise<T>
+}
 
 // === Transfers ===
 export async function saveTransferRecord(rec: StoredTransfer): Promise<void> {
   const { transfersStore } = getStores()
   if (!transfersStore) return
   try {
-    await set(rec.transferId, { ...rec, updatedAt: Date.now() }, transfersStore)
+    await enqueueRecordWrite(() =>
+      set(rec.transferId, { ...rec, updatedAt: Date.now() }, transfersStore)
+    )
   } catch { /* IndexedDB unavailable — memory-only mode */ }
 }
 
@@ -63,6 +80,31 @@ export async function getTransferRecord(transferId: string): Promise<StoredTrans
   if (!transfersStore) return undefined
   try {
     return await get(transferId, transfersStore)
+  } catch { return undefined }
+}
+
+/**
+ * Atomically read-modify-write a transfer record INSIDE the write queue.
+ * The current record is read at execution time (never stale), the updater
+ * returns the fields to merge, and the result is written back — all before
+ * any other queued write runs. persistTransferRecord and friends must use
+ * this instead of read-then-saveTransferRecord, or a slow stale read can
+ * clobber newer data (e.g. rewinding acked chunks mid-transfer).
+ */
+export async function updateTransferRecord(
+  transferId: string,
+  updater: (existing: StoredTransfer | undefined) => StoredTransfer | null
+): Promise<StoredTransfer | undefined> {
+  const { transfersStore } = getStores()
+  if (!transfersStore) return undefined
+  try {
+    return await enqueueRecordWrite(async () => {
+      const existing = await getTransferRecord(transferId)
+      const next = updater(existing)
+      if (!next) return existing
+      await set(next.transferId, { ...next, updatedAt: Date.now() }, transfersStore)
+      return next
+    })
   } catch { return undefined }
 }
 
@@ -191,23 +233,70 @@ export async function markChunkAcked(transferId: string, chunkIndex: number): Pr
   }
 }
 
+/**
+ * Bulk-mark chunks as acked (resume-skip: chunks the receiver already holds
+ * count as delivered for the sender's own history record). One IDB read for
+ * cache init, then O(1) in-memory adds and a single debounced flush.
+ */
+export async function markChunksAcked(transferId: string, indices: number[]): Promise<void> {
+  if (indices.length === 0) return
+  // Initialize the cache once (same race handling as markChunkAcked).
+  let cached = ackCache.get(transferId)
+  if (!cached) {
+    const rec = await getTransferRecord(transferId)
+    cached = new Set(rec?.chunksAcked ?? [])
+    const winner = ackCache.get(transferId)
+    if (winner) {
+      cached = winner
+    } else {
+      ackCache.set(transferId, cached)
+    }
+  }
+  let added = false
+  for (const i of indices) {
+    if (!cached.has(i)) {
+      cached.add(i)
+      added = true
+    }
+  }
+  if (!added) return
+  const FLUSH_INTERVAL_MS = 2000
+  if (pendingWrites.has(transferId)) {
+    clearTimeout(pendingWrites.get(transferId)!)
+  }
+  pendingWrites.set(
+    transferId,
+    setTimeout(() => {
+      pendingWrites.delete(transferId)
+      void flushAcked(transferId, cached!)
+    }, FLUSH_INTERVAL_MS)
+  )
+}
+
 /** Flush the in-memory ack cache to IndexedDB (merging with existing acks). */
 async function flushAcked(transferId: string, acked: Set<number>): Promise<void> {
-  const rec = await getTransferRecord(transferId)
-  if (!rec) return
-  // MERGE with the stored acks — the cache only knows about chunks acked in
-  // the current session, and wiping pre-existing acks (e.g. from a previous
-  // attempt of a resumed transfer) would corrupt history progress.
-  const merged = new Set<number>([...(rec.chunksAcked ?? []), ...acked])
-  rec.chunksAcked = Array.from(merged)
-  // Sort once on flush (cheap, happens infrequently).
-  rec.chunksAcked.sort((a, b) => a - b)
-  rec.bytesTransferred = Math.min(
-    rec.chunksAcked.length * rec.manifest.chunkSize,
-    rec.manifest.totalSize
-  )
-  rec.updatedAt = Date.now()
-  await saveTransferRecord(rec)
+  // Atomic read-modify-write inside the record write queue so a concurrent
+  // status save (e.g. cancel) can't be clobbered by a stale read.
+  await enqueueRecordWrite(async () => {
+    const rec = await getTransferRecord(transferId)
+    if (!rec) return
+    // MERGE with the stored acks — the cache only knows about chunks acked in
+    // the current session, and wiping pre-existing acks (e.g. from a previous
+    // attempt of a resumed transfer) would corrupt history progress.
+    const merged = new Set<number>([...(rec.chunksAcked ?? []), ...acked])
+    rec.chunksAcked = Array.from(merged)
+    // Sort once on flush (cheap, happens infrequently).
+    rec.chunksAcked.sort((a, b) => a - b)
+    rec.bytesTransferred = Math.min(
+      rec.chunksAcked.length * rec.manifest.chunkSize,
+      rec.manifest.totalSize
+    )
+    rec.updatedAt = Date.now()
+    const { transfersStore } = getStores()
+    if (transfersStore) {
+      await set(rec.transferId, rec, transfersStore)
+    }
+  })
 }
 
 /** Flush all pending ack writes (call on transfer complete or page unload). */

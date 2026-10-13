@@ -1,7 +1,16 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { ArrowUp, ArrowDown, FileStack, Database, Zap, TrendingUp } from 'lucide-react'
+import {
+  ArrowUp,
+  ArrowDown,
+  FileStack,
+  Database,
+  Leaf,
+  ShieldCheck,
+  TrendingUp,
+  Clock,
+} from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { listTransfers, type StoredTransfer } from '@/lib/fluxdrop/resume'
 import { formatBytes } from '@/lib/fluxdrop/format'
@@ -12,8 +21,12 @@ interface Stats {
   sentCount: number
   receivedCount: number
   totalBytes: number
+  totalFiles: number
   completedCount: number
   avgSize: number
+  bandwidthSaved: number
+  resumedCount: number
+  totalTimeMs: number
 }
 
 export function StatsDashboard() {
@@ -29,14 +42,26 @@ export function StatsDashboard() {
         const sent = recs.filter((r) => r.role === 'sender')
         const received = recs.filter((r) => r.role === 'receiver')
         const totalBytes = completed.reduce((s, r) => s + r.manifest.totalSize, 0)
+        const totalFiles = completed.reduce((s, r) => s + r.manifest.files.length, 0)
         const avgSize = completed.length > 0 ? totalBytes / completed.length : 0
+        const bandwidthSaved = recs.reduce((s, r) => s + (r.resumedSavedBytes ?? 0), 0)
+        const resumedCount = recs.filter((r) => r.resumedAt).length
+        // Wall-clock time spent in transfers (start → finish, when both exist).
+        const totalTimeMs = recs.reduce(
+          (s, r) => s + (r.finishedAt ? Math.max(0, r.finishedAt - r.startedAt) : 0),
+          0
+        )
         setStats({
           totalTransfers: recs.length,
           sentCount: sent.length,
           receivedCount: received.length,
           totalBytes,
+          totalFiles,
           completedCount: completed.length,
           avgSize,
+          bandwidthSaved,
+          resumedCount,
+          totalTimeMs,
         })
       } catch {
         /* ignore */
@@ -52,20 +77,29 @@ export function StatsDashboard() {
 
   if (!stats || stats.totalTransfers === 0) return null
 
+  const successRate = stats.totalTransfers > 0
+    ? Math.round((stats.completedCount / stats.totalTransfers) * 100)
+    : 0
+
   return (
     <Card className="flux-hover-border flux-glass p-5">
-      <div className="flex items-center gap-2 mb-4">
-        <TrendingUp className="h-4 w-4 text-muted-foreground" />
-        <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-          Your transfer stats
-        </h3>
+      <div className="flex items-center justify-between gap-2 mb-4">
+        <div className="flex items-center gap-2">
+          <TrendingUp className="h-4 w-4 text-muted-foreground" />
+          <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+            Your transfer stats
+          </h3>
+        </div>
+        <span className="text-[10px] text-muted-foreground/70 tabular-nums">
+          {stats.completedCount}/{stats.totalTransfers} completed
+        </span>
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
         <StatTile
           icon={<FileStack className="h-4 w-4" />}
           label="Total transfers"
           value={<AnimatedNumber value={stats.totalTransfers} />}
-          sublabel={`${stats.completedCount} completed`}
+          sublabel={`${stats.totalFiles} files moved`}
           color="text-flux-600 dark:text-flux-400"
         />
         <StatTile
@@ -89,9 +123,36 @@ export function StatsDashboard() {
           sublabel={`avg ${formatBytes(stats.avgSize)}/transfer`}
           color="text-flux-600 dark:text-flux-400"
         />
+        <StatTile
+          icon={<Leaf className="h-4 w-4" />}
+          label="Bandwidth saved"
+          value={formatBytes(stats.bandwidthSaved)}
+          sublabel={stats.resumedCount > 0 ? `${stats.resumedCount} resume${stats.resumedCount !== 1 ? 's' : ''} skipped` : 'by resume skips'}
+          color="text-flux-600 dark:text-flux-400"
+          highlight={stats.bandwidthSaved > 0}
+        />
+        <StatTile
+          icon={<ShieldCheck className="h-4 w-4" />}
+          label="Success rate"
+          value={`${successRate}%`}
+          sublabel={stats.totalTimeMs > 0 ? `${formatSpentTime(stats.totalTimeMs)} in transfers` : 'of all transfers'}
+          color={successRate >= 80 ? 'text-flux-600 dark:text-flux-400' : 'text-amber-600 dark:text-amber-400'}
+        />
       </div>
     </Card>
   )
+}
+
+/** Compact human formatting for long cumulative durations. */
+function formatSpentTime(ms: number): string {
+  const minutes = Math.floor(ms / 60_000)
+  if (minutes < 1) return '<1 min'
+  if (minutes < 60) return `${minutes} min`
+  const hours = Math.floor(minutes / 60)
+  const rem = minutes % 60
+  if (hours < 24) return rem > 0 ? `${hours}h ${rem}m` : `${hours}h`
+  const days = Math.floor(hours / 24)
+  return `${days}d ${hours % 24}h`
 }
 
 function StatTile({
@@ -100,21 +161,35 @@ function StatTile({
   value,
   sublabel,
   color,
+  highlight,
 }: {
   icon: React.ReactNode
   label: string
   value: React.ReactNode
   sublabel: string
   color: string
+  highlight?: boolean
 }) {
   return (
-    <div className="rounded-lg border border-border/50 bg-card/40 p-3.5">
+    <div
+      className={`rounded-lg border p-3.5 transition-colors ${
+        highlight
+          ? 'border-flux-500/30 bg-flux-500/5 hover:bg-flux-500/10'
+          : 'border-border/50 bg-card/40 hover:bg-card/70'
+      }`}
+    >
       <div className={`flex items-center gap-1.5 ${color}`}>
         {icon}
         <span className="text-[10px] uppercase tracking-wider font-medium">{label}</span>
+        {highlight && (
+          <span className="ml-auto h-1.5 w-1.5 rounded-full bg-flux-500 animate-pulse" aria-hidden />
+        )}
       </div>
       <p className="mt-1.5 text-xl font-bold tabular-nums">{value}</p>
-      <p className="text-[10px] text-muted-foreground mt-0.5">{sublabel}</p>
+      <p className="text-[10px] text-muted-foreground mt-0.5 flex items-center gap-1">
+        {label === 'Success rate' && <Clock className="h-2.5 w-2.5 opacity-60" aria-hidden />}
+        {sublabel}
+      </p>
     </div>
   )
 }

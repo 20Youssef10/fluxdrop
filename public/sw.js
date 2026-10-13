@@ -1,9 +1,10 @@
 // FluxDrop Service Worker — caches the app shell for offline use.
 // File data is NEVER cached (P2P only). Only static assets and the landing page.
 
-const CACHE_NAME = 'fluxdrop-v1'
+const CACHE_NAME = 'fluxdrop-v2'
 const APP_SHELL = [
   '/',
+  '/offline.html',
   '/logo.svg',
   '/manifest.json',
 ]
@@ -33,7 +34,8 @@ self.addEventListener('fetch', (event) => {
   if (url.protocol === 'ws:' || url.protocol === 'wss:') return
   if (url.pathname.startsWith('/_next/webpack-hmr')) return
 
-  // Network-first for navigation, cache-first for static assets
+  // Network-first for navigation, cache-first for static assets.
+  // If the network AND the cache both miss, show the branded offline page.
   if (req.mode === 'navigate') {
     event.respondWith(
       fetch(req)
@@ -42,7 +44,12 @@ self.addEventListener('fetch', (event) => {
           caches.open(CACHE_NAME).then((cache) => cache.put(req, copy)).catch(() => {})
           return res
         })
-        .catch(() => caches.match(req).then((cached) => cached || caches.match('/')))
+        .catch(async () =>
+          (await caches.match(req)) ||
+          (await caches.match('/')) ||
+          (await caches.match('/offline.html')) ||
+          new Response('Offline', { status: 503, headers: { 'Content-Type': 'text/plain' } })
+        )
     )
     return
   }

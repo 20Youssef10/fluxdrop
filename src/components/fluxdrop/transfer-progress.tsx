@@ -1,7 +1,7 @@
 'use client'
 
 import { motion, AnimatePresence } from 'framer-motion'
-import { Gauge, Timer, Hash, CheckCircle2, AlertTriangle, Loader2, ShieldCheck, TrendingUp, Pause, Play } from 'lucide-react'
+import { Gauge, Timer, Hash, CheckCircle2, AlertTriangle, Loader2, ShieldCheck, TrendingUp, Pause, Play, RotateCcw } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
@@ -81,6 +81,15 @@ export function TransferProgress({ onCancel, onDone, onPause, onResume }: Transf
                 <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400">
                   <Pause className="mr-1 h-3 w-3" />
                   Paused
+                </Badge>
+              )}
+              {t.skippedChunks > 0 && !isComplete && (
+                <Badge
+                  variant="outline"
+                  className="border-flux-500/40 bg-flux-500/10 text-flux-600 dark:text-flux-400"
+                >
+                  <RotateCcw className="mr-1 h-3 w-3" />
+                  Resumed · {formatBytes(t.skippedBytes)} saved
                 </Badge>
               )}
             </div>

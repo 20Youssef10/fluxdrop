@@ -1285,3 +1285,37 @@ send → receiver accepts → sender cancels at 40% → both records CANCELLED �
 
 ## Recommendation for next phase
 Stable phase — prioritize UI polish + small features; avoid large-file resume tests in the sandbox (File-persistence corruption) — use ≤20MB files.
+---
+Task ID: cron-review-r6
+Agent: Z.ai Code (cron webDevReview round 6)
+Task: Assess status, QA via agent-browser, then resume-skip UX parity + stats enhancements + SW offline page + record-integrity fixes.
+
+## Current project status
+Stable and feature-rich. Round-6 QA found NO runtime breakage: full E2E transfer (15MB, two isolated browser sessions through the gateway :81) completed with SHA-256 verified on both sides, zero console errors. Deep-dive QA of the resume/cancel flows surfaced 5 data-integrity bugs (all fixed + verified). Lint + tsc clean throughout.
+
+## Completed this round (all browser-verified)
+1. **Receiver-side skip toast (parity)**: RESUME_QUERY handler now toasts "Continuing transfer — N% already received · X of Y chunks will be skipped" and records skippedChunks/skippedBytes in the transfer store (new fields + setSkipped). Sender side already had its toast.
+2. **Bandwidth-saved surfaces everywhere**: transfer store tracks skippedChunks/skippedBytes; progress card shows a "Resumed · X MB saved" badge while transferring; summary card shows a leaf-icon "Resume skip — N chunks never re-sent · X saved" note; history rows show "X saved"; detail dialog shows a Resumed panel with saved bytes; persisted as `resumedSavedBytes` on StoredTransfer.
+3. **Stats dashboard enhanced (6 tiles)**: added "Bandwidth saved" (sum of resumedSavedBytes, highlighted with pulse dot when > 0) and "Success rate" (% of completed + cumulative time-in-transfers), plus "N files moved" sublabel; grid 2/3-col responsive.
+4. **SW offline page (PWA)**: new branded public/offline.html (dark, teal bolt, Reconnect button, auto-reload on `online`); sw.js bumped to fluxdrop-v2, offline.html in app shell, navigation fallback chain req-cache → '/' → offline.html → 503; sw-register registers immediately when document already loaded + hourly reg.update() poll. Verified: registration, cache contents (4 assets), offline.html renders.
+5. **[BUG] Sender acks never persisted**: CHUNK_ACK handler only updated the in-memory store — sender's history record stuck at 0% after cancel. Fixed: markChunkAcked in CHUNK_ACK handler.
+6. **[BUG] Skipped chunks not counted as delivered**: after resume, sender record showed 82/960 despite completion. Fixed: new markChunksAcked() bulk helper called in RESUME_RESPONSE handler (skipped chunks count as delivered).
+7. **[BUG] Sender record created only at terminal states**: interim ack flushes found no record and were dropped. Fixed: persistTransferRecord('sender','TRANSFERRING') at beginSending start; flushAllPendingAcks right after TRANSFER_COMPLETE_ACK COMPLETE persist.
+8. **[BUG] Assembly hole on chunk reordering**: parallel channels can deliver the LAST index before earlier in-flight chunks; the old `lastChunkSeenRef` gate skipped the completeness poll → assembly with a hole → "checksum mismatch, assembled 31391744B vs 31457280B" (observed in QA when cancel raced completion). Fixed: completeness poll ALWAYS runs inside the verify promise (waits up to 15s for in-flight chunks), old gate removed (dead lastChunkSeenRef deleted), mismatch diagnostics now log the exact missing chunk indices.
+9. **[BUG] Record write races**: stale read-modify-writes clobbered newer data (observed: record status regressed CANCELLED→TRANSFERRING; acks rewound 434→186). Fixed: module-level FIFO write queue in resume.ts (enqueueRecordWrite); saveTransferRecord + flushAcked go through it; new updateTransferRecord(transferId, updater) performs atomic read-modify-write INSIDE the queue; persistTransferRecord + doAcceptTransfer + startSend resume-marking all use it. doAcceptTransfer now also preserves resumedAt/resumedSavedBytes (was wiping them on re-accept). Cancel path serialized: persist CANCELLED → flush acks → flush chunks.
+10. **Receiver resumedAt parity**: RESUME_QUERY handler marks the receiver's record resumedAt (was sender-only) — stats "N resumes skipped" now correct on both sides.
+
+## E2E verification (30MB file, cancel → resume → complete)
+- Fresh send → cancel at 73% (350/480) → sender record: status=CANCELLED, acks=350 ✓ (was 0 before fixes)
+- Resume from history → room created instantly (manifest reuse) → consent "You already have 73%" → accept → receiver toast + sender toast → skip bitmap usable=350 → transfer completed → **BOTH records: COMPLETE, acks=480/480, resumed=true, saved=350×64KB exact, checksumVerified=true** ✓
+- Second resume cycle re-verified: usable=434, saved=28,442,624 bytes exact on both sides ✓
+- Stats dashboard showed "Bandwidth saved 80.6 MB · 3 resumes skipped", "Success rate 80% · 8 min in transfers" ✓
+
+## Unresolved issues / risks
+- Cosmetic: live bytesTransferred counter can transiently overshoot total when duplicate CHUNK_ACKs arrive (send-retry double-sends); records cap correctly, UI % capped at 100. Not fixed (display-only).
+- Cosmetic: landing page header badge shows "Connecting"/"Disconnected from signaling server" by design (lazy connect on send/receive).
+- Sandbox caveats (do NOT re-debug): IDB wiped on session reloads; large-file (300MB+) File-persistence corruption in sandbox browser; keep resume E2E tests ≤ 20-30MB and within a single page lifetime.
+- SW offline fallback only registers in production builds (dev HMR conflict) — verified via manual registration in an isolated session; unregistered + caches cleared afterwards.
+
+## Recommendation for next phase
+Stable phase — record-integrity layer is now bulletproof. Next-round candidates: live byte-overshoot display fix (dedupe CHUNK_ACK byte accounting), 'skipped' segment rendering in the chunk map (visualize skipped vs streamed chunks), bandwidth-saved eco badge on the landing hero, PWA offline e2e in a prod build.
