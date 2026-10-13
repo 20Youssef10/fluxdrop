@@ -1,14 +1,15 @@
 'use client'
 
-import { useEffect, useState, useMemo, useCallback } from 'react'
-import { History, Trash2, ArrowUp, ArrowDown, CheckCircle2, AlertCircle, RotateCcw, Info, Download, FileJson, CheckSquare, Square, Search, X, Leaf } from 'lucide-react'
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
+import { History, Trash2, ArrowUp, ArrowDown, CheckCircle2, AlertCircle, RotateCcw, Info, Download, Upload, FileJson, CheckSquare, Square, Search, X, Leaf } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { listTransfers, deleteTransferRecord, type StoredTransfer } from '@/lib/fluxdrop/resume'
+import { listTransfers, deleteTransferRecord, saveTransferRecord, type StoredTransfer } from '@/lib/fluxdrop/resume'
 import { formatBytes } from '@/lib/fluxdrop/format'
+import { CONSTANTS, type TransferState, type DeviceRole } from '@/lib/fluxdrop/protocol'
 import { toast } from 'sonner'
 import { TransferDetailDialog } from './transfer-detail-dialog'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -27,6 +28,8 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
   const [selectMode, setSelectMode] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [searchQuery, setSearchQuery] = useState('')
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [importing, setImporting] = useState(false)
 
   const loadRefresh = useCallback(async () => {
     try {
@@ -146,18 +149,30 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
       toast.info('No transfers to export')
       return
     }
-    const exportData = records.map((r) => ({
-      transferId: r.transferId,
-      role: r.role,
-      status: r.status,
-      peerAlias: r.peerAlias,
-      startedAt: new Date(r.startedAt).toISOString(),
-      finishedAt: r.finishedAt ? new Date(r.finishedAt).toISOString() : null,
-      totalSize: r.manifest.totalSize,
-      fileCount: r.manifest.files.length,
-      files: r.manifest.files.map((f) => ({ name: f.name, size: f.size, type: f.type })),
-      checksumVerified: r.checksumVerified,
-    }))
+    const exportData = {
+      app: 'fluxdrop',
+      schema: 2,
+      exportedAt: new Date().toISOString(),
+      records: records.map((r) => ({
+        transferId: r.transferId,
+        role: r.role,
+        status: r.status,
+        peerAlias: r.peerAlias,
+        startedAt: new Date(r.startedAt).toISOString(),
+        updatedAt: new Date(r.updatedAt).toISOString(),
+        finishedAt: r.finishedAt ? new Date(r.finishedAt).toISOString() : null,
+        totalSize: r.manifest.totalSize,
+        totalChunks: r.manifest.totalChunks,
+        chunkSize: r.manifest.chunkSize,
+        fileCount: r.manifest.files.length,
+        files: r.manifest.files.map((f) => ({ name: f.name, size: f.size, type: f.type })),
+        chunksAckedCount: r.chunksAcked.length,
+        bytesTransferred: r.bytesTransferred,
+        checksumVerified: r.checksumVerified ?? null,
+        resumedAt: r.resumedAt ? new Date(r.resumedAt).toISOString() : null,
+        resumedSavedBytes: r.resumedSavedBytes ?? null,
+      })),
+    }
     const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -168,6 +183,61 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
     document.body.removeChild(a)
     URL.revokeObjectURL(url)
     toast.success('History exported', { description: `${records.length} records as JSON` })
+  }
+
+  /**
+   * Import history records from a previously exported JSON file. Merges by
+   * transferId (existing records always win) — imported entries are metadata
+   * only (no chunks/files), so they are never resumable.
+   */
+  const importHistory = async (file: File) => {
+    if (importing) return
+    setImporting(true)
+    try {
+      const text = await file.text()
+      const parsed = JSON.parse(text) as unknown
+      // Accept both the schema-2 wrapper and a bare array (schema 1 exports).
+      const rawRecords: unknown[] = Array.isArray(parsed)
+        ? parsed
+        : parsed && typeof parsed === 'object' && Array.isArray((parsed as { records?: unknown[] }).records)
+          ? (parsed as { records: unknown[] }).records
+          : []
+      if (rawRecords.length === 0) {
+        toast.error('Nothing to import', { description: 'No transfer records found in that file.' })
+        return
+      }
+      if (rawRecords.length > 500) {
+        toast.error('File too large', { description: 'Maximum 500 records per import.' })
+        return
+      }
+      const existing = new Set((await listTransfers()).map((r) => r.transferId))
+      let imported = 0
+      let duplicates = 0
+      let invalid = 0
+      for (const raw of rawRecords) {
+        const rec = normalizeImportedRecord(raw)
+        if (!rec) { invalid++; continue }
+        if (existing.has(rec.transferId)) { duplicates++; continue }
+        await saveTransferRecord(rec)
+        existing.add(rec.transferId)
+        imported++
+      }
+      const parts = [`${imported} imported`]
+      if (duplicates > 0) parts.push(`${duplicates} duplicate${duplicates !== 1 ? 's' : ''} skipped`)
+      if (invalid > 0) parts.push(`${invalid} invalid skipped`)
+      if (imported > 0) {
+        toast.success('History imported', { description: parts.join(' · ') })
+      } else {
+        toast.info('Nothing new to import', { description: parts.join(' · ') })
+      }
+      loadRefresh()
+    } catch {
+      toast.error('Import failed', { description: 'That file is not a valid FluxDrop history export.' })
+    } finally {
+      setImporting(false)
+      // Reset the input so re-importing the same file works.
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
   }
 
   if (records.length === 0) {
@@ -192,8 +262,32 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
               Your transfer history will appear here, stored locally in your browser via IndexedDB.
               Start by sending or receiving a file.
             </p>
+            {/* Import from a previous export — right in the empty state. */}
+            <div className="mt-4">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={importing}
+              >
+                <Upload className="mr-1.5 h-3 w-3" />
+                {importing ? 'Importing…' : 'Import history'}
+              </Button>
+            </div>
           </div>
         </div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="application/json,.json"
+          className="hidden"
+          aria-label="Import history from JSON"
+          onChange={(e) => {
+            const f = e.target.files?.[0]
+            if (f) void importHistory(f)
+          }}
+        />
       </Card>
     )
   }
@@ -221,6 +315,17 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
             </Badge>
           </div>
           <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={importing}
+              className="h-7 text-xs text-muted-foreground hover:text-foreground"
+              title="Import from a FluxDrop history export"
+            >
+              <Upload className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline ml-1">{importing ? 'Importing…' : 'Import'}</span>
+            </Button>
             <Button
               variant="ghost"
               size="sm"
@@ -346,7 +451,7 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
                 </p>
               </div>
             ) : (
-              filteredRecords.map((rec) => {
+              filteredRecords.map((rec, index) => {
                 // Incomplete transfers AND cancelled sends are resumable —
                 // the sender's files stay persisted until the transfer completes.
                 const isResumable =
@@ -357,7 +462,7 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
                 return (
                   <div
                     key={rec.transferId}
-                    className={`group flex items-center gap-3 rounded-lg border p-3 transition-all ${
+                    className={`group flux-slide-up flex items-center gap-3 rounded-lg border p-3 transition-all ${
                       selectMode && isSelected
                         ? 'border-flux-500/40 bg-flux-500/5'
                         : 'border-border/50 bg-card/60 hover:border-flux-500/30'
@@ -393,7 +498,7 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
                       className="min-w-0 flex-1 text-left cursor-pointer"
                     >
                       <div className="flex items-center gap-2">
-                        <p className="truncate text-sm font-medium">
+                        <p className="truncate text-sm font-medium" title={rec.manifest.files.map((f) => f.name).join(' · ')}>
                           {rec.manifest.files.length === 1
                             ? rec.manifest.files[0].name
                             : `${rec.manifest.files.length} files`}
@@ -506,6 +611,19 @@ export function TransferHistory({ onResume }: TransferHistoryProps) {
         open={detailOpen}
         onOpenChange={setDetailOpen}
       />
+
+      {/* Shared import input (main view) */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="application/json,.json"
+        className="hidden"
+        aria-label="Import history from JSON"
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) void importHistory(f)
+        }}
+      />
     </>
   )
 }
@@ -520,4 +638,81 @@ function formatRelative(ts: number): string {
   if (hr < 24) return `${hr}h ago`
   const day = Math.floor(hr / 24)
   return `${day}d ago`
+}
+
+interface ExportedRecordV2 {
+  transferId?: unknown
+  role?: unknown
+  status?: unknown
+  peerAlias?: unknown
+  startedAt?: unknown
+  updatedAt?: unknown
+  finishedAt?: unknown
+  chunkSize?: unknown
+  files?: unknown
+  bytesTransferred?: unknown
+  checksumVerified?: unknown
+  resumedAt?: unknown
+  resumedSavedBytes?: unknown
+}
+
+/**
+ * Validate + convert one exported record into a StoredTransfer. Returns null
+ * for entries that are structurally invalid. The reconstructed manifest is
+ * metadata-only (no checksums/paths), so imported records are never resumable —
+ * totalChunks is set to 0 which disables progress bars and resume actions.
+ */
+function normalizeImportedRecord(raw: unknown): StoredTransfer | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as ExportedRecordV2
+  if (typeof r.transferId !== 'string' || r.transferId.length === 0 || r.transferId.length > 128) return null
+  const role = r.role === 'sender' || r.role === 'receiver' ? (r.role as DeviceRole) : null
+  if (role !== 'sender' && role !== 'receiver') return null
+  const VALID_STATES: readonly string[] = ['MANIFEST_EXCHANGE', 'TRANSFERRING', 'VERIFYING', 'COMPLETE', 'CANCELLED', 'FAILED', 'ERROR', 'PAUSED']
+  const status = typeof r.status === 'string' && VALID_STATES.includes(r.status) ? (r.status as TransferState) : null
+  if (!status) return null
+  if (!Array.isArray(r.files) || r.files.length === 0 || r.files.length > 200) return null
+  const files = r.files
+    .filter((f): f is { name: string; size: number; type: string } =>
+      !!f && typeof f === 'object' && typeof (f as { name?: unknown }).name === 'string' && typeof (f as { size?: unknown }).size === 'number' && (f as { size: number }).size >= 0)
+    .map((f) => ({
+      name: f.name.slice(0, 512),
+      size: f.size,
+      type: typeof f.type === 'string' ? f.type.slice(0, 128) : '',
+      lastModified: 0,
+      checksum: '',
+      relativePath: f.name.slice(0, 512),
+    }))
+  if (files.length === 0) return null
+  const totalSize = files.reduce((s, f) => s + f.size, 0)
+  const startedAt = typeof r.startedAt === 'string' && !Number.isNaN(Date.parse(r.startedAt)) ? Date.parse(r.startedAt) : Date.now()
+  const updatedAt = typeof r.updatedAt === 'string' && !Number.isNaN(Date.parse(r.updatedAt)) ? Date.parse(r.updatedAt) : startedAt
+  const finishedAt = typeof r.finishedAt === 'string' && !Number.isNaN(Date.parse(r.finishedAt)) ? Date.parse(r.finishedAt) : undefined
+  const resumedAt = typeof r.resumedAt === 'string' && !Number.isNaN(Date.parse(r.resumedAt)) ? Date.parse(r.resumedAt) : undefined
+  const resumedSavedBytes = typeof r.resumedSavedBytes === 'number' && r.resumedSavedBytes > 0 ? r.resumedSavedBytes : undefined
+  return {
+    transferId: r.transferId,
+    role,
+    manifest: {
+      transferId: r.transferId,
+      version: 1,
+      files,
+      totalSize,
+      totalChunks: 0,
+      chunkSize: typeof r.chunkSize === 'number' && r.chunkSize > 0 ? r.chunkSize : CONSTANTS.CHUNK_SIZE,
+      createdAt: startedAt,
+      expiresAt: startedAt + 24 * 60 * 60 * 1000,
+    },
+    status,
+    chunksAcked: [],
+    bytesTransferred: typeof r.bytesTransferred === 'number' && r.bytesTransferred >= 0 ? Math.min(r.bytesTransferred, totalSize) : status === 'COMPLETE' ? totalSize : 0,
+    peerAlias: typeof r.peerAlias === 'string' && r.peerAlias.trim() ? r.peerAlias.slice(0, 64) : 'peer',
+    peerDeviceId: '',
+    startedAt,
+    updatedAt,
+    finishedAt,
+    checksumVerified: r.checksumVerified === true ? true : undefined,
+    resumedAt,
+    resumedSavedBytes,
+  }
 }

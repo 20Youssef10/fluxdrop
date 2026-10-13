@@ -44,6 +44,12 @@ interface SessionState {
   autoAcceptTrusted: boolean
   setAutoAcceptTrusted: (v: boolean) => void
 
+  // Auto-accept RE-SENDS of transfers we already started receiving from the
+  // SAME device (resume flow — skips the consent dialog on the receiver).
+  // Safety anchors: known transferId + matching peerDeviceId + partial progress.
+  autoAcceptResume: boolean
+  setAutoAcceptResume: (v: boolean) => void
+
   // View / mode
   view: SessionView
   setView: (view: SessionView) => void
@@ -189,6 +195,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (notifRaw !== null) set({ notificationsEnabled: notifRaw === 'true' })
       const autoRaw = localStorage.getItem('fluxdrop:auto-accept-trusted')
       if (autoRaw !== null) set({ autoAcceptTrusted: autoRaw === 'true' })
+      const autoResumeRaw = localStorage.getItem('fluxdrop:auto-accept-resume')
+      if (autoResumeRaw !== null) set({ autoAcceptResume: autoResumeRaw === 'true' })
     } catch { /* ignore */ }
   },
 
@@ -300,6 +308,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     if (typeof window !== 'undefined') {
       try {
         localStorage.setItem('fluxdrop:auto-accept-trusted', v ? 'true' : 'false')
+      } catch { /* ignore */ }
+    }
+  },
+
+  // Default ON: a resume re-send is scoped to a transferId we already
+  // accepted from this exact peer — no new content can sneak in.
+  autoAcceptResume: true,
+  setAutoAcceptResume: (v) => {
+    set({ autoAcceptResume: v })
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('fluxdrop:auto-accept-resume', v ? 'true' : 'false')
       } catch { /* ignore */ }
     }
   },

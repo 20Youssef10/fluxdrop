@@ -73,6 +73,8 @@ export function useFluxDrop() {
   // Watchdog bookkeeping: last chunk index seen + consecutive stalled ticks.
   const stallLastIdxRef = useRef<number>(-1)
   const stallTicksRef = useRef<number>(0)
+  // Receiver self-completion poll: consecutive ticks with all chunks acked.
+  const receiverCompleteTicksRef = useRef<number>(0)
   // Resumed-send state: set when startSend reuses a stored manifest so the
   // MANIFEST_ACK path knows to query the receiver before streaming.
   const resumeSkipPendingRef = useRef<boolean>(false)
@@ -125,22 +127,32 @@ export function useFluxDrop() {
     if (!m) return
     try {
       const finished = status === 'COMPLETE' || status === 'ERROR' || status === 'CANCELLED' || status === 'FAILED'
-      await updateTransferRecord(m.transferId, (existing) => ({
-        transferId: m.transferId,
-        role,
-        manifest: m,
-        status,
-        chunksAcked: existing?.chunksAcked ?? [],
-        bytesTransferred: transferRef.current.bytesTransferred || existing?.bytesTransferred || 0,
-        peerAlias: existing?.peerAlias ?? sessionRef.current.peers[0]?.alias ?? 'peer',
-        peerDeviceId: existing?.peerDeviceId ?? peerDeviceIdRef.current ?? existing?.peerDeviceId ?? '',
-        startedAt: existing?.startedAt ?? transferRef.current.startedAt ?? Date.now(),
-        updatedAt: Date.now(),
-        finishedAt: finished ? Date.now() : existing?.finishedAt,
-        checksumVerified: extra?.checksumVerified ?? existing?.checksumVerified,
-        resumedAt: existing?.resumedAt,
-        resumedSavedBytes: transferRef.current.skippedBytes || existing?.resumedSavedBytes,
-      }))
+      await updateTransferRecord(m.transferId, (existing) => {
+        // TERMINAL-STATE GUARD: never downgrade a verified-complete record.
+        // A cleanup path firing after completion (Leave room, peer-left
+        // handler, page unload) used to overwrite COMPLETE with CANCELLED —
+        // corrupting history (observed: record with 320/320 acks marked
+        // CANCELLED). Once verified COMPLETE, the record is immutable.
+        if (existing?.status === 'COMPLETE' && status !== 'COMPLETE') {
+          return null // abort this write — keep the COMPLETE record intact
+        }
+        return {
+          transferId: m.transferId,
+          role,
+          manifest: m,
+          status,
+          chunksAcked: existing?.chunksAcked ?? [],
+          bytesTransferred: transferRef.current.bytesTransferred || existing?.bytesTransferred || 0,
+          peerAlias: existing?.peerAlias ?? sessionRef.current.peers[0]?.alias ?? 'peer',
+          peerDeviceId: existing?.peerDeviceId ?? peerDeviceIdRef.current ?? existing?.peerDeviceId ?? '',
+          startedAt: existing?.startedAt ?? transferRef.current.startedAt ?? Date.now(),
+          updatedAt: Date.now(),
+          finishedAt: finished ? Date.now() : existing?.finishedAt,
+          checksumVerified: extra?.checksumVerified ?? existing?.checksumVerified,
+          resumedAt: existing?.resumedAt,
+          resumedSavedBytes: transferRef.current.skippedBytes || existing?.resumedSavedBytes,
+        }
+      })
     } catch { /* best-effort — history must never break transfers */ }
   }, [])
   const clearPaused = () => { pauseLocalRef.current = false; pausePeerRef.current = false }
@@ -1040,6 +1052,31 @@ export function useFluxDrop() {
       })
       return
     }
+    // Resume auto-accept: a re-send of a transfer we ALREADY started receiving
+    // from this exact device. Safety anchors — known transferId (we accepted it
+    // before), partial progress recorded, AND the peer deviceId matches the
+    // original receiver record. No new content can sneak in under those
+    // constraints, so the consent dialog is skipped (setting defaults on).
+    if (sessionRef.current.autoAcceptResume && peerId) {
+      try {
+        const existing = await getTransferRecord(m.transferId)
+        const acked = existing?.chunksAcked?.length ?? 0
+        const isResumeCandidate =
+          existing?.role === 'receiver' &&
+          existing.peerDeviceId === peerId &&
+          existing.status !== 'COMPLETE' &&
+          acked > 0 &&
+          acked < m.totalChunks
+        if (isResumeCandidate && existing) {
+          await doAcceptTransfer(m)
+          const pct = Math.min(99, Math.round((acked / m.totalChunks) * 100))
+          toast.success(`Resuming automatically — you already have ${pct}%`, {
+            description: `Continuing from ${existing.peerAlias || 'the same device'}. Only the missing ${m.totalChunks - acked} chunks will be sent.`,
+          })
+          return
+        }
+      } catch { /* fall through to manual consent */ }
+    }
     // Set pending manifest so the ConsentDialog shows in the UI.
     // The user must explicitly accept before transfer begins.
     sessionRef.current.setPendingManifest(m)
@@ -1241,6 +1278,42 @@ export function useFluxDrop() {
       return
     }
     await verificationPromiseRef.current
+  }, [finishReceiverTransfer])
+
+  // ---- Receiver: self-completion poll ----
+  // The old completion triggers were fragile on resumed sends: the literal
+  // last-chunk arrival never fires when the final chunk was SKIPPED (already
+  // stored), and a TRANSFER_COMPLETE frame can be lost across a WebRTC
+  // reconnect — leaving both peers stuck at 100%/TRANSFERRING forever.
+  // This poll makes the receiver the authority on completion: once ITS ack
+  // count reaches totalChunks and the state is still TRANSFERRING, run the
+  // finish pipeline (its internal completeness poll absorbs in-flight
+  // stragglers). Receiver-only: the sender has filesRef set and waits for
+  // TRANSFER_COMPLETE_ACK instead.
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (verificationPromiseRef.current) return
+      if (filesRef.current.length > 0) return // sender — different completion path
+      const m = manifestRef.current
+      if (!m) return
+      const st = transferRef.current.transferState
+      if (st !== 'TRANSFERRING' && st !== 'MANIFEST_EXCHANGE') {
+        receiverCompleteTicksRef.current = 0
+        return
+      }
+      if (transferRef.current.chunksAcked >= m.totalChunks) {
+        receiverCompleteTicksRef.current++
+        // Two consecutive ticks (~2s) — let late in-flight chunks land first.
+        if (receiverCompleteTicksRef.current >= 2) {
+          receiverCompleteTicksRef.current = 0
+          console.log(`[FluxDrop] Receiver completion poll: all ${m.totalChunks} chunks acked — finishing transfer`)
+          void finishReceiverTransfer()
+        }
+      } else {
+        receiverCompleteTicksRef.current = 0
+      }
+    }, 1000)
+    return () => clearInterval(id)
   }, [finishReceiverTransfer])
 
   // ---- Sender: begin streaming chunks ----
@@ -1455,6 +1528,13 @@ export function useFluxDrop() {
         return
       }
       const idx = senderNextIndexRef.current
+      // Loop already streamed every chunk — it is waiting for the receiver's
+      // TRANSFER_COMPLETE_ACK, not stalled. Force-restarting from here would
+      // re-run the finished loop and spam TRANSFER_COMPLETE forever.
+      if (idx >= (transferRef.current.manifest?.totalChunks ?? Infinity)) {
+        stallTicksRef.current = 0
+        return
+      }
       if (idx === stallLastIdxRef.current) {
         stallTicksRef.current++
         if (stallTicksRef.current >= 6) {

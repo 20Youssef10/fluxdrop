@@ -1352,3 +1352,40 @@ Stable and feature-complete through round 6. Round-7 QA found NO breakage: four 
 
 ## Recommendation for next phase
 Stable phase continues. Next-round candidates: receiver-side "auto-accept resumed transfers from trusted senders" (skip consent when transferId is known and peer trusted), service-worker offline page e2e in a production build, storage-quota guard before persisting sender files (navigator.storage.estimate), export/import of transfer history (Export button already stubbed in history header), light-theme screenshot pass for PWA manifest (screenshots currently dark-only).
+
+---
+Task ID: cron-review-r8
+Agent: Z.ai Code (cron webDevReview round 8)
+Task: Assess status, QA via agent-browser, fix discovered bugs, ship next-round features (auto-accept resume, history import, stats tiles), styling polish.
+
+## Current project status
+Stable through round 7. This round's QA found ONE environment gotcha and TWO REAL BUGS (both fixed + E2E-verified):
+
+1. **[ENV] QA must use the gateway port**: agent-browser must open `http://localhost:81/` (Caddy), NOT `:3000` — direct :3000 bypasses XTransformPort forwarding, so `io("/?XTransformPort=3003")` hits Next.js and signaling never connects (header stuck "Connecting", room creation dead). Do NOT re-debug "Connecting" without first checking the URL port.
+2. **[BUG FIX] COMPLETE records were downgraded to CANCELLED**: any post-completion cleanup path (Leave room, peer-left, disconnect) called persistTransferRecord('CANCELLED') and clobbered a verified COMPLETE record (observed: record with 320/320 acks + checksumVerified marked CANCELLED). Fix: terminal-state guard inside persistTransferRecord's updater — if existing.status === 'COMPLETE' && status !== 'COMPLETE', the write is aborted (returns null → no write). COMPLETE records are now immutable.
+3. **[BUG FIX] Resumed transfers could hang at 100% forever (both peers stuck TRANSFERRING)**: the receiver's finish triggers were the literal last-chunk arrival (never fires when the final chunk was SKIPPED in a resume) and the sender's TRANSFER_COMPLETE frame (lost across WebRTC reconnects; the sender's 30s watchdog then force-restarted the finished loop forever, spamming "stalled at chunk 320"). Two fixes:
+   - Receiver self-completion poll (1s interval): receiver-only (filesRef empty), when chunksAcked >= totalChunks and state is TRANSFERRING/MANIFEST_EXCHANGE for 2 consecutive ticks → run finishReceiverTransfer (its internal completeness poll absorbs in-flight stragglers). The receiver is now the authority on completion.
+   - Sender stall-watchdog guard: when senderNextIndexRef >= totalChunks the loop already finished (waiting for TRANSFER_COMPLETE_ACK) — no force-restart.
+4. Confirmed already-shipped: storage-quota guard in saveSenderFiles (navigator.storage.estimate) was implemented in an earlier round — no work needed.
+
+## New features this round (all browser-verified)
+1. **Receiver auto-accept for resumed transfers** (new setting, default ON): a re-send of a transferId we already started receiving FROM THE SAME peerDeviceId with partial progress skips the consent dialog entirely. Safety anchors: known transferId + role=receiver record + status !== COMPLETE + 0 < acked < totalChunks + peerDeviceId match. Toast: "Resuming automatically — you already have N% · Only the missing M chunks will be sent." Stored in localStorage 'fluxdrop:auto-accept-resume'; toggle in Settings → Privacy ("Auto-accept resumes", with explainer copy) next to the trusted-devices block. Verified E2E TWICE: consent dialog skipped, resume-skip bitmap used (141/320 and 104/320 chunks skipped), both sides COMPLETE + SHA-256 verified.
+2. **History Import** (Export existed; Import is new): schema-2 envelope `{app:'fluxdrop', schema:2, exportedAt, records:[...]}` (bare schema-1 arrays also accepted). Strict per-row validation (transferId/role/status/files normalized, caps: 500 rows, 200 files, string slices) via normalizeImportedRecord; merge-by-transferId (existing always wins); toasts report "N imported · M duplicates skipped · K invalid skipped". Imported records are metadata-only (totalChunks=0 → never resumable). Import buttons live in the history header AND the empty state. Verified with a synthetic 3-row file: 1 imported (rendered with peer alias "OldLaptop"), 1 invalid rejected, 1 duplicate skipped, then deleted cleanly.
+3. **Enhanced Export (schema 2)**: now includes totalChunks, chunkSize, bytesTransferred, chunksAckedCount, resumedAt, resumedSavedBytes, updatedAt for round-trip fidelity.
+4. **Stats dashboard: 2 new tiles** — "Avg throughput" (bytes/ms over completed transfers' wall-clock → formatBytes/s) and "Devices met" (unique non-empty peerDeviceIds). Grid now 2/3/4 cols. Both render with real data (628.8 KB/s, 1 unique peer).
+5. **Styling polish**: history rows get flux-slide-up entrance with staggered delay (30ms×min(i,8)); file names get full-list tooltips; stats card gets flux-slide-up on data arrival; Import button styled into header + empty state.
+
+## E2E verification (20MB file, two agent-browser sessions via :81)
+- Fresh send → manual consent (correct: no record) → cancel at 30.2% → sender history Resume → files re-attached instantly ("Resuming a previous transfer" banner) → new room → receiver joins via form → **AUTO-ACCEPT** ("you already have 44% · 179 chunks remaining") → "Resumed · 8.8 MB saved" badge → complete on BOTH sides, records: COMPLETE, acked 320/320, resumedSavedBytes=9,240,576 (141×64KB exact), checksumVerified=true ✓
+- Import round-trip verified (above). Stats/eco badges update live. Light + dark themes verified visually (badges, rows, progress, footer sticky).
+- Lint clean (exit 0), tsc clean for src/.
+
+## Unresolved issues / risks
+- Sandbox caveats unchanged: IDB wiped on page reload (keep resume E2E in one page lifetime), deep-link join needs full page load, ≤30MB test files.
+- Deep-link join showed a slow/missed auto-join once (receiver landed on landing page after `open url#join=...`); joining via the form worked. Possible race between hash-parse and signaling connect — NOT fixed this round (form path is fine); candidate for next round.
+- Pre-fix stale records (e.g. 85cf9df3 TRANSFERRING 320/320 from the pre-fix hang) remain in test histories — harmless, delete manually if desired.
+- Negative case (auto-accept-resume OFF → consent dialog shows) verified only by code path (falls through to setPendingManifest), not E2E.
+- "Connecting" header badge on landing is by design (lazy connect) — but check :81 first if it persists in sender/receiver view.
+
+## Recommendation for next phase
+Candidates: deep-link join race fix (retry join emit when socket connects), light-theme PWA screenshots, prod-build offline e2e, per-file resume-skip visualization, "Re-download" for completed receiver records (chunks may still be in IDB).

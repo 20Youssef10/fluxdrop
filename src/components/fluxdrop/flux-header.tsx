@@ -1,7 +1,7 @@
 'use client'
 
 import { useTheme } from 'next-themes'
-import { Moon, Sun, Settings, Wifi, WifiOff, Plus, Trash2, Server, User, Shield, HelpCircle, Bell, Volume2, BellOff, VolumeX, BadgeCheck } from 'lucide-react'
+import { Moon, Sun, Settings, Wifi, WifiOff, Plus, Trash2, Server, User, Shield, HelpCircle, Bell, Volume2, BellOff, VolumeX, BadgeCheck, RotateCcw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -158,6 +158,8 @@ export function SettingsDialog({
   const setNotificationsPref = useSessionStore((s) => s.setNotificationsEnabled)
   const autoAcceptTrusted = useSessionStore((s) => s.autoAcceptTrusted)
   const setAutoAcceptTrusted = useSessionStore((s) => s.setAutoAcceptTrusted)
+  const autoAcceptResume = useSessionStore((s) => s.autoAcceptResume)
+  const setAutoAcceptResume = useSessionStore((s) => s.setAutoAcceptResume)
   const [notifPermission, setNotifPermission] = useState<NotificationPermission | 'unsupported'>('default')
   const [trustedList, setTrustedList] = useState<TrustedPeer[]>([])
 
@@ -470,6 +472,26 @@ export function SettingsDialog({
                   No trusted devices yet — check "Trust this device" in the transfer consent dialog.
                 </p>
               )}
+            </div>
+
+            {/* Resume auto-accept */}
+            <div className="rounded-lg border border-border/60 p-3 space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <div className="pr-2">
+                  <p className="text-sm font-medium flex items-center gap-1.5">
+                    <RotateCcw className="h-4 w-4 text-flux-500" />
+                    Auto-accept resumes
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Skip the consent dialog when the SAME device re-sends a transfer you already started receiving.
+                  </p>
+                </div>
+                <Switch checked={autoAcceptResume} onCheckedChange={setAutoAcceptResume} />
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Only applies to a transfer ID you previously accepted with partial progress — never to
+                new transfers. The consent dialog still appears for anything else.
+              </p>
             </div>
 
             <div className="rounded-lg border border-flux-500/30 bg-flux-500/5 p-3 text-xs">

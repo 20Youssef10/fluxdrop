@@ -10,6 +10,8 @@ import {
   ShieldCheck,
   TrendingUp,
   Clock,
+  Gauge,
+  Users,
 } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { listTransfers, type StoredTransfer } from '@/lib/fluxdrop/resume'
@@ -27,6 +29,8 @@ interface Stats {
   bandwidthSaved: number
   resumedCount: number
   totalTimeMs: number
+  avgThroughput: number // bytes/ms over completed transfers' wall-clock
+  devicesMet: number
 }
 
 export function StatsDashboard() {
@@ -51,6 +55,11 @@ export function StatsDashboard() {
           (s, r) => s + (r.finishedAt ? Math.max(0, r.finishedAt - r.startedAt) : 0),
           0
         )
+        // Rough average throughput across completed transfers (bytes per ms).
+        const avgThroughput = totalTimeMs > 0 ? totalBytes / totalTimeMs : 0
+        // Unique devices we've exchanged transfers with (excluding imported
+        // records whose peerDeviceId was not exported).
+        const devicesMet = new Set(recs.map((r) => r.peerDeviceId).filter((id) => id && id.length > 0)).size
         setStats({
           totalTransfers: recs.length,
           sentCount: sent.length,
@@ -62,6 +71,8 @@ export function StatsDashboard() {
           bandwidthSaved,
           resumedCount,
           totalTimeMs,
+          avgThroughput,
+          devicesMet,
         })
       } catch {
         /* ignore */
@@ -82,7 +93,7 @@ export function StatsDashboard() {
     : 0
 
   return (
-    <Card className="flux-hover-border flux-glass p-5">
+    <Card className="flux-hover-border flux-glass flux-slide-up p-5">
       <div className="flex items-center justify-between gap-2 mb-4">
         <div className="flex items-center gap-2">
           <TrendingUp className="h-4 w-4 text-muted-foreground" />
@@ -94,7 +105,7 @@ export function StatsDashboard() {
           {stats.completedCount}/{stats.totalTransfers} completed
         </span>
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
         <StatTile
           icon={<FileStack className="h-4 w-4" />}
           label="Total transfers"
@@ -137,6 +148,20 @@ export function StatsDashboard() {
           value={`${successRate}%`}
           sublabel={stats.totalTimeMs > 0 ? `${formatSpentTime(stats.totalTimeMs)} in transfers` : 'of all transfers'}
           color={successRate >= 80 ? 'text-flux-600 dark:text-flux-400' : 'text-amber-600 dark:text-amber-400'}
+        />
+        <StatTile
+          icon={<Gauge className="h-4 w-4" />}
+          label="Avg throughput"
+          value={stats.avgThroughput > 0 ? `${formatBytes(stats.avgThroughput * 1000)}/s` : '—'}
+          sublabel="across completed sends"
+          color="text-flux-600 dark:text-flux-400"
+        />
+        <StatTile
+          icon={<Users className="h-4 w-4" />}
+          label="Devices met"
+          value={<AnimatedNumber value={stats.devicesMet} />}
+          sublabel={stats.devicesMet === 1 ? 'unique peer so far' : 'unique peers so far'}
+          color="text-flux-600 dark:text-flux-400"
         />
       </div>
     </Card>
