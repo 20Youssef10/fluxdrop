@@ -1,12 +1,37 @@
 'use client'
 
+import { useState } from 'react'
 import { motion } from 'framer-motion'
-import { CheckCircle2, ShieldCheck, Clock, Database, FileStack, Gauge, Leaf } from 'lucide-react'
+import { CheckCircle2, ShieldCheck, Clock, Database, FileStack, Gauge, Leaf, Copy, Check } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { useTransferStore } from '@/stores/transfer-store'
 import { formatBytes, formatDuration } from '@/lib/fluxdrop/format'
+import { toast } from 'sonner'
+
+/** Clipboard write with a legacy fallback for restricted contexts. */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.focus()
+      ta.select()
+      const ok = document.execCommand('copy')
+      document.body.removeChild(ta)
+      return ok
+    } catch {
+      return false
+    }
+  }
+}
 
 interface TransferSummaryCardProps {
   onDone: () => void
@@ -20,11 +45,39 @@ interface TransferSummaryCardProps {
 export function TransferSummaryCard({ onDone, onSendAnother }: TransferSummaryCardProps) {
   const t = useTransferStore()
   const m = t.manifest
+  const [receiptCopied, setReceiptCopied] = useState(false)
   if (!m) return null
 
   const avgSpeed = t.elapsedMs > 0 ? (t.totalBytes / t.elapsedMs) * 1000 : 0
   const peakSpeed = t.speedHistory.length > 0 ? Math.max(...t.speedHistory) : 0
   const effectiveSpeed = t.speedBps || avgSpeed
+
+  // Plain-text transfer receipt — handy for logging what was moved where.
+  const copyReceipt = async () => {
+    const lines = [
+      'FluxDrop transfer receipt',
+      `Date: ${new Date().toLocaleString()}`,
+      `Files: ${m.files.length}`,
+      ...m.files.map((f) => `  - ${f.name} (${formatBytes(f.size)})`),
+      `Total: ${formatBytes(m.totalSize)}`,
+      `Duration: ${formatDuration(t.elapsedMs)}`,
+      `Avg speed: ${formatBytes(effectiveSpeed)}/s`,
+      ...(peakSpeed > 0 ? [`Peak speed: ${formatBytes(peakSpeed)}/s`] : []),
+      'Integrity: SHA-256 verified',
+      ...(t.skippedChunks > 0
+        ? [`Resume skips: ${t.skippedChunks} chunks · ${formatBytes(t.skippedBytes)} saved`]
+        : []),
+    ]
+    const ok = await copyText(lines.join('\n'))
+    if (ok) {
+      setReceiptCopied(true)
+      setTimeout(() => setReceiptCopied(false), 2000)
+    } else {
+      toast.error('Could not access the clipboard', {
+        description: 'Your browser blocked clipboard access for this page.',
+      })
+    }
+  }
 
   return (
     <Card className="flux-glass p-6 relative overflow-hidden">
@@ -125,18 +178,38 @@ export function TransferSummaryCard({ onDone, onSendAnother }: TransferSummaryCa
         {/* Actions */}
         <div className="flex flex-col sm:flex-row gap-2">
           <Button
-            onClick={onSendAnother}
-            variant="outline"
-            className="flex-1 border-flux-500/40 hover:bg-flux-500/10"
+            onClick={copyReceipt}
+            variant="ghost"
+            className="sm:w-auto text-muted-foreground hover:text-foreground"
+            title="Copy a text receipt of this transfer"
           >
-            Send another
+            {receiptCopied ? (
+              <>
+                <Check className="mr-2 h-4 w-4 text-flux-500" />
+                Copied
+              </>
+            ) : (
+              <>
+                <Copy className="mr-2 h-4 w-4" />
+                Copy receipt
+              </>
+            )}
           </Button>
-          <Button
-            onClick={onDone}
-            className="flex-1 bg-flux-600 hover:bg-flux-700 text-white"
-          >
-            Done
-          </Button>
+          <div className="flex-1 flex flex-col sm:flex-row gap-2">
+            <Button
+              onClick={onSendAnother}
+              variant="outline"
+              className="flex-1 border-flux-500/40 hover:bg-flux-500/10"
+            >
+              Send another
+            </Button>
+            <Button
+              onClick={onDone}
+              className="flex-1 bg-flux-600 hover:bg-flux-700 text-white"
+            >
+              Done
+            </Button>
+          </div>
         </div>
       </div>
     </Card>

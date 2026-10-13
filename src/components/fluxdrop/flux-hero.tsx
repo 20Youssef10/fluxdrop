@@ -7,6 +7,7 @@ import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { FluxLogo } from './flux-logo'
 import { ParticleField } from './particle-field'
+import { EcoBadge } from './eco-badge'
 
 interface FluxHeroProps {
   onSend: () => void
@@ -93,6 +94,9 @@ export function FluxHero({ onSend, onReceive, onHelp }: FluxHeroProps) {
               Receive files
             </Button>
           </motion.div>
+
+          {/* Eco badge: cumulative bandwidth saved by resume skips (hidden when 0) */}
+          <EcoBadge />
 
           {/* Help link */}
           {onHelp && (

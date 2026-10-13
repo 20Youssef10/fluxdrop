@@ -81,6 +81,12 @@ export default function Home() {
       onToggleDiagnostics: () => {
         window.dispatchEvent(new CustomEvent('fluxdrop:toggle-diagnostics'))
       },
+      // P toggles pause/resume of the live transfer (state-aware).
+      onTogglePause: () => {
+        const st = useTransferStore.getState().transferState
+        if (st === 'PAUSED') flux.resumeTransfer()
+        else flux.pauseTransfer()
+      },
     },
     view
   )

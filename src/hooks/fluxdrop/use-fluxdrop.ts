@@ -743,12 +743,16 @@ export function useFluxDrop() {
         // Send ACK immediately (non-blocking) so the sender can keep streaming.
         webrtcRef.current?.sendChunkAck(m.transferId, msg.chunkIndex, true)
         const bytes = msg.payload.byteLength
-        transferRef.current.ackChunk(bytes)
-        // Update per-file progress for ALL files this chunk spans.
-        const resolved = resolveChunk(slicePlanRef.current, msg.chunkIndex, m.chunkSize)
-        if (resolved) {
-          for (const seg of resolved.segments) {
-            transferRef.current.addFileBytes(seg.fileIndex, seg.length)
+        // ackChunk dedupes by index: a re-delivered chunk (lost-ack retry) must
+        // not double-count bytes or per-file progress.
+        const isNewChunk = transferRef.current.ackChunk(msg.chunkIndex, bytes)
+        // Update per-file progress for ALL files this chunk spans (new chunks only).
+        if (isNewChunk) {
+          const resolved = resolveChunk(slicePlanRef.current, msg.chunkIndex, m.chunkSize)
+          if (resolved) {
+            for (const seg of resolved.segments) {
+              transferRef.current.addFileBytes(seg.fileIndex, seg.length)
+            }
           }
         }
         // Track ack in memory (fast). IndexedDB flush is debounced.
@@ -767,7 +771,16 @@ export function useFluxDrop() {
         if (!m) return
         const resolved = resolveChunk(slicePlanRef.current, msg.chunkIndex, m.chunkSize)
         const bytes = resolved?.totalLength ?? m.chunkSize
-        transferRef.current.ackChunk(bytes)
+        // Dedupes internally — duplicate acks from send-retries no longer
+        // double-count bytes (the old live-overshoot bug).
+        const isNew = transferRef.current.ackChunk(msg.chunkIndex, bytes)
+        // Sender-side per-file progress: map the acked chunk back to its file
+        // segments so the FILES card fills up live (was receiver-only before).
+        if (isNew && resolved) {
+          for (const seg of resolved.segments) {
+            transferRef.current.addFileBytes(seg.fileIndex, seg.length)
+          }
+        }
         // Persist the ack so the sender's history record shows real progress
         // after a cancel/reload (previously only the receiver persisted acks,
         // leaving the sender's record stuck at 0%).
@@ -782,6 +795,10 @@ export function useFluxDrop() {
         if (msg.body?.verified) {
           transferRef.current.setTransferState('COMPLETE')
           playSuccess()
+          // Sender FILES card: every file is now delivered on the peer.
+          for (let fi = 0; fi < (manifestRef.current?.files.length ?? 0); fi++) {
+            transferRef.current.markFileComplete(fi)
+          }
           void persistTransferRecord('sender', 'COMPLETE', { checksumVerified: true })
           // Persist any acks still in the debounce window so the final record
           // reflects the true chunk count immediately (not just after cleanup).
@@ -889,7 +906,17 @@ export function useFluxDrop() {
             if (acked.length > 0) {
               const storedBytes = Math.min(acked.length * m.chunkSize, m.totalSize)
               transferRef.current.seedProgress(acked.length, storedBytes)
-              transferRef.current.setSkipped(acked.length, storedBytes)
+              transferRef.current.setSkipped(acked.length, storedBytes, acked)
+              // Seed per-file progress for skipped chunks too, so the FILES
+              // card reflects the already-stored data (parity with the total %).
+              for (const idx of acked) {
+                const resolved = resolveChunk(slicePlanRef.current, idx, m.chunkSize)
+                if (resolved) {
+                  for (const seg of resolved.segments) {
+                    transferRef.current.addFileBytes(seg.fileIndex, seg.length)
+                  }
+                }
+              }
               const pct = Math.round((acked.length / m.totalChunks) * 100)
               console.log(`[FluxDrop] Resume-skip: ${acked.length}/${m.totalChunks} chunks already stored (${pct}%) — answering sender`)
               // Mark the receiver's record as resumed too (parity with the
@@ -926,7 +953,7 @@ export function useFluxDrop() {
               resumeSkipUsedRef.current = true
               const storedBytes = Math.min(acked.length * m.chunkSize, m.totalSize)
               transferRef.current.seedProgress(acked.length, storedBytes)
-              transferRef.current.setSkipped(acked.length, storedBytes)
+              transferRef.current.setSkipped(acked.length, storedBytes, acked)
               // Count skipped chunks as delivered in the sender's own history
               // record — without this the record under-reports progress even
               // after the transfer completes (e.g. 82/960 instead of 960/960).

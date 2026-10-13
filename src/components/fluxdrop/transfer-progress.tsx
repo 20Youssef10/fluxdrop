@@ -1,7 +1,7 @@
 'use client'
 
 import { motion, AnimatePresence } from 'framer-motion'
-import { Gauge, Timer, Hash, CheckCircle2, AlertTriangle, Loader2, ShieldCheck, TrendingUp, Pause, Play, RotateCcw } from 'lucide-react'
+import { Gauge, Timer, Hash, CheckCircle2, AlertTriangle, Loader2, ShieldCheck, TrendingUp, Pause, Play, RotateCcw, SkipForward } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
@@ -44,6 +44,24 @@ export function TransferProgress({ onCancel, onDone, onPause, onResume }: Transf
       setCelebrate(true)
     }
   }, [isComplete])
+
+  // Milestone pulse: flash the 25/50/75/90% marker when the progress bar
+  // crosses it upward. Purely decorative feedback that the transfer is moving.
+  const [milestone, setMilestone] = useState<number | null>(null)
+  const prevPctRef = useRef(0)
+  useEffect(() => {
+    const prev = prevPctRef.current
+    prevPctRef.current = pct
+    if (!isTransferring || pct <= prev) return
+    const crossed = [25, 50, 75, 90].find((m) => prev < m && pct >= m)
+    if (!crossed) return
+    const show = setTimeout(() => setMilestone(crossed), 0)
+    const hide = setTimeout(() => setMilestone(null), 1100)
+    return () => {
+      clearTimeout(show)
+      clearTimeout(hide)
+    }
+  }, [pct, isTransferring])
 
   return (
     <div className="space-y-4">
@@ -119,16 +137,30 @@ export function TransferProgress({ onCancel, onDone, onPause, onResume }: Transf
           {!isComplete && !isError && !isCancelled && pct > 0 && (
             <div className="absolute inset-0 flux-shimmer rounded-full pointer-events-none" />
           )}
-          {/* Milestone markers at 25/50/75% */}
+          {/* Milestone markers at 25/50/75% — pulse when freshly crossed */}
           <div className="absolute inset-0 flex pointer-events-none">
             {[25, 50, 75].map((m) => (
               <div
                 key={m}
-                className="h-full w-px bg-border/60"
+                className={`h-full w-px transition-colors duration-500 ${
+                  milestone === m ? 'bg-flux-400 shadow-[0_0_8px_rgba(16,185,129,0.8)]' : 'bg-border/60'
+                }`}
                 style={{ marginLeft: `${m}%` }}
               />
             ))}
           </div>
+          {/* Milestone ping dot */}
+          {milestone !== null && (
+            <div
+              className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 pointer-events-none"
+              style={{ left: `${milestone}%` }}
+            >
+              <span className="relative flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-flux-400 opacity-60" />
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-flux-500 shadow shadow-flux-500/50" />
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Speed sparkline */}
@@ -184,7 +216,13 @@ export function TransferProgress({ onCancel, onDone, onPause, onResume }: Transf
 
         {/* Chunk grid visualizer (up to 1000 chunks for performance) */}
         {t.totalChunks > 0 && t.totalChunks <= 1000 && (
-          <ChunkGrid total={t.totalChunks} acked={t.chunksAcked} complete={isComplete} />
+          <ChunkGrid
+            total={t.totalChunks}
+            acked={t.chunksAcked}
+            complete={isComplete}
+            ackedSet={t.ackedSet}
+            skippedSet={t.skippedIndices}
+          />
         )}
 
         {/* Actions */}
@@ -294,16 +332,30 @@ function StatCard({ icon, label, value }: { icon: React.ReactNode; label: string
   )
 }
 
-const ChunkGrid = memo(function ChunkGrid({ total, acked, complete }: { total: number; acked: number; complete: boolean }) {
+const ChunkGrid = memo(function ChunkGrid({
+  total,
+  acked,
+  complete,
+  ackedSet,
+  skippedSet,
+}: {
+  total: number
+  acked: number
+  complete: boolean
+  ackedSet: Set<number>
+  skippedSet: Set<number>
+}) {
   const cols = total > 200 ? 40 : total > 100 ? 32 : total > 50 ? 24 : 16
+  const hasLiveBitmap = ackedSet.size > 0 || skippedSet.size > 0
+  const skippedCount = skippedSet.size
   return (
     <div className="mt-5">
       <div className="flex items-center justify-between mb-2">
         <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
           Chunk map
         </span>
-        <span className="text-[10px] text-muted-foreground">
-          {acked} / {total} ACK'd
+        <span className="text-[10px] text-muted-foreground tabular-nums">
+          {acked} / {total} ACK'd{skippedCount > 0 ? ` · ${skippedCount} skipped` : ''}
         </span>
       </div>
       <div
@@ -311,13 +363,19 @@ const ChunkGrid = memo(function ChunkGrid({ total, acked, complete }: { total: n
         style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}
       >
         {Array.from({ length: total }).map((_, i) => {
-          const done = i < acked
+          // With the live bitmap, "done" means acked THIS session and "skipped"
+          // means it never travelled the wire (resume skip) — visually distinct.
+          // Without a bitmap (edge cases), fall back to the count heuristic.
+          const done = hasLiveBitmap ? ackedSet.has(i) : i < acked
+          const skipped = skippedSet.has(i)
           return (
             <div
               key={i}
               className={`aspect-square rounded-sm transition-colors ${
                 complete
                   ? 'bg-flux-500/70'
+                  : skipped
+                  ? 'bg-flux-500/15 ring-1 ring-inset ring-flux-500/50'
                   : done
                   ? 'bg-flux-500/60 flux-cell-flash'
                   : 'bg-muted/60'
@@ -327,6 +385,24 @@ const ChunkGrid = memo(function ChunkGrid({ total, acked, complete }: { total: n
           )
         })}
       </div>
+      {/* Legend — only when there is something to distinguish */}
+      {skippedCount > 0 && !complete && (
+        <div className="mt-2 flex items-center gap-4 text-[10px] text-muted-foreground">
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-2.5 w-2.5 rounded-sm bg-flux-500/15 ring-1 ring-inset ring-flux-500/50" />
+            <SkipForward className="h-2.5 w-2.5" aria-hidden />
+            skipped (already had)
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-2.5 w-2.5 rounded-sm bg-flux-500/60" />
+            streamed now
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-2.5 w-2.5 rounded-sm bg-muted/60" />
+            pending
+          </span>
+        </div>
+      )}
     </div>
   )
 })

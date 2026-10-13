@@ -12,6 +12,7 @@ const SHORTCUTS = [
   { keys: ['S'], label: 'Send files', views: ['landing'] },
   { keys: ['R'], label: 'Receive files', views: ['landing'] },
   { keys: ['Esc'], label: 'Back to home', views: ['sender', 'receiver'] },
+  { keys: ['P'], label: 'Pause / resume', views: ['sender', 'receiver'] },
   { keys: ['⌘', 'K'], label: 'Toggle diagnostics', views: ['sender', 'receiver'] },
   { keys: ['⌘', 'J'], label: 'Toggle theme', views: ['landing', 'sender', 'receiver'] },
 ]

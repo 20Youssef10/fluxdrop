@@ -9,6 +9,7 @@ export interface ShortcutHandlers {
   onCancel?: () => void
   onToggleTheme?: () => void
   onToggleDiagnostics?: () => void
+  onTogglePause?: () => void
 }
 
 /**
@@ -16,6 +17,7 @@ export interface ShortcutHandlers {
  *  - S          → start send flow (only on landing)
  *  - R          → start receive flow (only on landing)
  *  - Esc        → back / cancel
+ *  - P          → pause / resume the active transfer (sender & receiver views)
  *  - Cmd/Ctrl+K → toggle diagnostics panel
  *  - Cmd/Ctrl+J → toggle theme
  * Ignores shortcuts when focus is in an input/textarea/contenteditable.
@@ -62,6 +64,11 @@ export function useKeyboardShortcuts(handlers: ShortcutHandlers, view: string) {
         } else if (e.key === 'r' || e.key === 'R') {
           e.preventDefault()
           handlers.onReceive?.()
+        }
+      } else if (view === 'sender' || view === 'receiver') {
+        if (e.key === 'p' || e.key === 'P') {
+          e.preventDefault()
+          handlers.onTogglePause?.()
         }
       }
     }

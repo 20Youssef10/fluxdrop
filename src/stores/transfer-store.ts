@@ -26,7 +26,13 @@ interface TransferStoreState {
   totalChunks: number
   bytesTransferred: number
   totalBytes: number
-  ackChunk: (bytes: number) => void
+  /**
+   * Count a chunk acknowledgement. Deduplicates by chunk index — duplicate
+   * CHUNK_ACKs / CHUNK_DATA (send-retry double-sends) previously double-counted
+   * bytes and made the live counter overshoot 100%. Returns true when the
+   * index was new (first time seen), false for duplicates.
+   */
+  ackChunk: (chunkIndex: number, bytes: number) => boolean
   resetProgress: (totalChunks: number, totalBytes: number) => void
   /** Seed progress after skipping already-received chunks (resume flows). */
   seedProgress: (chunks: number, bytes: number) => void
@@ -34,6 +40,12 @@ interface TransferStoreState {
   _pendingChunks: number
   _pendingBytes: number
   _flushTimer: ReturnType<typeof setTimeout> | null
+  /** Internal: every chunk index ever acked this transfer (dedupe source). */
+  _ackedSet: Set<number>
+  /** Snapshot of acked indices, refreshed on each flush — drives the chunk map. */
+  ackedSet: Set<number>
+  /** Indices that never travelled the wire on a resumed transfer (skip bitmap). */
+  skippedIndices: Set<number>
 
   // Speed tracking
   startedAt: number | null
@@ -81,7 +93,7 @@ interface TransferStoreState {
   // progress card, the summary card, and the stats dashboard.
   skippedChunks: number
   skippedBytes: number
-  setSkipped: (chunks: number, bytes: number) => void
+  setSkipped: (chunks: number, bytes: number, indices?: number[]) => void
 
   // Hashing progress (pre-transfer, during buildManifest)
   hashingProgress: { current: number; total: number; fileName: string } | null
@@ -110,25 +122,36 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
   totalBytes: 0,
   // Batched chunk ack: accumulate in memory, flush to Zustand every 100ms.
   // This prevents per-chunk re-renders (24K+ for a 1.5 GB file).
+  // Dedupe: `_ackedSet` remembers every index seen, so duplicate acks from
+  // send-retries never inflate the byte counter (the old overshoot bug).
   _pendingChunks: 0,
   _pendingBytes: 0,
   _flushTimer: null as ReturnType<typeof setTimeout> | null,
-  ackChunk: (bytes) => {
+  _ackedSet: new Set<number>(),
+  ackedSet: new Set<number>(),
+  skippedIndices: new Set<number>(),
+  ackChunk: (chunkIndex, bytes) => {
     const s = get()
+    if (s._ackedSet.has(chunkIndex)) return false
+    s._ackedSet.add(chunkIndex)
     s._pendingChunks++
     s._pendingBytes += bytes
     // Flush at most every 100ms (10 Hz).
     if (!s._flushTimer) {
       s._flushTimer = setTimeout(() => {
         set((st) => ({
-          chunksAcked: st.chunksAcked + st._pendingChunks,
-          bytesTransferred: st.bytesTransferred + st._pendingBytes,
+          // Defensive caps: even if seeded skip stats slightly overestimate
+          // (e.g. last-chunk rounding), the UI must never exceed 100%.
+          chunksAcked: Math.min(st.totalChunks || Infinity, st.chunksAcked + st._pendingChunks),
+          bytesTransferred: Math.min(st.totalBytes || Infinity, st.bytesTransferred + st._pendingBytes),
+          ackedSet: new Set(st._ackedSet),
           _pendingChunks: 0,
           _pendingBytes: 0,
           _flushTimer: null,
         }))
       }, 100)
     }
+    return true
   },
   resetProgress: (totalChunks, totalBytes) =>
     set({
@@ -147,6 +170,9 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
       _pendingChunks: 0,
       _pendingBytes: 0,
       _flushTimer: null,
+      _ackedSet: new Set<number>(),
+      ackedSet: new Set<number>(),
+      skippedIndices: new Set<number>(),
     }),
 
   // NOTE: resetProgress deliberately leaves skippedChunks/skippedBytes alone —
@@ -240,7 +266,12 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
 
   skippedChunks: 0,
   skippedBytes: 0,
-  setSkipped: (chunks, bytes) => set({ skippedChunks: chunks, skippedBytes: bytes }),
+  setSkipped: (chunks, bytes, indices) =>
+    set({
+      skippedChunks: chunks,
+      skippedBytes: bytes,
+      skippedIndices: indices ? new Set(indices) : new Set<number>(),
+    }),
 
   hashingProgress: null,
   setHashingProgress: (p) => set({ hashingProgress: p }),
@@ -270,6 +301,9 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
       _pendingChunks: 0,
       _pendingBytes: 0,
       _flushTimer: null,
+      _ackedSet: new Set<number>(),
+      ackedSet: new Set<number>(),
+      skippedIndices: new Set<number>(),
       skippedChunks: 0,
       skippedBytes: 0,
     }),
