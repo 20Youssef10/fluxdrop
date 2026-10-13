@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useTransferStore } from '@/stores/transfer-store'
 import { formatBytes, formatSpeed, formatEta, formatDuration } from '@/lib/fluxdrop/format'
-import { buildSlicePlan } from '@/lib/fluxdrop/manifest'
+import { computeFileSkips } from '@/lib/fluxdrop/manifest'
 import { FileIcon, getFileCategoryColors } from './file-icon'
 import { AnimatedNumber } from './animated-number'
 import { SpeedSparkline } from './speed-sparkline'
@@ -67,27 +67,10 @@ export function TransferProgress({ onCancel, onDone, onPause, onResume }: Transf
   // Per-file skip breakdown (resumed transfers): map the global skip bitmap
   // onto each file's byte range so the FILES card can visualize which portion
   // of each file was already on this device (never travelled the wire).
-  const fileSkips = useMemo(() => {
-    const out = new Map<number, { skippedBytes: number; skippedChunks: number; totalChunks: number }>()
-    const m = t.manifest
-    if (!m || t.skippedIndices.size === 0) return out
-    const plan = buildSlicePlan(m)
-    for (const seg of plan) {
-      const startChunk = Math.floor(seg.startByte / m.chunkSize)
-      const endChunk = Math.floor((seg.endByte - 1) / m.chunkSize)
-      let skippedBytes = 0
-      let skippedChunks = 0
-      for (let c = startChunk; c <= endChunk; c++) {
-        if (!t.skippedIndices.has(c)) continue
-        skippedChunks++
-        const overlapStart = Math.max(seg.startByte, c * m.chunkSize)
-        const overlapEnd = Math.min(seg.endByte, (c + 1) * m.chunkSize)
-        skippedBytes += Math.max(0, overlapEnd - overlapStart)
-      }
-      out.set(seg.fileIndex, { skippedBytes, skippedChunks, totalChunks: endChunk - startChunk + 1 })
-    }
-    return out
-  }, [t.manifest, t.skippedIndices])
+  const fileSkips = useMemo(
+    () => computeFileSkips(t.manifest, t.skippedIndices),
+    [t.manifest, t.skippedIndices]
+  )
 
   return (
     <div className="space-y-4">

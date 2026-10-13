@@ -153,6 +153,53 @@ export default function Home() {
     transferState !== 'VERIFYING' &&
     transferState !== 'COMPLETE'
 
+  // Clipboard paste-to-send (sender view, pre-transfer):
+  //  - pasted FILES (e.g. a screenshot) join the send queue directly
+  //  - pasted TEXT opens the snippet composer pre-filled
+  // Fires only when the paste didn't target an editable field (so pasting
+  // into the room-code input or snippet box behaves normally).
+  useEffect(() => {
+    if (view !== 'sender' || !dropEnabled) return
+    const isEditable = (el: EventTarget | null) =>
+      el instanceof HTMLElement &&
+      (el.isContentEditable ||
+        el.tagName === 'INPUT' ||
+        el.tagName === 'TEXTAREA' ||
+        el.tagName === 'SELECT')
+    const onPaste = (e: ClipboardEvent) => {
+      if (isEditable(e.target)) return
+      const dt = e.clipboardData
+      if (!dt) return
+      const pastedFiles = Array.from(dt.files ?? [])
+      if (pastedFiles.length > 0) {
+        e.preventDefault()
+        setFiles((prev) => {
+          // Clipboard re-pastes of the same content produce fresh File objects
+          // with a new lastModified — dedupe on name+size instead.
+          const seen = new Set(prev.map((f) => `${f.name}:${f.size}`))
+          const fresh = pastedFiles.filter((f) => !seen.has(`${f.name}:${f.size}`))
+          if (fresh.length === 0) {
+            toast.info('Already in the queue', { description: pastedFiles[0]?.name })
+            return prev
+          }
+          toast.success(
+            `Added ${fresh.length} file${fresh.length > 1 ? 's' : ''} from clipboard`,
+            { description: fresh.map((f) => f.name).join(', ').slice(0, 120) }
+          )
+          return [...prev, ...fresh]
+        })
+        return
+      }
+      const text = dt.getData('text/plain')?.trim()
+      if (text) {
+        e.preventDefault()
+        window.dispatchEvent(new CustomEvent('fluxdrop:paste-snippet', { detail: { text } }))
+      }
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+  }, [view, dropEnabled])
+
   return (
     <div className="flex min-h-screen flex-col">
       <FluxHeader onOpenSettings={() => setSettingsOpen(true)} onOpenHelp={() => setHelpOpen(true)} />

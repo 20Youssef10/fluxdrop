@@ -1,13 +1,15 @@
 'use client'
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
 import { CheckCircle2, ShieldCheck, Clock, Database, FileStack, Gauge, Leaf, Copy, Check } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { useTransferStore } from '@/stores/transfer-store'
-import { formatBytes, formatDuration } from '@/lib/fluxdrop/format'
+import { formatBytes, formatDuration, fileTypeCategory } from '@/lib/fluxdrop/format'
+import { computeFileSkips } from '@/lib/fluxdrop/manifest'
+import { FileIcon, getFileCategoryColors } from './file-icon'
 import { toast } from 'sonner'
 
 /** Clipboard write with a legacy fallback for restricted contexts. */
@@ -46,6 +48,15 @@ export function TransferSummaryCard({ onDone, onSendAnother }: TransferSummaryCa
   const t = useTransferStore()
   const m = t.manifest
   const [receiptCopied, setReceiptCopied] = useState(false)
+
+  // Per-file resume-skip breakdown — which portion of each file was already
+  // on this device and never travelled the wire (resumed transfers only).
+  // Hooks must run unconditionally — guard inside the memo instead.
+  const fileSkips = useMemo(
+    () => (m ? computeFileSkips(m, t.skippedIndices) : new Map()),
+    [m, t.skippedIndices]
+  )
+
   if (!m) return null
 
   const avgSpeed = t.elapsedMs > 0 ? (t.totalBytes / t.elapsedMs) * 1000 : 0
@@ -160,18 +171,37 @@ export function TransferSummaryCard({ onDone, onSendAnother }: TransferSummaryCa
           </div>
         )}
 
-        {/* File list summary (compact) */}
-        <div className="mb-6 rounded-lg border border-border/50 bg-card/40 p-3 max-h-32 overflow-y-auto flux-scroll">
+        {/* File list summary (compact) — icons + per-file resume-skip badges */}
+        <div className="mb-6 rounded-lg border border-border/50 bg-card/40 p-3 max-h-40 overflow-y-auto flux-scroll">
           <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-2">
             Files transferred
           </p>
-          <div className="space-y-1">
-            {m.files.map((f, i) => (
-              <div key={i} className="flex items-center justify-between text-xs">
-                <span className="truncate font-medium">{f.name}</span>
-                <span className="text-muted-foreground shrink-0 ml-2">{formatBytes(f.size)}</span>
-              </div>
-            ))}
+          <div className="space-y-1.5">
+            {m.files.map((f, i) => {
+              const skip = fileSkips.get(i)
+              const skipPct = skip && f.size > 0 ? Math.round((skip.skippedBytes / f.size) * 100) : 0
+              const colors = getFileCategoryColors(f.type, f.name)
+              const isImage = fileTypeCategory(f.type, f.name) === 'image'
+              return (
+                <div key={i} className="group flex items-center gap-2.5 rounded-md border border-transparent px-1.5 py-1 text-xs transition-colors hover:border-border/50 hover:bg-background/40">
+                  <div className={`flex h-6 w-6 shrink-0 items-center justify-center rounded ${colors.bg} ${colors.text}`}>
+                    <FileIcon mime={f.type} name={f.name} className="h-3 w-3" />
+                  </div>
+                  <span className="truncate font-medium" title={f.name}>{f.name}</span>
+                  {skipPct > 0 && (
+                    <Badge
+                      variant="outline"
+                      className="hidden sm:inline-flex shrink-0 gap-0.5 border-flux-500/40 bg-flux-500/10 px-1.5 py-0 h-4 text-[9px] text-flux-700 dark:text-flux-300"
+                      title={`${formatBytes(skip.skippedBytes)} of this file was already on this device and never re-sent`}
+                    >
+                      <Leaf className="h-2.5 w-2.5" />
+                      {isImage ? `${skipPct}% local` : `${skipPct}% was already here`}
+                    </Badge>
+                  )}
+                  <span className="text-muted-foreground shrink-0 ml-auto tabular-nums">{formatBytes(f.size)}</span>
+                </div>
+              )
+            })}
           </div>
         </div>
 

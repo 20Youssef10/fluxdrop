@@ -1,7 +1,8 @@
 'use client'
 
-import { QRCodeSVG } from 'qrcode.react'
-import { RefreshCw, Share2, KeyRound, Clock, Link2 } from 'lucide-react'
+import { useRef, useState } from 'react'
+import { QRCodeCanvas } from 'qrcode.react'
+import { RefreshCw, Share2, KeyRound, Clock, Download, QrCode } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -9,7 +10,7 @@ import { Separator } from '@/components/ui/separator'
 import { useSessionStore } from '@/stores/session-store'
 import { shortId } from '@/lib/fluxdrop/format'
 import { toast } from 'sonner'
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { CopyButton } from './copy-button'
 
 export function QRDisplay() {
@@ -19,6 +20,8 @@ export function QRDisplay() {
   const qrData = useSessionStore((s) => s.qrData)
   const roomCreatedAt = useSessionStore((s) => s.roomCreatedAt)
   const [elapsed, setElapsed] = useState(0)
+  const [exporting, setExporting] = useState(false)
+  const qrWrapRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (!roomCreatedAt) return
@@ -31,6 +34,7 @@ export function QRDisplay() {
   const remainingSec = Math.max(0, 300 - elapsed)
   const mm = String(Math.floor(remainingSec / 60)).padStart(2, '0')
   const ss = String(remainingSec % 60).padStart(2, '0')
+  const expiryPct = Math.min(100, (elapsed / 300) * 100)
 
   const shareLink = roomId && pin
     ? `${window.location.origin}/#join=${roomId}&pin=${pin}`
@@ -39,16 +43,91 @@ export function QRDisplay() {
     ? `FluxDrop — Room: ${roomId} · PIN: ${pin}`
     : ''
 
+  // Export the on-screen QR as a PNG file (rendered at 2x for crispness).
+  const downloadQr = () => {
+    const wrap = qrWrapRef.current
+    const canvas = wrap?.querySelector('canvas')
+    if (!canvas || !roomId) {
+      toast.error('QR code is not ready yet')
+      return
+    }
+    setExporting(true)
+    try {
+      // Compose onto a padded white canvas so the PNG frames nicely.
+      const pad = 32
+      const out = document.createElement('canvas')
+      out.width = canvas.width + pad * 2
+      out.height = canvas.height + pad * 2 + 28
+      const ctx = out.getContext('2d')
+      if (!ctx) throw new Error('canvas unavailable')
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, out.width, out.height)
+      ctx.drawImage(canvas, pad, pad)
+      // Small caption under the code.
+      ctx.fillStyle = '#0a0f0d'
+      ctx.font = '600 14px system-ui, sans-serif'
+      ctx.textAlign = 'center'
+      ctx.fillText(`FluxDrop · ${roomId}${pin ? ` · PIN ${pin}` : ''}`, out.width / 2, out.height - 10)
+
+      const url = out.toDataURL('image/png')
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `fluxdrop-qr-${roomId}.png`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      toast.success('QR code saved', { description: `fluxdrop-qr-${roomId}.png` })
+    } catch {
+      toast.error('Could not export the QR code', {
+        description: 'Your browser blocked the canvas export. Try a screenshot instead.',
+      })
+    } finally {
+      setTimeout(() => setExporting(false), 300)
+    }
+  }
+
+  // Native share sheet where supported (mobile), clipboard fallback otherwise.
+  const shareRoom = async () => {
+    if (!shareLink) return
+    if (typeof navigator !== 'undefined' && navigator.share) {
+      try {
+        await navigator.share({
+          title: 'FluxDrop transfer',
+          text: detailsText,
+          url: shareLink,
+        })
+        return
+      } catch (err) {
+        // User dismissed the share sheet — not an error.
+        if ((err as DOMException)?.name === 'AbortError') return
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(`${detailsText}\n${shareLink}`)
+      toast.success('Room details copied', { description: 'Paste them on the receiving device.' })
+    } catch {
+      toast.error('Sharing is not available in this browser')
+    }
+  }
+
   if (!roomId) return null
 
   return (
     <Card className="flux-hover-border flux-glass overflow-hidden">
       <div className="p-6 sm:p-8">
         <div className="flex flex-col items-center text-center">
-          <Badge variant="outline" className="mb-4 border-flux-500/40 bg-flux-500/10 text-flux-700 dark:text-flux-300">
+          <Badge variant="outline" className={`mb-3 border-flux-500/40 bg-flux-500/10 text-flux-700 dark:text-flux-300 ${remainingSec <= 60 ? 'border-amber-500/50 bg-amber-500/10 text-amber-600 dark:text-amber-400' : ''}`}>
             <Clock className="mr-1.5 h-3 w-3" />
-            Expires in {mm}:{ss}
+            {remainingSec <= 0 ? 'Expired — go back to refresh' : `Expires in ${mm}:${ss}`}
           </Badge>
+
+          {/* Expiry progress bar — drains as the pairing window closes */}
+          <div className="w-40 h-1 rounded-full bg-border/60 overflow-hidden mb-5" aria-hidden="true">
+            <div
+              className={`h-full rounded-full transition-all duration-1000 ease-linear ${remainingSec <= 60 ? 'bg-amber-500' : 'bg-flux-500'}`}
+              style={{ width: `${100 - expiryPct}%` }}
+            />
+          </div>
 
           <h3 className="text-lg font-semibold">Scan to receive</h3>
           <p className="mt-1 text-sm text-muted-foreground">
@@ -56,11 +135,11 @@ export function QRDisplay() {
           </p>
 
           {/* QR code */}
-          <div className="relative mt-6">
+          <div className="relative mt-6" ref={qrWrapRef}>
             <div className="absolute inset-0 -m-3 rounded-2xl bg-gradient-to-br from-flux-400/20 via-flux-500/10 to-flux-600/20 blur-xl" />
             <div className="relative rounded-2xl border-2 border-flux-500/30 bg-white p-4 shadow-xl">
               {qrData ? (
-                <QRCodeSVG
+                <QRCodeCanvas
                   value={qrData}
                   size={208}
                   level="M"
@@ -94,22 +173,42 @@ export function QRDisplay() {
             )}
           </div>
 
-          <div className="mt-4 grid grid-cols-2 gap-2 w-full">
+          <div className="mt-4 grid grid-cols-3 gap-2 w-full">
             <CopyButton
               text={detailsText}
-              label="Copy details"
+              label="Details"
               variant="outline"
               className="border-flux-500/40 hover:bg-flux-500/10"
             />
             <CopyButton
               text={shareLink}
-              label="Copy link"
+              label="Link"
               variant="outline"
               className="border-flux-500/40 hover:bg-flux-500/10"
             />
+            <Button
+              variant="outline"
+              onClick={shareRoom}
+              className="border-flux-500/40 hover:bg-flux-500/10"
+              title="Share the room link via your device's share sheet"
+            >
+              <Share2 className="mr-1.5 h-4 w-4" />
+              Share
+            </Button>
           </div>
+          <Button
+            variant="ghost"
+            onClick={downloadQr}
+            disabled={exporting || !qrData}
+            className="mt-2 w-full text-muted-foreground hover:text-foreground text-xs"
+            title="Save the QR code as a PNG image"
+          >
+            <Download className="mr-1.5 h-3.5 w-3.5" />
+            {exporting ? 'Exporting…' : 'Download QR as PNG'}
+          </Button>
 
-          <p className="mt-4 text-xs text-muted-foreground">
+          <p className="mt-4 flex items-center gap-1.5 text-xs text-muted-foreground">
+            <QrCode className="h-3.5 w-3.5" />
             Waiting for a receiver to join…
           </p>
         </div>
@@ -130,7 +229,7 @@ function CodeRow({
   icon?: React.ReactNode
 }) {
   return (
-    <div className="flex items-center justify-between gap-3 rounded-lg border border-border/50 bg-card/60 p-3">
+    <div className="flex items-center justify-between gap-3 rounded-lg border border-border/50 bg-card/60 p-3 transition-colors hover:border-flux-500/30">
       <div className="flex items-center gap-2">
         {icon}
         <span className="text-xs uppercase tracking-wider text-muted-foreground">{label}</span>

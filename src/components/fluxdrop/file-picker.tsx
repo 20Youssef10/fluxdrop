@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useRef, useState } from 'react'
-import { UploadCloud, FolderOpen, X, FilePlus } from 'lucide-react'
+import { UploadCloud, FolderOpen, X, FilePlus, ClipboardPaste } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -99,6 +99,12 @@ export function FilePicker({ files, onFilesChange, onSend, disabled }: FilePicke
           </p>
           <p className="mt-1 text-sm text-muted-foreground">
             or <span className="text-flux-600 dark:text-flux-400 font-medium">browse</span> from your device
+          </p>
+          <p className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-card/60 px-2.5 py-1 text-[11px] text-muted-foreground">
+            <ClipboardPaste className="h-3 w-3 text-flux-500" />
+            or press <kbd className="rounded border border-border bg-muted px-1 font-mono text-[10px] font-semibold">Ctrl</kbd>
+            <span className="text-[10px]">+</span>
+            <kbd className="rounded border border-border bg-muted px-1 font-mono text-[10px] font-semibold">V</kbd> to paste files or text
           </p>
           <p className="mt-3 text-xs text-muted-foreground">
             Up to {CONSTANTS.MAX_FILES_PER_TRANSFER} files · {formatBytes(CONSTANTS.MAX_FILE_SIZE)} max · all types welcome

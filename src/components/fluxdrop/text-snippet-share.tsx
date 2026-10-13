@@ -56,6 +56,21 @@ export function TextSnippetShare({ onShare, disabled }: TextSnippetShareProps) {
     }
   }, [open])
 
+  // Clipboard paste-to-draft: the page-level paste handler in sender view
+  // dispatches `fluxdrop:paste-snippet` with plain text (no files present),
+  // and we open the composer pre-filled — paste a link anywhere to send it.
+  useEffect(() => {
+    const onPasteSnippet = (e: Event) => {
+      const detail = (e as CustomEvent<{ text?: string }>).detail
+      const text = (detail?.text ?? '').slice(0, MAX_TEXT_LENGTH)
+      if (!text.trim()) return
+      setText(text)
+      setOpen(true)
+    }
+    window.addEventListener('fluxdrop:paste-snippet', onPasteSnippet)
+    return () => window.removeEventListener('fluxdrop:paste-snippet', onPasteSnippet)
+  }, [])
+
   const handleShare = () => {
     if (!text.trim()) return
     onShare(makeSnippetFile(text))

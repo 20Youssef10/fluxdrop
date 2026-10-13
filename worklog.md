@@ -1428,3 +1428,43 @@ Stable phase continues; record-integrity + completion paths are now robust. Cand
 
 ## Commit
 - 31864dc pushed to origin/main (one-shot PAT URL, author Youssef Mahmoud <youssef2010.mahmoud@gmail.com>, 9 files, +409/-73). Token not persisted anywhere. Verified: no sandbox auto-commits before pushing.
+
+---
+Task ID: cron-review-r10
+Agent: Z.ai Code (cron webDevReview round 10)
+Task: Assess status, QA via agent-browser, fix bugs, ship new features + styling polish.
+
+## Current project status
+Stable through round 9. This round started by pushing the pending round-9 worklog auto-commit (amended `188c93b` → `87674bb`, proper message + author) before any new work. Baseline QA was fully clean: fresh 12MB E2E (hashchange join → consent → transfer → SHA-256 verified both sides), zero console errors. Lint exit 0, tsc clean for src/.
+
+## Bug fixed
+1. **DeviceList self-role hardcoded "Sender"**: the local device row always showed role "Sender" even in receiver view (the "both devices show Sender" quirk from round-9 notes). Fix: self role derives from session `view` (`view === 'receiver' ? 'receiver' : 'sender'`). Note: on the receiver the device list only renders in the brief PAIRING window (manifest exchange unmounts it), so E2E capture of the transient render wasn't possible in-sandbox — sender-side render verified visually, receiver-side is deterministic from `view`. Also added: ArrowUp/ArrowDown role icons, live pulsing dot on the self row when the DataChannel is open, "N connected" badge in the card header.
+
+## New features (all browser-verified)
+1. **Clipboard paste-to-send (sender view, pre-transfer)**: window `paste` handler — pasted FILES (e.g. screenshots) join the send queue directly with a toast + dedupe (name+size key — clipboard re-pastes create fresh File objects with new lastModified, verified dup toast "Already in the queue"); pasted TEXT opens the snippet composer pre-filled via a `fluxdrop:paste-snippet` CustomEvent consumed by TextSnippetShare. Paste targets that are editable fields (room input, snippet box) are ignored. Drop-zone hint chip added: "or press Ctrl+V to paste files or text". Verified: text paste → dialog prefilled; file paste → queue + toast; duplicate paste → info toast, queue unchanged.
+2. **QR card: Download QR as PNG + native Share**: switched QRCodeSVG→QRCodeCanvas; "Download QR as PNG" exports a padded 2x canvas with caption "FluxDrop · <ROOM> · PIN <PIN>" (verified: file saved, caption legible); Share2 button uses navigator.share when available with clipboard fallback. Expiry badge drains via a linear progress bar (amber under 60s). Room/Link copy buttons tightened to a 3-col grid.
+3. **Per-file "was already here" badges in the completion SUMMARY card**: extracted the per-file skip computation from TransferProgress into shared `computeFileSkips()` in manifest.ts (also accepts null manifest — hooks-order safe); summary file rows now render category-colored FileIcons + a leaf badge "N% was already here" per file when resume-skip bytes > 0. Verified on BOTH sides after a cancel-at-36.8% → resume → auto-accept → complete cycle: receiver row shows "40% was already here" (191/480 chunks, 11.9 MB saved), aggregate leaf note intact, SHA-256 verified, history record shows "11.9 MB saved".
+
+## Styling polish
+- Summary card FILES TRANSFERRED list: file icons, hover tint, per-file leaf badges, max-h increased to 40.
+- DeviceList: role icons, self live-dot, connected count badge, hover border.
+- QR card: expiry progress bar, amber state under 60s, QrCode icon in waiting line, Download/Share actions.
+- File picker: Ctrl+V hint chip with kbd styling.
+- Light + dark themes verified visually (landing + summary cards + history).
+
+## E2E verification highlights
+- 3 full transfers this round (12MB ×2, 30MB ×1 incl. cancel→resume with skip bitmap 191 chunks / 11.9 MB saved, auto-accept resume on receiver, completion in ~25s @ 5.2 MB/s peak).
+- Paste features verified via synthetic ClipboardEvent dispatch (files + text + duplicate).
+- QR PNG export verified (file on disk, caption readable).
+- Zero unexpected console errors across all sessions.
+
+## Unresolved issues / risks
+- Sandbox caveats unchanged: IDB wiped on page reloads; keep E2E files ≤30MB; deep-link join needs the gateway :81.
+- Receiver-side DeviceList transient visibility (PAIRING window only) — the role fix is verified by code determinism, not captured in-browser (window <450ms).
+- tests/unit/*.ts tsc errors are pre-existing (bun:test types not configured) and excluded from lint; unrelated to app code.
+
+## Recommendation for next phase
+Candidates: multi-file (folder) resume E2E with per-file badges; light-theme PWA screenshots; "Resumed" badge visible for non-COMPLETE records only (consider keeping it on COMPLETE rows too, with saved-bytes); Web Share API for files (share INTO the app via PWA share target); retry/backoff polish for signaling reconnects.
+
+## Commit
+- This round's changes committed after this entry; pushed to origin/main with one-shot PAT URL, author Youssef Mahmoud <youssef2010.mahmoud@gmail.com>. Token never persisted.

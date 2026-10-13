@@ -125,6 +125,43 @@ export function buildSlicePlan(manifest: TransferManifest): FileSlicePlan[] {
   return plan
 }
 
+/** Per-file resume-skip breakdown for one file index. */
+export interface FileSkipInfo {
+  skippedBytes: number
+  skippedChunks: number
+  totalChunks: number
+}
+
+/**
+ * Map the global resume-skip bitmap onto each file's byte range so any card
+ * (mid-transfer FILES list, completion SUMMARY) can visualize which portion
+ * of each file was already on this device (never travelled the wire).
+ * Shared by TransferProgress and TransferSummaryCard — keep in one place.
+ */
+export function computeFileSkips(
+  manifest: TransferManifest | null,
+  skippedIndices: Set<number>
+): Map<number, FileSkipInfo> {
+  const out = new Map<number, FileSkipInfo>()
+  if (!manifest || skippedIndices.size === 0) return out
+  const plan = buildSlicePlan(manifest)
+  for (const seg of plan) {
+    const startChunk = Math.floor(seg.startByte / manifest.chunkSize)
+    const endChunk = Math.floor((seg.endByte - 1) / manifest.chunkSize)
+    let skippedBytes = 0
+    let skippedChunks = 0
+    for (let c = startChunk; c <= endChunk; c++) {
+      if (!skippedIndices.has(c)) continue
+      skippedChunks++
+      const overlapStart = Math.max(seg.startByte, c * manifest.chunkSize)
+      const overlapEnd = Math.min(seg.endByte, (c + 1) * manifest.chunkSize)
+      skippedBytes += Math.max(0, overlapEnd - overlapStart)
+    }
+    out.set(seg.fileIndex, { skippedBytes, skippedChunks, totalChunks: endChunk - startChunk + 1 })
+  }
+  return out
+}
+
 /**
  * A segment of a single file that contributes to a chunk.
  */
