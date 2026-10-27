@@ -1,0 +1,13 @@
+{
+  "name": "fluxdrop-signaling",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot src/index.ts",
+    "start": "bun src/index.ts"
+  },
+  "dependencies": {
+    "socket.io": "^4.8.3"
+  }
+}

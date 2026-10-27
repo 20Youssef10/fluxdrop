@@ -1,0 +1,37 @@
+# Keeps the Docker build context small and secret-free.
+# (Applies to the root-context build; mini-services/signaling has its own
+# build context via docker-compose.yml.)
+
+# ── Dependencies & build output (rebuilt inside the image) ──
+node_modules
+**/node_modules
+.next
+out
+
+# ── VCS, env & secrets — never bake these into a build context ──
+.git
+.gitignore
+.env
+.env.*
+
+# ── Runtime data & logs (host-only artifacts; the DB is a named volume) ──
+db
+dev.log
+signaling.log
+server.log
+*.log
+tool-results
+upload
+download
+
+# ── Sandbox tooling & repo docs not needed to build the image ──
+skills
+tests
+examples
+docs
+scripts
+.zscripts
+mini-services
+TODO
+FEATURES.md
+worklog.md

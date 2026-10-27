@@ -1,0 +1,39 @@
+# Docker variant of the repo-root Caddyfile.
+#
+# WHY A SECOND FILE: the repo Caddyfile listens on :81 and proxies to
+# localhost:3000 / localhost:{query.XTransformPort} — correct on bare metal,
+# where all services share the host network. Inside the Compose network there
+# is no "localhost" for the upstreams (and Caddy can't build a dynamic
+# upstream from a query param against DNS names anyway), so this file listens
+# on :80 and routes by Docker service names instead. Logic mirrors the repo
+# file: anything asking for ?XTransformPort=3003 goes to the signaling
+# server, everything else goes to the Next.js app.
+
+:80 {
+	@signaling {
+		query XTransformPort=3003
+	}
+
+	handle @signaling {
+		reverse_proxy signaling:3003 {
+			header_up Host {host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	handle {
+		reverse_proxy app:3000 {
+			header_up Host {host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+}
+
+# TLS: with a bare `:80` site Caddy serves plain HTTP (fine for LAN/IP use —
+# WebRTC works over plain HTTP, see the README's HTTPS notes). For automatic
+# HTTPS, replace `:80` above with your domain (e.g. flux.example.com) and
+# keep ports 80/443 published — Caddy will provision certificates on its own.

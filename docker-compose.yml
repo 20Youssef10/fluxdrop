@@ -1,0 +1,85 @@
+# FluxDrop — one-command self-host stack.
+#
+#   cp .env.docker.example .env      # then set TURN_SECRET + your IPs
+#   docker compose up -d --build
+#
+# Topology (mirrors the bare-metal Caddyfile):
+#   browser ──► caddy (:80/:443) ──► app (:3000)         normal pages
+#                              └──► signaling (:3003)    Socket.IO, matched
+#                                                        on ?XTransformPort=3003
+#   coturn (:3478/:5349 + relay range)                   TURN relay, used only
+#                                                        when direct P2P fails
+
+name: fluxdrop
+
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000" # direct access (handy on LAN); Caddy also fronts this on 80/443
+    environment:
+      # SQLite lives inside the container; the named volume keeps it across rebuilds.
+      DATABASE_URL: file:/app/db/custom.db
+      NODE_ENV: production
+    volumes:
+      - app-db:/app/db
+    depends_on:
+      - signaling
+    restart: unless-stopped
+
+  signaling:
+    build: ./mini-services/signaling
+    # Internal only — browsers reach it through Caddy with ?XTransformPort=3003.
+    expose:
+      - "3003"
+    environment:
+      # TURN endpoints/credentials served to browsers by the signaling
+      # /turn-credentials endpoint. Empty values = STUN-only fallback.
+      TURN_URL: ${TURN_URL:-}
+      TURN_URL_TCP: ${TURN_URL_TCP:-}
+      TURN_SECRET: ${TURN_SECRET:-}
+      TURN_REALM: ${TURN_REALM:-fluxdrop.local}
+    restart: unless-stopped
+
+  coturn:
+    image: coturn/coturn:latest
+    # NOTE: network_mode: host would be simpler but is Linux-only / not portable.
+    ports:
+      - "3478:3478/udp" # TURN over UDP
+      - "3478:3478/tcp" # TURN over TCP
+      - "5349:5349/tcp" # TURNS — TLS is negotiated by coturn atop TCP (compose has no /tls protocol)
+      - "49160-49200:49160-49200/udp" # relayed-candidate port range
+    command:
+      - --use-auth-secret
+      # Same secret the signaling server uses to mint time-limited credentials.
+      - --static-auth-secret=${TURN_SECRET:?TURN_SECRET is required - see .env.docker.example}
+      - --realm=${TURN_REALM:-fluxdrop.local}
+      - --listening-port=3478
+      - --no-cli
+      # ☁️ Cloud VMs behind 1:1 NAT MUST advertise the public IP, otherwise the
+      # relay candidates handed to browsers are unreachable. Uncomment both
+      # lines and set TURN_EXTERNAL_IP=<public-ipv4> in .env (direct-internet
+      # hosts can leave it off):
+      # - --external-ip=${TURN_EXTERNAL_IP}
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # The repo-root Caddyfile proxies to localhost — correct on bare metal,
+      # but inside Compose "localhost" can't reach the other containers. This
+      # variant routes by Docker service names instead (and listens on :80;
+      # swap `:80` for your domain and Caddy provisions TLS automatically).
+      - ./deploy/Caddyfile.docker:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data # certificates + TLS state
+    depends_on:
+      - app
+      - signaling
+    restart: unless-stopped
+
+volumes:
+  app-db:
+  caddy-data:
