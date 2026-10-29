@@ -1,12 +1,40 @@
 // FluxDrop sound feedback: tiny WebAudio synth — no audio assets needed.
 // All sounds are short, subtle, and synthesized on demand.
+// v4 (5.4): sound PACKS (calm/lively/silent), quiet hours, and haptics
+// (navigator.vibrate) — mobile completion buzz included.
 
 'use client'
+
+import { usePrefsStore, type SoundPack, type QuietHours } from './prefs'
 
 const STORAGE_KEY = 'fluxdrop:sound-enabled'
 
 let enabled: boolean | null = null
 let ctx: AudioContext | null = null
+
+function isQuietHourNow(): boolean {
+  const q = readQuiet()
+  if (!q.enabled) return false
+  const h = new Date().getHours()
+  // Range may wrap midnight (22→8).
+  if (q.from <= q.to) return h >= q.from && h < q.to
+  return h >= q.from || h < q.to
+}
+
+function readPack(): SoundPack {
+  if (typeof window === 'undefined') return 'calm'
+  return usePrefsStore.getState().soundPack
+}
+
+function readQuiet(): QuietHours {
+  if (typeof window === 'undefined') return { enabled: false, from: 22, to: 8 }
+  return usePrefsStore.getState().quietHours
+}
+
+function readHaptics(): boolean {
+  if (typeof window === 'undefined') return false
+  return usePrefsStore.getState().hapticsEnabled
+}
 
 /** Lazily get (and unlock) the shared AudioContext. */
 function getCtx(): AudioContext | null {
@@ -83,35 +111,62 @@ function tone(o: ToneOptions): void {
   } catch { /* ignore — audio must never break a transfer */ }
 }
 
+function audible(): boolean {
+  if (!isSoundEnabled()) return false
+  if (readPack() === 'silent') return false
+  if (isQuietHourNow()) return false
+  return true
+}
+
+// --- Haptics (5.4) ---
+function vibrate(pattern: number | number[]): void {
+  if (!readHaptics()) return
+  try {
+    if (typeof navigator !== 'undefined' && 'vibrate' in navigator) navigator.vibrate(pattern)
+  } catch { /* ignore */ }
+}
+
 /** Rising two-note chime — transfer complete / success. */
 export function playSuccess(): void {
-  if (!isSoundEnabled()) return
-  tone({ freq: 523.25, duration: 0.16, gain: 0.07 })            // C5
-  tone({ freq: 783.99, startAt: 0.12, duration: 0.28, gain: 0.08 }) // G5
-  tone({ freq: 1046.5, startAt: 0.24, duration: 0.34, gain: 0.05 }) // C6 sparkle
+  vibrate([30, 40, 30])
+  if (!audible()) return
+  if (readPack() === 'lively') {
+    // Lively: brighter arpeggio C5-E5-G5-C6.
+    tone({ freq: 523.25, duration: 0.14, gain: 0.07 })
+    tone({ freq: 659.25, startAt: 0.09, duration: 0.14, gain: 0.07 })
+    tone({ freq: 783.99, startAt: 0.18, duration: 0.18, gain: 0.08 })
+    tone({ freq: 1046.5, startAt: 0.28, duration: 0.3, gain: 0.05 })
+  } else {
+    // Calm (default): the proven two-note + sparkle.
+    tone({ freq: 523.25, duration: 0.16, gain: 0.07 })            // C5
+    tone({ freq: 783.99, startAt: 0.12, duration: 0.28, gain: 0.08 }) // G5
+    tone({ freq: 1046.5, startAt: 0.24, duration: 0.34, gain: 0.05 }) // C6 sparkle
+  }
 }
 
 /** Low double-buzz — failure / error. */
 export function playError(): void {
-  if (!isSoundEnabled()) return
+  vibrate(120)
+  if (!audible()) return
   tone({ freq: 220, duration: 0.22, type: 'sawtooth', gain: 0.05 })
   tone({ freq: 174.6, startAt: 0.18, duration: 0.3, type: 'sawtooth', gain: 0.05 })
 }
 
 /** Soft single ping — peer connection established. */
 export function playConnect(): void {
-  if (!isSoundEnabled()) return
+  vibrate(20)
+  if (!audible()) return
   tone({ freq: 659.25, duration: 0.15, gain: 0.05 })            // E5
   tone({ freq: 880, startAt: 0.08, duration: 0.18, gain: 0.04 }) // A5
 }
 
 /** Neutral tick — transfer paused / resumed. */
 export function playPause(): void {
-  if (!isSoundEnabled()) return
+  if (!audible()) return
   tone({ freq: 440, glideTo: 330, duration: 0.2, type: 'triangle', gain: 0.06 })
 }
 
 export function playResume(): void {
-  if (!isSoundEnabled()) return
+  if (!audible()) return
   tone({ freq: 330, glideTo: 440, duration: 0.2, type: 'triangle', gain: 0.06 })
 }

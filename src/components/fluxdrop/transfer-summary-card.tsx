@@ -2,13 +2,15 @@
 
 import { useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
-import { CheckCircle2, ShieldCheck, Clock, Database, FileStack, Gauge, Leaf, Copy, Check } from 'lucide-react'
+import { CheckCircle2, ShieldCheck, Clock, Database, FileStack, Gauge, Leaf, Copy, Check, FileArchive, Forward, Loader2 } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { useTransferStore } from '@/stores/transfer-store'
 import { formatBytes, formatDuration, fileTypeCategory } from '@/lib/fluxdrop/format'
 import { computeFileSkips } from '@/lib/fluxdrop/manifest'
+import { getReceivedFilesFromCache } from '@/hooks/fluxdrop/use-fluxdrop'
+import { buildZip, zipNameFor } from '@/lib/fluxdrop/zip'
 import { FileIcon, getFileCategoryColors } from './file-icon'
 import { toast } from 'sonner'
 
@@ -48,6 +50,13 @@ export function TransferSummaryCard({ onDone, onSendAnother }: TransferSummaryCa
   const t = useTransferStore()
   const m = t.manifest
   const [receiptCopied, setReceiptCopied] = useState(false)
+  const [zipping, setZipping] = useState(false)
+  // v4: receiver-side extras — verified blobs for zip (4.2), drag-out (5.3)
+  // and onward sending (6.2). Sender devices (or after a reload) see none.
+  const received = useMemo(
+    () => (m ? getReceivedFilesFromCache(m.transferId) : null),
+    [m]
+  )
 
   // Per-file resume-skip breakdown — which portion of each file was already
   // on this device and never travelled the wire (resumed transfers only).
@@ -87,6 +96,29 @@ export function TransferSummaryCard({ onDone, onSendAnother }: TransferSummaryCa
       toast.error('Could not access the clipboard', {
         description: 'Your browser blocked clipboard access for this page.',
       })
+    }
+  }
+
+  // v4 (4.2): zip-on-receive — one .zip for the whole transfer (STORE method,
+  // checksums preserved byte-for-byte).
+  const downloadZip = async () => {
+    if (!received || !m) return
+    setZipping(true)
+    try {
+      const blob = await buildZip(received.map((f) => ({ name: f.name, blob: f.blob })))
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = zipNameFor(m.files[0]?.name ?? 'fluxdrop')
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 10_000)
+      toast.success('Zip archive downloaded', { description: `${received.length} files · STORE method (byte-exact).` })
+    } catch (err: any) {
+      toast.error('Could not build the zip', { description: err?.message ?? 'Unknown error' })
+    } finally {
+      setZipping(false)
     }
   }
 
@@ -182,8 +214,24 @@ export function TransferSummaryCard({ onDone, onSendAnother }: TransferSummaryCa
               const skipPct = skip && f.size > 0 ? Math.round((skip.skippedBytes / f.size) * 100) : 0
               const colors = getFileCategoryColors(f.type, f.name)
               const isImage = fileTypeCategory(f.type, f.name) === 'image'
+              const cached = received?.[i]
               return (
-                <div key={i} className="group flex items-center gap-2.5 rounded-md border border-transparent px-1.5 py-1 text-xs transition-colors hover:border-border/50 hover:bg-background/40">
+                <div
+                  key={i}
+                  className="group flex items-center gap-2.5 rounded-md border border-transparent px-1.5 py-1 text-xs transition-colors hover:border-border/50 hover:bg-background/40"
+                  draggable={!!cached}
+                  onDragStart={(e) => {
+                    // v4 (5.3): drag-out — received files drag straight into
+                    // Finder/Explorer (Chrome desktop; harmless no-op elsewhere).
+                    if (!cached) return
+                    try {
+                      const file = new File([cached.blob], cached.name, { type: cached.type || 'application/octet-stream' })
+                      e.dataTransfer.setData('application/x-fluxdrop-file', cached.name)
+                      e.dataTransfer.items.add(file)
+                    } catch { /* DataTransfer File entries need a gesture context */ }
+                  }}
+                  title={cached ? `${f.name} — drag into a folder, or download below` : f.name}
+                >
                   <div className={`flex h-6 w-6 shrink-0 items-center justify-center rounded ${colors.bg} ${colors.text}`}>
                     <FileIcon mime={f.type} name={f.name} className="h-3 w-3" />
                   </div>
@@ -226,6 +274,40 @@ export function TransferSummaryCard({ onDone, onSendAnother }: TransferSummaryCa
             )}
           </Button>
           <div className="flex-1 flex flex-col sm:flex-row gap-2">
+            {/* v4 (4.2): zip-on-receive (receiver side, multi-file) */}
+            {received && received.length > 1 && (
+              <Button
+                onClick={() => void downloadZip()}
+                variant="outline"
+                disabled={zipping}
+                className="flex-1"
+                title="Download every received file as a single .zip archive"
+              >
+                {zipping ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <FileArchive className="mr-2 h-4 w-4" />
+                )}
+                Download .zip
+              </Button>
+            )}
+            {/* v4 (6.2): relay-to-peer chaining — re-publish these verified
+                files to a NEW device (explicit, consent-based mini-mesh). */}
+            {received && received.length > 0 && (
+              <Button
+                onClick={() =>
+                  window.dispatchEvent(
+                    new CustomEvent('fluxdrop:send-onward', { detail: { transferId: m!.transferId } })
+                  )
+                }
+                variant="outline"
+                className="flex-1 border-flux-500/40 hover:bg-flux-500/10"
+                title="Send these verified files onward to another device"
+              >
+                <Forward className="mr-2 h-4 w-4" />
+                Send onward
+              </Button>
+            )}
             <Button
               onClick={onSendAnother}
               variant="outline"

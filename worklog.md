@@ -1812,3 +1812,147 @@ Work Log:
 Stage Summary:
 - v1.3 "Together" SHIPPED and browser-verified end-to-end: 1→N group fan-out with per-peer consent/E2E/progress/resume, in-room E2E-sealed chat, scoped trusted devices with TOFU SAS fingerprints, persistent OPFS files vault with budget/LRU, streamed >64 MB receives, and the anywhere activity dock.
 - Known caveats: (1) streamed (>64 MB) receives keep only the tail chunks in the IDB resume cache — the vault copy is the re-download source, and a mid-stream receiver reload re-receives temp-only chunks; (2) chat float (z-40) can overlap the VerificationCode card (z-30) during transfers — consider relocating VerificationCode in a later pass; (3) streamed hashing runs on the main thread (worker offload = follow-up); (4) dev overlay issue counter is cosmetically corrupted in this sandbox dev session — no actual runtime errors (production builds don't ship the overlay).
+
+---
+
+Task ID: v2.0-a
+Agent: subagent (general-purpose)
+Task: Signaling service v4 features — hardening, admin dashboard, share links, LAN discovery, region endpoint.
+
+Work Log:
+- Rewrote/extended `mini-services/signaling/src/index.ts` (~567 → ~1130 lines) with full backward compatibility.
+- 2.5 hardening: per-IP sliding-window room-creation rate limit (default 10/min, `ROOM_CREATE_RATE_PER_MIN`, shared between socket create-room and POST /link → 429 + RATE_LIMITED), structured JSON-lines logging (`LOG_LEVEL`, zero PIN/SDP/alias content), enhanced /healthz (rooms, sockets, region, version, memUsageBytes). Redis horizontal-scale adapter documented as a comment block (not installed).
+- 8.2 admin: ADMIN_TOKEN-gated /admin (self-contained HTML dashboard w/ kill switches), /admin/api (JSON), /admin/action (close-room, close-all). 503 when disabled, 401 on bad token, timing-safe compare, no PINs/IPs.
+- 3.4 share links: POST /link {ttlMinutes 5|60|1440, oneJoin} → pre-created room {roomCode, pin, expiresAt}; create-room accepts claim:{roomCode,pin}; oneJoin rooms auto-close at 2 devices; CORS + OPTIONS preflight.
+- 3.2 nearby: GET /nearby?deviceId&alias&role → same-subnet peers (IPv4 /24, IPv6 /64, XFF-honored), 30s TTL, cap 20, alias sanitized, no IPs in response.
+- 8.3 region: GET /region → {region, version, uptimeSec, devices}.
+- Verification: protocol-compat E2E suite 25/25 PASS (create/join/pairing/offer/answer/ice/e2e-relay/transfer lifecycle/heartbeat/rejoin/claim/oneJoin/admin kill-switch). Rate-limit + TTL + TTL-expiry + cap tests all green. Service relaunched on :3003 (ADMIN_TOKEN=changeme-dev for dev).
+
+---
+
+Task ID: v2.0-b1
+Agent: subagent (general-purpose)
+Task: Developer experience — protocol spec + conformance suite + headless CLI.
+
+Work Log:
+- 9.2: `docs/protocol-spec.md` (complete v1 wire spec: 9-byte header, all 19 opcodes 0x01–0x13 incl. CLIPBOARD, E2EE envelopes + AAD purposes, manifest schema incl. compression/merkle fields, signaling events, golden vectors). `scripts/protocol-conformance.ts` validates framing roundtrips + golden vectors against the REAL production modules — 72/72 checks pass.
+- 9.1: `cli/` standalone bun package (`fluxdrop`, deps: socket.io-client + node-datachannel prebuilds). send/receive commands speaking the real protocol; imports production framing modules.
+- E2E verified by main agent afterwards: two CLI processes against live signaling → 1.9 MiB transfer, sha256 bd64f579…cda8 verified identical; loopback selftest (5 MiB, simulated ACK loss recovered) passing at 26.7 Mbit/s effective.
+
+---
+
+Task ID: v2.0-b2
+Agent: subagent (general-purpose)
+Task: SDK scaffold + Capacitor/Tauri shells.
+
+Work Log:
+- 9.3: `sdk/` — @fluxdrop/sdk (engine re-exports + createFluxdropClient typed façade that runs real validation/hashing and throws-with-manifest at the transport seam + FluxDropWidget React shell + README).
+- 7.1: `capacitor.config.ts` + `docs/mobile-shell.md` (hosted-instance server.url strategy, share-sheet mapping, keep-awake plugins, iOS background-WebRTC limits).
+- 7.2: `src-tauri/tauri.conf.json` (Tauri 2 schema) + `src-tauri/README.md` + `docs/desktop-shell.md`.
+- Verification: root tsc green, isolated SDK typecheck green, eslint clean, bun runtime smoke (client manifest build + ScaffoldTransportError contract) passing.
+
+---
+
+Task ID: v1.4-a
+Agent: main
+Task: v4 foundation libraries (client).
+
+Work Log:
+- `src/lib/fluxdrop/protocol.ts`: CLIPBOARD 0x13 opcode + manifest.merkle {root, leaves} field.
+- `src/lib/fluxdrop/prefs.ts`: central prefs store (zustand + localStorage): accent (5 presets via --color-flux-* oklch re-hue), locale, lowVision, reduceMotion, highContrast, qosCapMbps, merkleEnabled, soundPack, haptics, quietHours, clipboardSync, autoOpenFirstFile, nearbyVisible, backgroundResilience, speedrunDone + applyPersistedPrefs().
+- `src/lib/fluxdrop/i18n.tsx`: 6-locale dictionaries (EN/ES/FR/DE/PT-BR/JA) + I18nProvider + useT() with inline-English fallback (next-intl deliberately unused — single-route app, zero build risk).
+- `src/lib/fluxdrop/telemetry.ts`: transparency trail (signaling events in/out+bytes, DataChannel bytes, ICE candidate types + IPv4/IPv6 availability, masked /48 v6 prefixes), subscribe/notify, 400-event ring.
+- `src/lib/fluxdrop/zip.ts`: dependency-free ZIP writer (STORE + CRC-32 + UTF-8 names + central directory, Blob-slice streaming).
+- `src/lib/fluxdrop/merkle.ts`: per-chunk SHA-256 leaves → duplicate-last binary tree → root; computeTransferMerkle(readChunk) shared by sender + both receiver paths.
+- `src/lib/fluxdrop/sound.ts`: extended with packs (calm/lively/silent), quiet hours (midnight-wrapping), haptics (navigator.vibrate) — backward-compatible API.
+- `src/lib/fluxdrop/nfc.ts`: Web NFC URI write (feature-detected, 20s abort).
+- `src/lib/fluxdrop/debug-bundle.ts`: sanitized debug bundle (collect/copy/download; file names opt-in).
+- `src/lib/fluxdrop/lan-discovery.ts`: /nearby poller + /region probe.
+- `src/lib/fluxdrop/share-link.ts`: POST /link client + #join URL builder.
+- `src/lib/fluxdrop/clipboard-sync.ts`: opt-in clipboard sync glue (≤4KB frames, document-copy capture sender, listener delivery).
+- `src/lib/fluxdrop/snippet.ts`: 1MB cap + 800-char QR cap + language guess + markdown detection.
+- `src/lib/fluxdrop/e2e.ts`: 'clipboard' AAD purpose added to encrypt/decryptWirePayload.
+
+---
+
+Task ID: v1.4-b
+Agent: main
+Task: Core engine integrations (webrtc.ts + use-fluxdrop.ts).
+
+Work Log:
+- webrtc.ts: QoS token-bucket pacer (setQosCapMbps, burst = 0.5s cap, window clamp, canSend/waitForDrain gating, consume on send, constructor reads current pref) — 1.3; telemetry recording (wire bytes both directions, local ICE candidates) — 2.6/3.5.
+- signaling.ts: emit() wrapper records every outbound event (bytes); inbound recording for all SIGNALING_EVENTS; createRoom accepts claim {roomCode, pin} for 3.4.
+- use-fluxdrop.ts:
+  - 1.7: startSend computes Merkle root over 64KB chunks (≤2GB, pref-gated) and seals into manifest; BOTH receiver completion paths (streamed OPFS + in-memory) rebuild the tree from stored bytes and compare roots (mismatch = loud warning, independent of per-file checksum path).
+  - 4.6: CLIPBOARD frame handling (E2E-sealed like chat, pref-gated) + sendClipboardSync fan-out + document-copy sender attached/removed via prefs subscription.
+  - 1.3: prefs subscription applies the QoS cap to every live transport on change.
+  - 6.2: receivedFilesCache (verified blobs per transferId, last 2 transfers) + getReceivedFiles().
+  - 1.8: maybeAutoOpenFirstFile() after COMPLETE in both receiver paths.
+
+---
+
+Task ID: v1.4-c
+Agent: main
+Task: New v4 UI components.
+
+Work Log:
+- command-palette.tsx (5.2): cmdk palette on ⌘K/Ctrl+K — navigate/theme/diagnostics/settings/shortcuts/debug-bundle/speedrun; acts via stores + custom events.
+- speedrun-dialog.tsx (5.6): first-run 10-second simulated transfer (hash→pair→stream→verified) with stage list + progress; localStorage-gated; re-runnable via palette/settings.
+- nearby-devices.tsx (3.2): landing panel — /nearby polling every 10s, visibility switch, privacy note.
+- share-link-launcher.tsx (3.4): TTL radio (5m/1h/24h) + one-join switch + create link → clipboard → claim + startSend flow.
+- transparency-panel.tsx (2.6): event trail + stat cards + IPv4/IPv6 badges, clear button; embedded in diagnostics.
+
+---
+
+Task ID: v1.4-d
+Agent: main
+Task: Existing UI edits + a11y + offline + mounting.
+
+Work Log:
+- flux-header.tsx: 6th settings tab "Tuning" — QoS slider (0–200 Mbit/s), Merkle toggle, accent picker, language picker, low-vision/reduce-motion/high-contrast rows, chime pack + haptics + quiet hours, clipboard sync, auto-open, background resilience, nearby visibility, speedrun re-run button. (PrefRow/SectionLabel helpers.)
+- sender-panel.tsx: mid-wait queue editing (4.5) — move up/down/remove per row + "Apply changes & refresh room" banner (explicit re-hash; no silent room swap).
+- file-picker.tsx: ShareLinkLauncher wired next to "Create transfer room" (onSendWithClaim prop).
+- transfer-summary-card.tsx: Download .zip (4.2), drag-out file chips (5.3), Send onward (6.2) — all gated on the verified-received cache.
+- diagnostics-panel.tsx: debug-bundle copy button (9.4), signaling region display (8.3), embedded TransparencyPanel (2.6).
+- qr-display.tsx: "Write to NFC tag" button (feature-detected, 3.3).
+- verification-code.tsx: digit-by-digit ARIA readout of the SAS (10.3).
+- particle-field.tsx + celebration.tsx: reduced-motion guards (zero animated nodes / static checkmark, 10.2).
+- snippet preview dialog: highlight/markdown/raw modes via lazy-loaded react-syntax-highlighter + react-markdown; composer: 1MB cap + snippet→QR (4.6).
+- globals.css: low-vision font scale, high-contrast borders, prefers-reduced-motion + .flux-reduce-motion kill switches.
+- sw.js → fluxdrop-v4: activate-time precache of all hashed _next chunks referenced by the landing (7.4).
+- page.tsx: I18nProvider wrapper, applyPersistedPrefs, background resilience hook (7.3), clipboard-sync toast listener (4.6), send-onward listener (6.2), palette dialog openers, NearbyDevices on landing, CommandPalette + SpeedrunDialog mounted, claim-aware startSend.
+
+---
+
+Task ID: v1.4-e
+Agent: main
+Task: i18n application.
+
+Work Log:
+- flux-hero.tsx, sender-panel.tsx, nearby-devices.tsx, command-palette.tsx, share-link-launcher.tsx, speedrun-dialog.tsx, transparency-panel.tsx, settings Tuning tab all read useT() with inline-English fallbacks. Dictionary coverage: hero, common actions, views, transfer states, all v4 surfaces (see src/lib/fluxdrop/i18n.tsx).
+
+---
+
+Task ID: v1.4-g
+Agent: main
+Task: Lint + typecheck + service health.
+
+Work Log:
+- `bunx tsc --noEmit`: clean. `bun run lint`: clean (fixed: nearby-devices setState-in-effect, speedrun unused-disable, cli signaling no-unused-expressions).
+- dev :3000 serving GET / 200 (compile ~500ms); signaling :3003 healthy (healthz ok, region local, v2.0.0).
+- tsconfig excludes extended with cli/, sdk/, src-tauri/ (scaffold dirs own their toolchains).
+
+---
+
+Task ID: v1.4-h
+Agent: main
+Task: End-to-end browser verification.
+
+Work Log:
+Results (two isolated agent-browser sessions through the Caddy gateway :81):
+- Transfer #1 (60 KB text, room MADCR9): consent → accept → COMPLETE, per-file SHA-256 ✓, "Merkle root verified independently (1 leaves)", "Send onward" visible on the completion card. Zero console/page errors.
+- Transfer #2 (8 MB binary, room QZTYW5, QoS cap 5 Mbit/s set via prefs): pacer engaged ("QoS cap set to 5 Mbit/s (window 0.30 MB)"), avg speed 152.4 KB/s (vs near-instant uncapped #1 — the throttle demonstrably works), "Merkle root verified independently (123 leaves)", COMPLETE.
+- Transfer #3 (small file, room ZZH74W): COMPLETE; "Send onward" clicked → receiver switched to Sender mode with "1 file re-queued — Verified bytes forwarded as a fresh transfer" (6.2 verified in-browser).
+- v4 surfaces exercised in-browser: first-run speedrun dialog (shown + skipped), ⌘K command palette (opened, action list verified), Settings → Tuning tab (all sections: QoS slider, Merkle switch, 5 accents, 6 locales, low-vision/reduce-motion/high-contrast, chime packs, haptics, quiet hours, clipboard sync, auto-open, background resilience, nearby visibility, demo re-run), Nearby Devices landing panel (visibility switch on), share-link launcher button in the picker.
+- Known-ephemeral: the transparency panel + debug-bundle button live inside DiagnosticsPanel, which mounts while a room is live pre-transfer — on localhost the window is sub-second so it was verified by code path + component render rather than a stable mid-flight screenshot.
+- End state: dev :3000 GET / 200 (no errors in dev.log), signaling healthz ok (region local, v2.0.0).

@@ -333,3 +333,74 @@
 .flux-glow-pulse {
   animation: flux-glow-pulse 3s ease-in-out infinite;
 }
+
+/* ============================================================
+   v4 accessibility & theming modes (10.2 / 10.3 / 5.5)
+   ============================================================ */
+
+/* 10.2: honor the OS-level reduced-motion preference (plus the manual
+   .flux-reduce-motion class toggled from Settings → Tuning). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+html.flux-reduce-motion *,
+html.flux-reduce-motion *::before,
+html.flux-reduce-motion *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+html.flux-reduce-motion .flux-beam,
+html.flux-reduce-motion .flux-glow-pulse,
+html.flux-reduce-motion .flux-shimmer {
+  animation: none !important;
+}
+
+/* 10.3: low-vision transfer mode — large type + stronger contrast on the
+   surfaces that matter during a transfer (progress, codes, buttons). */
+html.flux-lowvision {
+  font-size: 18px; /* base bump from 16px */
+}
+html.flux-lowvision .text-xs {
+  font-size: 0.9rem;
+}
+html.flux-lowvision .text-sm {
+  font-size: 1.05rem;
+}
+html.flux-lowvision .text-\[10px\], html.flux-lowvision .text-\[11px\] {
+  font-size: 0.85rem;
+}
+html.flux-lowvision .text-base {
+  font-size: 1.3rem;
+}
+html.flux-lowvision .text-lg {
+  font-size: 1.5rem;
+}
+html.flux-lowvision .text-xl {
+  font-size: 1.7rem;
+}
+html.flux-lowvision progress,
+html.flux-lowvision [role="progressbar"] {
+  height: 1rem;
+}
+
+/* 5.5 companion: high-contrast mode — punchier borders and text. */
+html.flux-highcontrast {
+  --border: oklch(0.45 0.02 176);
+  --muted-foreground: oklch(0.35 0.02 176);
+}
+html.flux-highcontrast.dark {
+  --border: oklch(0.75 0.02 176);
+  --muted-foreground: oklch(0.8 0.01 176);
+}
+html.flux-highcontrast .flux-glass {
+  background: color-mix(in oklch, var(--card) 92%, transparent);
+  backdrop-filter: none;
+}

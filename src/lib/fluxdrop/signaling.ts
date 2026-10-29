@@ -5,6 +5,7 @@
 
 import { io, type Socket } from 'socket.io-client'
 import { SIGNALING_EVENTS } from './protocol'
+import { recordSignalingEvent } from './telemetry'
 
 const SIGNALING_PORT = 3003
 
@@ -60,6 +61,16 @@ export class FluxDropSignaling {
     })
 
     const s = this.socket
+    // v4 (2.6): record inbound signaling events for the transparency panel.
+    const recordIn = (event: string) => (p: unknown) => {
+      try {
+        const bytes = p != null ? JSON.stringify(p).length : 0
+        recordSignalingEvent('in', event, bytes)
+      } catch { /* ignore */ }
+    }
+    for (const ev of Object.values(SIGNALING_EVENTS)) {
+      s.on(ev, recordIn(ev))
+    }
     s.on('connect', () => {
       this.callbacks.onConnect()
       // v1.1: rebind into the room after ANY (re)connection — without this a
@@ -145,60 +156,76 @@ export class FluxDropSignaling {
   }
 
   // === Emit helpers ===
-  createRoom(payload: { alias: string; deviceId: string; role: 'sender' | 'receiver'; withPin?: boolean }) {
-    this.socket?.emit(SIGNALING_EVENTS.CREATE_ROOM, payload)
+  /** Emit + record for the transparency panel (v4 2.6). */
+  private emit(event: string, payload: unknown): void {
+    try {
+      const bytes = payload != null ? JSON.stringify(payload).length : 0
+      recordSignalingEvent('out', event, bytes)
+    } catch { /* ignore */ }
+    this.socket?.emit(event, payload)
+  }
+
+  createRoom(payload: {
+    alias: string
+    deviceId: string
+    role: 'sender' | 'receiver'
+    withPin?: boolean
+    /** v4 (3.4): claim a pre-created share-link room (code+pin from POST /link). */
+    claim?: { roomCode: string; pin: string }
+  }) {
+    this.emit(SIGNALING_EVENTS.CREATE_ROOM, payload)
   }
 
   joinRoom(payload: { roomId: string; joinCode?: string; pin?: string; alias: string; deviceId: string; role: 'sender' | 'receiver' }) {
-    this.socket?.emit(SIGNALING_EVENTS.JOIN_ROOM, payload)
+    this.emit(SIGNALING_EVENTS.JOIN_ROOM, payload)
   }
 
   sendPairingRequest(payload: { roomId: string; from: string; to: string; transferSummary?: any }) {
-    this.socket?.emit(SIGNALING_EVENTS.PAIRING_REQUEST, payload)
+    this.emit(SIGNALING_EVENTS.PAIRING_REQUEST, payload)
   }
 
   sendPairingConfirm(payload: { roomId: string; from: string; to: string; accepted: boolean }) {
-    this.socket?.emit(SIGNALING_EVENTS.PAIRING_CONFIRM, payload)
+    this.emit(SIGNALING_EVENTS.PAIRING_CONFIRM, payload)
   }
 
   sendPairingReject(payload: { roomId: string; from: string; to: string; reason?: string }) {
-    this.socket?.emit(SIGNALING_EVENTS.PAIRING_REJECT, payload)
+    this.emit(SIGNALING_EVENTS.PAIRING_REJECT, payload)
   }
 
   sendOffer(payload: { roomId: string; from: string; to: string; sdp: RTCSessionDescriptionInit }) {
-    this.socket?.emit(SIGNALING_EVENTS.WEBRTC_OFFER, payload)
+    this.emit(SIGNALING_EVENTS.WEBRTC_OFFER, payload)
   }
 
   sendAnswer(payload: { roomId: string; from: string; to: string; sdp: RTCSessionDescriptionInit }) {
-    this.socket?.emit(SIGNALING_EVENTS.WEBRTC_ANSWER, payload)
+    this.emit(SIGNALING_EVENTS.WEBRTC_ANSWER, payload)
   }
 
   sendIce(payload: { roomId: string; from: string; to: string; candidate: RTCIceCandidateInit }) {
-    this.socket?.emit(SIGNALING_EVENTS.WEBRTC_ICE, payload)
+    this.emit(SIGNALING_EVENTS.WEBRTC_ICE, payload)
   }
 
   sendTransferManifest(payload: { roomId: string; from: string; to: string; manifest: any }) {
-    this.socket?.emit(SIGNALING_EVENTS.TRANSFER_MANIFEST, payload)
+    this.emit(SIGNALING_EVENTS.TRANSFER_MANIFEST, payload)
   }
 
   sendTransferAccepted(payload: { roomId: string; from: string; to: string; accepted: boolean; reason?: string }) {
-    this.socket?.emit(SIGNALING_EVENTS.TRANSFER_ACCEPTED, payload)
+    this.emit(SIGNALING_EVENTS.TRANSFER_ACCEPTED, payload)
   }
 
   sendTransferComplete(payload: { roomId: string; from: string; to: string }) {
-    this.socket?.emit(SIGNALING_EVENTS.TRANSFER_COMPLETE, payload)
+    this.emit(SIGNALING_EVENTS.TRANSFER_COMPLETE, payload)
   }
 
   sendTransferCancel(payload: { roomId: string; from: string; to: string; reason?: string }) {
-    this.socket?.emit(SIGNALING_EVENTS.TRANSFER_CANCEL, payload)
+    this.emit(SIGNALING_EVENTS.TRANSFER_CANCEL, payload)
   }
 
   sendResumeRequest(payload: { roomId: string; from: string; to: string; transferId: string; lastChunkIndex: number }) {
-    this.socket?.emit(SIGNALING_EVENTS.RESUME_REQUEST, payload)
+    this.emit(SIGNALING_EVENTS.RESUME_REQUEST, payload)
   }
 
   sendResumeResponse(payload: { roomId: string; from: string; to: string; transferId: string; accepted: boolean; fromChunkIndex?: number }) {
-    this.socket?.emit(SIGNALING_EVENTS.RESUME_RESPONSE, payload)
+    this.emit(SIGNALING_EVENTS.RESUME_RESPONSE, payload)
   }
 
   heartbeat(roomId: string) {
@@ -210,11 +237,11 @@ export class FluxDropSignaling {
    * The server membership-checks and forwards without looking inside.
    */
   sendE2ERelay(payload: { roomId: string; from: string; to: string; data: unknown }) {
-    this.socket?.emit(SIGNALING_EVENTS.E2E_RELAY, payload)
+    this.emit(SIGNALING_EVENTS.E2E_RELAY, payload)
   }
 
   leaveRoom() {
-    this.socket?.emit(SIGNALING_EVENTS.LEAVE_ROOM)
+    this.emit(SIGNALING_EVENTS.LEAVE_ROOM, {})
   }
 
   disconnect() {

@@ -17,17 +17,26 @@ export function Celebration({ trigger, onComplete }: CelebrationProps) {
   const [show, setShow] = useState(false)
 
   useEffect(() => {
+    // v4 (10.2): reduced motion (OS pref or the manual toggle) — show a brief
+    // static checkmark instead of the confetti burst.
+    const reduced =
+      window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ||
+      document.documentElement.classList.contains('flux-reduce-motion')
     if (trigger) {
       setShow(true)
       const id = setTimeout(() => {
         setShow(false)
         onComplete?.()
-      }, 2500)
+      }, reduced ? 800 : 2500)
       return () => clearTimeout(id)
     }
   }, [trigger, onComplete])
 
-  const particles = Array.from({ length: 32 })
+  const reducedNow =
+    typeof window !== 'undefined' &&
+    (window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ||
+      document.documentElement.classList.contains('flux-reduce-motion'))
+  const particles = reducedNow ? [] : Array.from({ length: 32 })
 
   return (
     <AnimatePresence>

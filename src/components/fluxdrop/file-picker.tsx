@@ -10,15 +10,18 @@ import { CONSTANTS } from '@/lib/fluxdrop/protocol'
 import { FileIcon, getFileCategoryColors } from './file-icon'
 import { FilePreview } from './file-preview'
 import { TextSnippetShare } from './text-snippet-share'
+import { ShareLinkLauncher } from './share-link-launcher'
 
 interface FilePickerProps {
   files: File[]
   onFilesChange: (files: File[]) => void
   onSend: () => void
+  /** v4 (3.4): entry point for the expiring-share-link flow (claims a pre-created room). */
+  onSendWithClaim?: (files: File[], resumeManifest: undefined, claim: { roomCode: string; pin: string }) => void
   disabled?: boolean
 }
 
-export function FilePicker({ files, onFilesChange, onSend, disabled }: FilePickerProps) {
+export function FilePicker({ files, onFilesChange, onSend, onSendWithClaim, disabled }: FilePickerProps) {
   const [isDragging, setIsDragging] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
@@ -213,14 +216,22 @@ export function FilePicker({ files, onFilesChange, onSend, disabled }: FilePicke
             </div>
           )}
 
-          <Button
-            onClick={onSend}
-            disabled={disabled || !validation.ok || files.length === 0}
-            className="w-full h-12 text-base bg-flux-600 hover:bg-flux-700 text-white shadow-lg shadow-flux-600/25"
-          >
-            <UploadCloud className="mr-2 h-5 w-5" />
-            Create transfer room
-          </Button>
+          <div className="space-y-2">
+            <Button
+              onClick={onSend}
+              disabled={disabled || !validation.ok || files.length === 0}
+              className="w-full h-12 text-base bg-flux-600 hover:bg-flux-700 text-white shadow-lg shadow-flux-600/25"
+            >
+              <UploadCloud className="mr-2 h-5 w-5" />
+              Create transfer room
+            </Button>
+            {/* v4 (3.4): expiring share link — same files, pre-created room, link-first flow */}
+            {onSendWithClaim && (
+              <div className="flex justify-center">
+                <ShareLinkLauncher files={files} onStartSend={onSendWithClaim} disabled={disabled || !validation.ok} />
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

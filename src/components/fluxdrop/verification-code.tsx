@@ -91,6 +91,11 @@ export function VerificationCode() {
             className={`font-mono text-xl font-bold tracking-widest ${
               active ? 'text-flux-600 dark:text-flux-400' : failed ? 'text-destructive' : 'text-muted-foreground'
             }`}
+            aria-label={
+              active
+                ? `Security verification code. Compare with the other device: ${code.split('').join(' ')}`
+                : undefined
+            }
           >
             {failed ? '------' : code}
           </code>

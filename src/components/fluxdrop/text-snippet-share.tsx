@@ -1,12 +1,14 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { MessageSquare, Send, X, Copy, ClipboardPaste } from 'lucide-react'
+import { MessageSquare, Send, X, Copy, ClipboardPaste, QrCode } from 'lucide-react'
+import { QRCodeCanvas } from 'qrcode.react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
+import { SNIPPET_MAX_CHARS, SNIPPET_QR_MAX_CHARS } from '@/lib/fluxdrop/snippet'
 
 interface TextSnippetShareProps {
   /** Called with a ready-to-transfer .txt File built from the snippet text. */
@@ -14,7 +16,7 @@ interface TextSnippetShareProps {
   disabled?: boolean
 }
 
-const MAX_TEXT_LENGTH = 10000
+const MAX_TEXT_LENGTH = SNIPPET_MAX_CHARS
 
 /** Build a friendly, sortable snippet filename like `snippet-2026-10-12-0930.txt`. */
 export function makeSnippetFileName(date = new Date()): string {
@@ -40,6 +42,7 @@ export function TextSnippetShare({ onShare, disabled }: TextSnippetShareProps) {
   const [open, setOpen] = useState(false)
   const [text, setText] = useState('')
   const [copied, setCopied] = useState(false)
+  const [showQr, setShowQr] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   // Autofocus + Escape-to-close while the dialog is open.
@@ -162,10 +165,36 @@ export function TextSnippetShare({ onShare, disabled }: TextSnippetShareProps) {
                 <Copy className="mr-1 h-3 w-3" />
                 {copied ? 'Copied' : 'Copy'}
               </Button>
+              {/* v4 (4.6): snippet → QR for tiny payloads — no connection needed */}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowQr((v) => !v)}
+                disabled={!text || text.length > SNIPPET_QR_MAX_CHARS}
+                className="text-xs"
+                title={
+                  text.length > SNIPPET_QR_MAX_CHARS
+                    ? `QR scan works up to ${SNIPPET_QR_MAX_CHARS} characters`
+                    : 'Show a QR of this snippet — scannable without any connection'
+                }
+              >
+                <QrCode className="mr-1 h-3 w-3" />
+                QR
+              </Button>
               <span className="ml-auto text-[10px] text-muted-foreground hidden sm:inline">
                 ⌘/Ctrl + Enter to add
               </span>
             </div>
+
+            {/* QR preview for tiny snippets */}
+            {showQr && text.length <= SNIPPET_QR_MAX_CHARS && (
+              <div className="flex flex-col items-center gap-2 rounded-lg border border-flux-500/30 bg-flux-500/5 p-4">
+                <QRCodeCanvas value={text} size={180} marginSize={2} aria-label="Snippet QR code" />
+                <p className="text-[10px] text-muted-foreground">
+                  Scan on the other device — no pairing, no connection, no server.
+                </p>
+              </div>
+            )}
 
             <div className="flex justify-end gap-2 pt-2 border-t border-border/50">
               <Button variant="outline" onClick={() => setOpen(false)}>

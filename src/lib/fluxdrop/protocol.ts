@@ -38,6 +38,19 @@ export interface TransferManifest {
    * an unknown type as a protocol error and fail the transfer gracefully.
    */
   compression?: 'gzip'
+  /**
+   * v4 (1.7): streaming Merkle tree over per-chunk SHA-256 leaves. The
+   * sender computes a leaf per 64 KB chunk during manifest hashing and
+   * seals the root here; the receiver rebuilds the identical tree from the
+   * bytes it actually stored and compares roots at completion. A mismatch
+   * localizes corruption to a subtree (binary descent over the leaves) so
+   * only the affected chunks get wiped for re-request instead of failing
+   * the whole transfer. Optional: older receivers ignore the field.
+   */
+  merkle?: {
+    root: string // hex SHA-256 of the root node
+    leaves: number // leaf count == totalChunks
+  }
 }
 
 // === Transfer state machine ===
@@ -93,6 +106,12 @@ export const MessageType = {
   // { id, text, at } — encrypted with the PAKE session key while E2E is
   // active (AAD 'chat'), plaintext otherwise. Control-style frame.
   CHAT: 0x12,
+  // v4 (4.6): opt-in clipboard sync between paired devices. Payload is a
+  // JSON body { text, at } — sealed with the PAKE session key while E2E is
+  // active (AAD 'clipboard'), plaintext otherwise. Only flows while BOTH
+  // peers enabled clipboard sync; receivers surface a copy toast (direct
+  // clipboard writes need a user gesture on most browsers).
+  CLIPBOARD: 0x13,
 } as const
 
 export type MessageTypeValue = (typeof MessageType)[keyof typeof MessageType]

@@ -24,6 +24,14 @@ import { SaveConflictDialogHost } from '@/components/fluxdrop/save-conflict-dial
 import { ChatPanel } from '@/components/fluxdrop/chat-panel'
 import { ActivityDock } from '@/components/fluxdrop/activity-dock'
 import { VerificationCode } from '@/components/fluxdrop/verification-code'
+// v4 additions
+import { CommandPalette } from '@/components/fluxdrop/command-palette'
+import { SpeedrunDialog } from '@/components/fluxdrop/speedrun-dialog'
+import { NearbyDevices } from '@/components/fluxdrop/nearby-devices'
+import { I18nProvider } from '@/lib/fluxdrop/i18n'
+import { applyPersistedPrefs } from '@/lib/fluxdrop/prefs'
+import { useBackgroundResilience } from '@/hooks/fluxdrop/use-background-resilience'
+import { onClipboardSync } from '@/lib/fluxdrop/clipboard-sync'
 import { useFluxDrop } from '@/hooks/fluxdrop/use-fluxdrop'
 import { useKeyboardShortcuts } from '@/hooks/fluxdrop/use-keyboard-shortcuts'
 import { useSessionStore } from '@/stores/session-store'
@@ -142,8 +150,7 @@ export default function Home() {
   }, [setView])
 
   const goSend = useCallback(() => setView('sender'), [setView])
-  const goReceive = useCallback(() => setView('receiver'), [setView])
-  // v1.3 (5.1): the activity dock's "Go to transfer" — navigate to whichever
+  const goReceive = useCallback(() => setView('receiver'), [setView])  // v1.3 (5.1): the activity dock's "Go to transfer" — navigate to whichever
   // side owns the ACTIVE transfer: the sender view when this device is
   // streaming to receiver-role peers, otherwise the receiver view.
   const jumpToActiveTransfer = useCallback(() => {
@@ -182,6 +189,76 @@ export default function Home() {
     },
     view
   )
+
+  // v4 (7.3): background resilience — auto-pause when hidden/frozen, resume + notify on return.
+  useBackgroundResilience(
+    flux.pauseTransfer,
+    flux.resumeTransfer,
+    () => toast.info('Transfer resumed', { description: 'Welcome back — continuing where we left off.' })
+  )
+
+  // v4: external openers (command palette) for the dialogs the page owns.
+  useEffect(() => {
+    const openSettings = () => setSettingsOpen(true)
+    const openHelp = () => setHelpOpen(true)
+    const openShortcuts = () => setShortcutsOpen(true)
+    window.addEventListener('fluxdrop:open-settings', openSettings)
+    window.addEventListener('fluxdrop:open-help', openHelp)
+    window.addEventListener('fluxdrop:open-shortcuts', openShortcuts)
+    return () => {
+      window.removeEventListener('fluxdrop:open-settings', openSettings)
+      window.removeEventListener('fluxdrop:open-help', openHelp)
+      window.removeEventListener('fluxdrop:open-shortcuts', openShortcuts)
+    }
+  }, [])
+
+  // v4 (4.6): incoming clipboard sync — surfaces a one-tap Copy toast (direct
+  // clipboard writes need a user gesture on most browsers).
+  useEffect(() => {
+    const un = onClipboardSync((frame) => {
+      const preview = frame.text.length > 60 ? `${frame.text.slice(0, 60)}…` : frame.text
+      const id = `clip-sync-${Date.now()}`
+      toast('Clipboard synced from your peer', {
+        id,
+        description: preview,
+        duration: 12_000,
+        action: {
+          label: 'Copy',
+          onClick: () => {
+            void navigator.clipboard.writeText(frame.text).then(() => toast.success('Copied to your clipboard'))
+          },
+        },
+      })
+    })
+    return un
+  }, [])
+
+  // v4 (6.2): "Send onward" — re-queue verified received files into a fresh send.
+  useEffect(() => {
+    const onOnward = (e: Event) => {
+      const transferId = (e as CustomEvent).detail?.transferId as string | undefined
+      if (!transferId) return
+      const files = flux.getReceivedFiles(transferId)
+      if (!files || files.length === 0) {
+        toast.error('Files no longer available', {
+          description: 'The received blobs live in memory — they were cleared by a reload. Use the Files vault instead.',
+        })
+        return
+      }
+      setFiles(files)
+      setView('sender')
+      toast.success(`${files.length} file${files.length > 1 ? 's' : ''} re-queued`, {
+        description: 'Verified bytes forwarded as a fresh transfer — create a room to send them onward.',
+      })
+    }
+    window.addEventListener('fluxdrop:send-onward', onOnward)
+    return () => window.removeEventListener('fluxdrop:send-onward', onOnward)
+  }, [flux, setView])
+
+  // v4 (5.5/10.3): apply persisted visual prefs (accent, low-vision, contrast) once on mount.
+  useEffect(() => {
+    applyPersistedPrefs()
+  }, [])
 
   // Resume handler: re-enter sender mode with the record's persisted files.
   // Files are stored in IndexedDB when a send starts and removed on completion.
@@ -282,7 +359,8 @@ export default function Home() {
   }, [view, dropEnabled])
 
   return (
-    <div className="flex min-h-screen flex-col">
+    <I18nProvider>
+      <div className="flex min-h-screen flex-col">
       <FluxHeader onOpenSettings={() => setSettingsOpen(true)} onOpenHelp={() => setHelpOpen(true)} />
 
       <main className="flex-1">
@@ -299,6 +377,8 @@ export default function Home() {
               <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 pb-16 space-y-6">
                 <TipsBanner />
                 <StatsDashboard />
+                {/* v4 (3.2): LAN discovery — same-subnet FluxDrop devices */}
+                <NearbyDevices />
                 {/* v1.3 (4.1): persistent received-files vault (kept in OPFS) */}
                 <VaultView />
                 <TransferHistory onResume={handleResume} />
@@ -326,10 +406,10 @@ export default function Home() {
                   files={files}
                   setFiles={setFiles}
                   isResuming={!!resumeManifest}
-                  onStartSend={(fs) => {
-                    const rm = resumeManifest
+                  onStartSend={(fs, rm, claim) => {
+                    const rmv = rm ?? resumeManifest
                     setResumeManifest(null)
-                    void flux.startSend(fs, rm ?? undefined)
+                    void flux.startSend(fs, rmv ?? undefined, claim)
                   }}
                   onCancel={() => flux.cancelTransfer('Sender cancelled')}
                   onDone={goHome}
@@ -408,6 +488,13 @@ export default function Home() {
 
       {/* Security verification code (shown during active transfer) */}
       <VerificationCode />
-    </div>
+
+      {/* v4 (5.2): command palette (⌘K) */}
+      <CommandPalette />
+
+      {/* v4 (5.6): first-run speedrun / demo */}
+      <SpeedrunDialog />
+      </div>
+    </I18nProvider>
   )
 }

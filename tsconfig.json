@@ -44,6 +44,9 @@
     "examples",
     "mini-services",
     "scripts",
-    "docs"
+    "docs",
+    "cli",
+    "sdk",
+    "src-tauri"
   ]
 }

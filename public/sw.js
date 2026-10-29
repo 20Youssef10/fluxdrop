@@ -6,7 +6,7 @@
 // Bump CACHE_VERSION on every release so installed clients pick up fresh
 // assets on the next activate (old caches are purged).
 
-const CACHE_NAME = 'fluxdrop-v3'
+const CACHE_NAME = 'fluxdrop-v4'
 const APP_SHELL = [
   '/',
   '/offline.html',
@@ -51,9 +51,39 @@ self.addEventListener('install', (event) => {
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
-    )
+    (async () => {
+      // Purge old caches.
+      const keys = await caches.keys()
+      await Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
+      // v4 (7.4): offline-first landing — after activation, fetch the live
+      // landing HTML and precache every hashed _next asset it references so
+      // the FULL landing (not just the cached HTML document with missing
+      // chunks) survives going offline before every chunk was ever fetched.
+      try {
+        const cache = await caches.open(CACHE_NAME)
+        const res = await fetch('/', { cache: 'no-store' })
+        if (res && res.ok) {
+          const html = await res.text()
+          await cache.put('/', res)
+          const assetUrls = new Set()
+          const re = /(?:src|href)="([^"]+)"/g
+          let m
+          while ((m = re.exec(html)) !== null) {
+            const u = m[1]
+            if (u.startsWith('/_next/') || u.startsWith('/icons/') || (u.endsWith('.css') && u.startsWith('/'))) {
+              assetUrls.add(u.split('?')[0])
+            }
+          }
+          await Promise.all(
+            [...assetUrls].map((u) =>
+              cache.match(u).then((hit) => {
+                if (!hit) return cache.add(u).catch(() => {})
+              })
+            )
+          )
+        }
+      } catch { /* offline already — cached copy stays */ }
+    })()
   )
   self.clients.claim()
 })

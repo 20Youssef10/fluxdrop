@@ -2,7 +2,7 @@
 
 import { useRef, useState } from 'react'
 import { QRCodeCanvas } from 'qrcode.react'
-import { RefreshCw, Share2, KeyRound, Clock, Download, QrCode } from 'lucide-react'
+import { RefreshCw, Share2, KeyRound, Clock, Download, QrCode, Nfc } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -12,6 +12,7 @@ import { shortId } from '@/lib/fluxdrop/format'
 import { toast } from 'sonner'
 import { useEffect } from 'react'
 import { CopyButton } from './copy-button'
+import { isNfcSupported, writeNfcUrl } from '@/lib/fluxdrop/nfc'
 
 export function QRDisplay() {
   const roomId = useSessionStore((s) => s.roomId)
@@ -21,7 +22,13 @@ export function QRDisplay() {
   const roomCreatedAt = useSessionStore((s) => s.roomCreatedAt)
   const [elapsed, setElapsed] = useState(0)
   const [exporting, setExporting] = useState(false)
+  const [nfcSupported, setNfcSupported] = useState(false)
   const qrWrapRef = useRef<HTMLDivElement>(null)
+
+  // v4 (3.3): NFC capability is decided on the client (SSR has no NDEFReader).
+  useEffect(() => {
+    setNfcSupported(isNfcSupported())
+  }, [])
 
   useEffect(() => {
     if (!roomCreatedAt) return
@@ -206,6 +213,25 @@ export function QRDisplay() {
             <Download className="mr-1.5 h-3.5 w-3.5" />
             {exporting ? 'Exporting…' : 'Download QR as PNG'}
           </Button>
+
+          {/* v4 (3.3): NFC tap-to-pair — Android Chrome writes the join URL
+              as a URI record; other platforms never see the button. */}
+          {nfcSupported && (
+            <Button
+              variant="ghost"
+              onClick={async () => {
+                const res = await writeNfcUrl(shareLink)
+                if (res === 'written') toast.success('Written to the NFC tag', { description: 'Tap the receiving phone on the tag to open the join link.' })
+                else if (res === 'cancelled') toast.info('NFC write cancelled', { description: 'Present the tag within 20 seconds and try again.' })
+                else if (res !== 'unsupported') toast.error('NFC write failed', { description: String(res) })
+              }}
+              className="mt-1 w-full text-muted-foreground hover:text-foreground text-xs"
+              title="Write the join link to an NFC tag (Android)"
+            >
+              <Nfc className="mr-1.5 h-3.5 w-3.5" />
+              Write to NFC tag
+            </Button>
+          )}
 
           <p className="mt-4 flex items-center gap-1.5 text-xs text-muted-foreground">
             <QrCode className="h-3.5 w-3.5" />

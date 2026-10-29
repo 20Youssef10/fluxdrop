@@ -1,7 +1,7 @@
 'use client'
 
 import { useTheme } from 'next-themes'
-import { Moon, Sun, Settings, Wifi, WifiOff, Plus, Trash2, Server, User, Shield, ShieldCheck, HelpCircle, Bell, Volume2, BellOff, VolumeX, BadgeCheck, RotateCcw, Zap, Lock, Archive } from 'lucide-react'
+import { Moon, Sun, Settings, Wifi, WifiOff, Plus, Trash2, Server, User, Shield, ShieldCheck, HelpCircle, Bell, Volume2, BellOff, VolumeX, BadgeCheck, RotateCcw, Zap, Lock, Archive, SlidersHorizontal, Palette, Languages, Vibrate, Smartphone, PlayCircle, Timer } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -16,6 +16,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Switch } from '@/components/ui/switch'
+import { Slider } from '@/components/ui/slider'
 import { Separator } from '@/components/ui/separator'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useState, useEffect, useCallback } from 'react'
@@ -27,6 +28,9 @@ import { getTrustedPeers, removeTrustedPeer, clearTrustedPeers, setTrustedPeerSc
 import { wipeChunkCache } from '@/lib/fluxdrop/resume'
 import { listVault, deleteVaultEntry, vaultSupported, enforceVaultBudget } from '@/lib/fluxdrop/vault'
 import { formatBytes } from '@/lib/fluxdrop/format'
+import { usePrefsStore, ACCENTS, type AccentId, type LocaleId, type SoundPack } from '@/lib/fluxdrop/prefs'
+import { LOCALES } from '@/lib/fluxdrop/i18n'
+import { useT } from '@/lib/fluxdrop/i18n'
 import { FluxLogo, FluxWordmark } from './flux-logo'
 
 export function FluxHeader({ onOpenSettings, onOpenHelp }: { onOpenSettings?: () => void; onOpenHelp?: () => void }) {
@@ -198,6 +202,9 @@ export function SettingsDialog({
   // v1.3 (4.1): Files vault — on-device keep of verified received transfers
   const vaultEnabled = useSessionStore((s) => s.vaultEnabled)
   const setVaultEnabled = useSessionStore((s) => s.setVaultEnabled)
+  // v4: central prefs (accent, i18n, QoS, sounds, sync, a11y)
+  const prefs = usePrefsStore()
+  const t = useT()
   const vaultBudgetMb = useSessionStore((s) => s.vaultBudgetMb)
   const setVaultBudgetMb = useSessionStore((s) => s.setVaultBudgetMb)
   const vaultOk = vaultSupported()
@@ -335,7 +342,7 @@ export function SettingsDialog({
           </DialogDescription>
         </DialogHeader>
         <Tabs defaultValue="device" className="w-full">
-          <TabsList className="grid w-full grid-cols-5">
+          <TabsList className="grid w-full grid-cols-6">
             <TabsTrigger value="device" className="text-xs">
               <User className="mr-1.5 h-3.5 w-3.5" />
               Device
@@ -355,6 +362,11 @@ export function SettingsDialog({
             <TabsTrigger value="vault" className="text-xs">
               <Archive className="mr-1.5 h-3.5 w-3.5" />
               Vault
+            </TabsTrigger>
+            {/* v4: tuning — performance, appearance & access, sounds, sync */}
+            <TabsTrigger value="tuning" className="text-xs">
+              <SlidersHorizontal className="mr-1.5 h-3.5 w-3.5" />
+              Tuning
             </TabsTrigger>
           </TabsList>
 
@@ -824,6 +836,239 @@ export function SettingsDialog({
               </>
             )}
           </TabsContent>
+
+          {/* v4: Tuning tab — performance, appearance & access, sounds & haptics,
+              sync & automation. Everything applies instantly via the prefs store. */}
+          <TabsContent value="tuning" className="space-y-5 mt-4">
+            {/* --- Performance --- */}
+            <section className="space-y-3">
+              <SectionLabel icon={<Zap className="h-3.5 w-3.5" />} label={t('settings.performance', 'Performance')} />
+              <div className="rounded-lg border border-border/60 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="pr-3">
+                    <p className="text-sm font-medium">Bandwidth cap (QoS)</p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      Polite mode — pace the send so a big transfer doesn&apos;t saturate the LAN/hotspot.
+                    </p>
+                  </div>
+                  <span className="shrink-0 text-xs font-semibold tabular-nums text-flux-600 dark:text-flux-400">
+                    {prefs.qosCapMbps === 0 ? 'Unlimited' : `${prefs.qosCapMbps} Mbit/s`}
+                  </span>
+                </div>
+                <Slider
+                  value={[prefs.qosCapMbps]}
+                  min={0}
+                  max={200}
+                  step={5}
+                  onValueChange={([v]) => prefs.setQosCapMbps(v)}
+                  className="mt-3"
+                  aria-label="Bandwidth cap in megabits per second"
+                />
+                <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
+                  <span>0 = uncapped</span>
+                  <span>100</span>
+                  <span>200 Mbit/s</span>
+                </div>
+              </div>
+              <PrefRow
+                icon={<ShieldCheck className="h-4.5 w-4.5" />}
+                title="Merkle integrity tree"
+                desc="Seal a per-chunk Merkle root into the manifest and independently re-verify it on arrival. Adds a pre-send read pass (skipped above 2 GB)."
+                checked={prefs.merkleEnabled}
+                onCheckedChange={prefs.setMerkleEnabled}
+              />
+            </section>
+
+            {/* --- Appearance & access --- */}
+            <section className="space-y-3">
+              <SectionLabel icon={<Palette className="h-3.5 w-3.5" />} label={t('settings.appearance', 'Appearance & access')} />
+              <div className="rounded-lg border border-border/60 p-3">
+                <p className="text-sm font-medium">{t('settings.accent', 'Accent color')}</p>
+                <div className="mt-2.5 flex flex-wrap gap-2">
+                  {(Object.keys(ACCENTS) as AccentId[]).map((id) => (
+                    <button
+                      key={id}
+                      onClick={() => prefs.setAccent(id)}
+                      className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                        prefs.accent === id
+                          ? 'border-flux-500/60 bg-flux-500/10 font-medium'
+                          : 'border-border/60 hover:bg-card/60'
+                      }`}
+                      aria-pressed={prefs.accent === id}
+                    >
+                      <span
+                        className="h-2.5 w-2.5 rounded-full"
+                        style={{ background: `oklch(0.62 ${ACCENTS[id].chroma} ${ACCENTS[id].hue})` }}
+                        aria-hidden
+                      />
+                      {ACCENTS[id].label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="rounded-lg border border-border/60 p-3">
+                <p className="flex items-center gap-1.5 text-sm font-medium">
+                  <Languages className="h-3.5 w-3.5" aria-hidden />
+                  {t('settings.language', 'Language')}
+                </p>
+                <div className="mt-2.5 flex flex-wrap gap-2">
+                  {LOCALES.map((l) => (
+                    <button
+                      key={l.id}
+                      onClick={() => prefs.setLocale(l.id as LocaleId)}
+                      className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                        prefs.locale === l.id
+                          ? 'border-flux-500/60 bg-flux-500/10 font-medium'
+                          : 'border-border/60 hover:bg-card/60'
+                      }`}
+                      aria-pressed={prefs.locale === l.id}
+                    >
+                      {l.native}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <PrefRow
+                icon={<BadgeCheck className="h-4.5 w-4.5" />}
+                title="Low-vision transfer mode"
+                desc="Large-type progress, extra contrast, and an ARIA live readout of the verification code."
+                checked={prefs.lowVision}
+                onCheckedChange={prefs.setLowVision}
+              />
+              <PrefRow
+                icon={<Zap className="h-4.5 w-4.5" />}
+                title="Reduce motion"
+                desc="Force minimal animations (also honored automatically via prefers-reduced-motion)."
+                checked={prefs.reduceMotion}
+                onCheckedChange={prefs.setReduceMotion}
+              />
+              <PrefRow
+                icon={<Sun className="h-4.5 w-4.5" />}
+                title="High contrast"
+                desc="Boost borders and text contrast across the app."
+                checked={prefs.highContrast}
+                onCheckedChange={prefs.setHighContrast}
+              />
+            </section>
+
+            {/* --- Sounds & haptics --- */}
+            <section className="space-y-3">
+              <SectionLabel icon={<Volume2 className="h-3.5 w-3.5" />} label={t('settings.sounds', 'Sounds & haptics')} />
+              <div className="rounded-lg border border-border/60 p-3">
+                <p className="text-sm font-medium">Chime pack</p>
+                <div className="mt-2.5 flex gap-2">
+                  {(['calm', 'lively', 'silent'] as SoundPack[]).map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => prefs.setSoundPack(p)}
+                      className={`flex-1 rounded-md border px-2 py-1.5 text-[11px] capitalize transition-colors ${
+                        prefs.soundPack === p
+                          ? 'border-flux-500/60 bg-flux-500/10 font-medium'
+                          : 'border-border/60 hover:bg-card/60'
+                      }`}
+                      aria-pressed={prefs.soundPack === p}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <PrefRow
+                icon={<Vibrate className="h-4.5 w-4.5" />}
+                title="Haptics"
+                desc="navigator.vibrate buzz on completion and errors (mobile browsers)."
+                checked={prefs.hapticsEnabled}
+                onCheckedChange={prefs.setHapticsEnabled}
+              />
+              <div className="rounded-lg border border-border/60 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="pr-3">
+                    <p className="flex items-center gap-1.5 text-sm font-medium">
+                      <Timer className="h-3.5 w-3.5" aria-hidden />
+                      Quiet hours
+                    </p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      Mute chimes during a window (e.g. 22:00 → 08:00).
+                    </p>
+                  </div>
+                  <Switch
+                    checked={prefs.quietHours.enabled}
+                    onCheckedChange={(v) => prefs.setQuietHours({ enabled: v })}
+                    aria-label="Enable quiet hours"
+                  />
+                </div>
+                {prefs.quietHours.enabled && (
+                  <div className="mt-2.5 grid grid-cols-2 gap-2">
+                    <label className="space-y-1 text-[11px] text-muted-foreground">
+                      From (h)
+                      <Input
+                        type="number"
+                        min={0}
+                        max={23}
+                        value={prefs.quietHours.from}
+                        onChange={(e) => prefs.setQuietHours({ from: Math.max(0, Math.min(23, Number(e.target.value) || 0)) })}
+                      />
+                    </label>
+                    <label className="space-y-1 text-[11px] text-muted-foreground">
+                      To (h)
+                      <Input
+                        type="number"
+                        min={0}
+                        max={23}
+                        value={prefs.quietHours.to}
+                        onChange={(e) => prefs.setQuietHours({ to: Math.max(0, Math.min(23, Number(e.target.value) || 0)) })}
+                      />
+                    </label>
+                  </div>
+                )}
+              </div>
+            </section>
+
+            {/* --- Sync & automation --- */}
+            <section className="space-y-3">
+              <SectionLabel icon={<Smartphone className="h-3.5 w-3.5" />} label={t('settings.sync', 'Sync & automation')} />
+              <PrefRow
+                icon={<Lock className="h-4.5 w-4.5" />}
+                title="Clipboard sync (both devices opt in)"
+                desc="Forward copied text to the paired device over the DataChannel — E2E-encrypted while PAKE is active."
+                checked={prefs.clipboardSync}
+                onCheckedChange={prefs.setClipboardSync}
+              />
+              <PrefRow
+                icon={<PlayCircle className="h-4.5 w-4.5" />}
+                title="Auto-open first file on completion"
+                desc="Open the first received file the moment the transfer verifies."
+                checked={prefs.autoOpenFirstFile}
+                onCheckedChange={prefs.setAutoOpenFirstFile}
+              />
+              <PrefRow
+                icon={<Smartphone className="h-4.5 w-4.5" />}
+                title="Background resilience"
+                desc="Auto-pause when the tab hides or freezes; auto-resume + notify on return."
+                checked={prefs.backgroundResilience}
+                onCheckedChange={prefs.setBackgroundResilience}
+              />
+              <PrefRow
+                icon={<Wifi className="h-4.5 w-4.5" />}
+                title="Visible to nearby devices"
+                desc="Announce this device on the LAN discovery panel (same-subnet, pet names only — never IPs)."
+                checked={prefs.nearbyVisible}
+                onCheckedChange={prefs.setNearbyVisible}
+              />
+              <button
+                onClick={() => {
+                  onOpenChange(false)
+                  setTimeout(() => window.dispatchEvent(new CustomEvent('fluxdrop:open-speedrun')), 250)
+                }}
+                className="w-full rounded-lg border border-flux-500/40 bg-flux-500/5 p-3 text-left text-xs transition-colors hover:bg-flux-500/10"
+              >
+                <span className="font-medium text-flux-700 dark:text-flux-300">Re-run the 10-second demo</span>
+                <span className="mt-0.5 block text-muted-foreground">
+                  The first-run speedrun that simulates a full transfer in-app.
+                </span>
+              </button>
+            </section>
+          </TabsContent>
         </Tabs>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
@@ -844,6 +1089,53 @@ export function SettingsDialog({
  * (role="switch" + aria-checked) so the touch target comfortably exceeds the
  * tiny bare Switch track while keeping the settings' visual language.
  */
+/** v4: section label for the Tuning tab. */
+function SectionLabel({ icon, label }: { icon: React.ReactNode; label: string }) {
+  return (
+    <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+      <span className="text-flux-600 dark:text-flux-400" aria-hidden>
+        {icon}
+      </span>
+      {label}
+    </p>
+  )
+}
+
+/** v4: instantly-applied preference row (switch + icon + copy). */
+function PrefRow({
+  icon,
+  title,
+  desc,
+  checked,
+  onCheckedChange,
+}: {
+  icon: React.ReactNode
+  title: string
+  desc: string
+  checked: boolean
+  onCheckedChange: (v: boolean) => void
+}) {
+  return (
+    <div className="flex items-center justify-between rounded-lg border border-border/60 p-3">
+      <div className="flex items-center gap-3 pr-3">
+        <div
+          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
+            checked ? 'bg-flux-500/10 text-flux-600 dark:text-flux-400' : 'bg-muted text-muted-foreground'
+          }`}
+          aria-hidden
+        >
+          {icon}
+        </div>
+        <div>
+          <p className="text-sm font-medium">{title}</p>
+          <p className="mt-0.5 max-w-md text-xs text-muted-foreground">{desc}</p>
+        </div>
+      </div>
+      <Switch checked={checked} onCheckedChange={onCheckedChange} aria-label={title} />
+    </div>
+  )
+}
+
 function ScopeChip({
   label,
   checked,

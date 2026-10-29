@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { ArrowLeft, Send, RotateCcw } from 'lucide-react'
+import { ArrowDown, ArrowLeft, ArrowUp, RotateCcw, Send, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { FilePicker } from './file-picker'
 import { QRDisplay } from './qr-display'
@@ -18,11 +18,12 @@ import { formatBytes, fileTypeCategory } from '@/lib/fluxdrop/format'
 import { FileIcon, getFileCategoryColors } from './file-icon'
 import { FilePreview } from './file-preview'
 import { HashingProgress } from './hashing-progress'
+import { useT } from '@/lib/fluxdrop/i18n'
 
 interface SenderPanelProps {
   files: File[]
   setFiles: (f: File[]) => void
-  onStartSend: (files: File[]) => void
+  onStartSend: (files: File[], resumeManifest?: never, claim?: { roomCode: string; pin: string }) => void
   onCancel: () => void
   onDone: () => void
   onBack: () => void
@@ -36,6 +37,8 @@ export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, on
   const session = useSessionStore()
   const transfer = useTransferStore()
   const [showFiles, setShowFiles] = useState(false)
+  const [dirtyQueue, setDirtyQueue] = useState(false)
+  const t = useT()
 
   const hasRoom = !!session.roomId
   const isValidating = transfer.transferState === 'VALIDATING'
@@ -86,7 +89,12 @@ export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, on
       {!hasRoom && !isValidating && !isTransferring && !isDone && (
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
           <div className="lg:col-span-3">
-            <FilePicker files={files} onFilesChange={setFiles} onSend={() => onStartSend(files)} />
+            <FilePicker
+              files={files}
+              onFilesChange={setFiles}
+              onSend={() => onStartSend(files)}
+              onSendWithClaim={(fs, rm, claim) => onStartSend(fs, rm, claim)}
+            />
           </div>
           <div className="lg:col-span-2">
             <Card className="flux-glass p-5 h-full">
@@ -123,17 +131,65 @@ export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, on
               <Card className="flux-glass p-5">
                 <div className="flex items-center justify-between mb-3">
                   <h4 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-                    Queued files
+                    {t('sender.queue', 'Queued files')}
                   </h4>
                   <Badge variant="outline" className="text-[10px]">
                     {files.length} · {formatBytes(files.reduce((s, f) => s + f.size, 0))}
                   </Badge>
                 </div>
+                {/* v4 (4.5): queue editing while the session is live (room open,
+                    receiver not yet paired) — reorder/remove now, then refresh
+                    the room so the manifest matches the queue again. */}
                 <div className="max-h-48 overflow-y-auto flux-scroll space-y-1.5 pr-1">
                   {files.map((f, i) => (
-                    <QueuedFileRow key={i} file={f} />
+                    <QueuedFileRow
+                      key={`${f.name}-${f.size}-${i}`}
+                      file={f}
+                      editable={!isTransferring}
+                      onUp={i > 0 ? () => { const next = [...files]; [next[i - 1], next[i]] = [next[i], next[i - 1]]; setFiles(next); setDirtyQueue(true) } : undefined}
+                      onDown={i < files.length - 1 ? () => { const next = [...files]; [next[i + 1], next[i]] = [next[i], next[i + 1]]; setFiles(next); setDirtyQueue(true) } : undefined}
+                      onRemove={() => { setFiles(files.filter((_, j) => j !== i)); setDirtyQueue(true) }}
+                    />
                   ))}
                 </div>
+                {dirtyQueue && !isTransferring && files.length > 0 && (
+                  <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5">
+                    <p className="text-[11px] text-amber-700 dark:text-amber-300">
+                      Queue changed — re-apply to refresh the room code &amp; re-hash the new order.
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="mt-2 h-7 w-full text-[11px]"
+                      onClick={() => {
+                        setDirtyQueue(false)
+                        onCancel()
+                        setTimeout(() => onStartSend(files), 400)
+                      }}
+                    >
+                      <RotateCcw className="mr-1.5 h-3 w-3" />
+                      Apply changes &amp; refresh room
+                    </Button>
+                  </div>
+                )}
+                {files.length === 0 && dirtyQueue && (
+                  <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5">
+                    <p className="text-[11px] text-amber-700 dark:text-amber-300">
+                      Every file was removed — the room closes when you cancel.
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="mt-2 h-7 w-full text-[11px]"
+                      onClick={() => {
+                        setDirtyQueue(false)
+                        onCancel()
+                      }}
+                    >
+                      Close room
+                    </Button>
+                  </div>
+                )}
               </Card>
             )}
             <Button variant="outline" onClick={onCancel} className="w-full text-muted-foreground">
@@ -166,7 +222,19 @@ function Step({ n, text }: { n: number; text: string }) {
   )
 }
 
-function QueuedFileRow({ file }: { file: File }) {
+function QueuedFileRow({
+  file,
+  editable,
+  onUp,
+  onDown,
+  onRemove,
+}: {
+  file: File
+  editable?: boolean
+  onUp?: () => void
+  onDown?: () => void
+  onRemove?: () => void
+}) {
   const isImage = fileTypeCategory(file.type, file.name) === 'image'
   const colors = getFileCategoryColors(file.type, file.name)
   return (
@@ -182,6 +250,39 @@ function QueuedFileRow({ file }: { file: File }) {
         <p className="truncate text-xs font-medium">{file.name}</p>
         <p className="text-[10px] text-muted-foreground">{formatBytes(file.size)}</p>
       </div>
+      {editable && (
+        <div className="flex items-center gap-0.5">
+          <Button
+            variant="ghost"
+            size="icon"
+            disabled={!onUp}
+            onClick={onUp}
+            className="h-6 w-6 text-muted-foreground hover:text-flux-600 dark:hover:text-flux-400"
+            aria-label={`Move ${file.name} up in queue`}
+          >
+            <ArrowUp className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            disabled={!onDown}
+            onClick={onDown}
+            className="h-6 w-6 text-muted-foreground hover:text-flux-600 dark:hover:text-flux-400"
+            aria-label={`Move ${file.name} down in queue`}
+          >
+            <ArrowDown className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onRemove}
+            className="h-6 w-6 text-muted-foreground hover:text-destructive"
+            aria-label={`Remove ${file.name} from queue`}
+          >
+            <X className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      )}
     </div>
   )
 }

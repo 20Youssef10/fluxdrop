@@ -19,9 +19,16 @@ import { Button } from '@/components/ui/button'
 import { useSessionStore } from '@/stores/session-store'
 import { formatBytes } from '@/lib/fluxdrop/format'
 import { deriveQuality, QualityBars } from './connection-quality'
+import { TransparencyPanel } from './transparency-panel'
+import { copyDebugBundle } from '@/lib/fluxdrop/debug-bundle'
+import { fetchSignalingRegion } from '@/lib/fluxdrop/lan-discovery'
+import { toast } from 'sonner'
+import { Receipt } from 'lucide-react'
 
 export function DiagnosticsPanel() {
   const [open, setOpen] = useState(false)
+  // v4 (8.3): signaling region self-description (multi-region probe client half)
+  const [region, setRegion] = useState<string | null>(null)
 
   // Listen for the keyboard-shortcut toggle event
   useEffect(() => {
@@ -29,6 +36,11 @@ export function DiagnosticsPanel() {
     window.addEventListener('fluxdrop:toggle-diagnostics', handler)
     return () => window.removeEventListener('fluxdrop:toggle-diagnostics', handler)
   }, [])
+  // v4 (8.3): fetch the region label once when the panel opens.
+  useEffect(() => {
+    if (!open || region) return
+    void fetchSignalingRegion().then((r) => setRegion(r ? `${r.region} · v${r.version}` : null))
+  }, [open, region])
   const rtcState = useSessionStore((s) => s.rtcState)
   const iceGathering = useSessionStore((s) => s.iceGatheringState)
   const iceConnection = useSessionStore((s) => s.iceConnectionState)
@@ -212,6 +224,35 @@ export function DiagnosticsPanel() {
                   </div>
                 </div>
               ) : null}
+
+              {/* v4 (9.4): debug bundle — one-click sanitized export */}
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-[11px] text-muted-foreground">
+                  {region ? (
+                    <>Signaling region: <span className="font-mono text-foreground">{region}</span></>
+                  ) : (
+                    <>Turning bug reports into data: export a sanitized snapshot</>
+                  )}
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 shrink-0 gap-1.5 text-[11px]"
+                  onClick={async () => {
+                    const ok = await copyDebugBundle()
+                    if (ok) toast.success('Debug bundle copied', { description: 'ICE pair, throughput curve, event counts — no file names, no IPs.' })
+                    else toast.error('Could not copy the debug bundle')
+                  }}
+                >
+                  <Receipt className="h-3 w-3" />
+                  Copy debug bundle
+                </Button>
+              </div>
+
+              {/* v4 (2.6): transparency — what left your device this session */}
+              <div className="rounded-lg border border-border/40 bg-card/30 p-3">
+                <TransparencyPanel />
+              </div>
             </div>
           </motion.div>
         )}

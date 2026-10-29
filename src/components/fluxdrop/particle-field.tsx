@@ -30,7 +30,11 @@ interface Particle {
 export function ParticleField({ count = 24, className }: ParticleFieldProps) {
   const [particles, setParticles] = useState<Particle[]>([])
 
+  // v4 (10.2): skip generating particles entirely when the user (or OS) asks
+  // for reduced motion — zero animated nodes instead of frozen ones.
   useEffect(() => {
+    const mq = window.matchMedia?.('(prefers-reduced-motion: reduce)')
+    if (mq?.matches || document.documentElement.classList.contains('flux-reduce-motion')) return
     // Deferred via setTimeout: setState inside an effect body triggers a
     // cascading-render lint error, and the tick delay is imperceptible.
     const id = setTimeout(() => {

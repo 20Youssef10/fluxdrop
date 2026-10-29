@@ -1,0 +1,45 @@
+{
+  "name": "@fluxdrop/sdk",
+  "version": "0.1.0",
+  "description": "Public JS SDK for FluxDrop — the framework-agnostic engine modules plus a typed client façade and a React widget skeleton for embedding send/receive into any web app.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./widget": {
+      "types": "./src/widget.tsx",
+      "default": "./src/widget.tsx"
+    },
+    "./protocol": "./src/engine.ts",
+    "./encoding": "./src/engine.ts",
+    "./compress": "./src/engine.ts",
+    "./checksum": "./src/engine.ts",
+    "./format": "./src/engine.ts"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "sideEffects": false,
+  "keywords": [
+    "fluxdrop",
+    "webrtc",
+    "file-transfer",
+    "p2p",
+    "sdk"
+  ],
+  "license": "MIT"
+}

@@ -361,12 +361,12 @@ export function isE2EActiveForRoom(roomId: string | null | undefined): boolean {
 const NONCE_LEN = 12
 
 /** AAD tags bind ciphertext to its frame type — frames can't be replayed across types. */
-function aadFor(kind: 'chunk' | 'manifest' | 'preview' | 'chat'): Uint8Array {
+function aadFor(kind: 'chunk' | 'manifest' | 'preview' | 'chat' | 'clipboard'): Uint8Array {
   return utf8(`${PROTOCOL_TAG}:${kind}`)
 }
 
 /** Encrypt a wire payload → nonce(12) || ciphertext. Throws if session inactive. */
-export async function encryptWirePayload(plain: ArrayBuffer | Uint8Array, kind: 'chunk' | 'manifest' | 'preview' | 'chat' = 'chunk', peerId?: string | null): Promise<ArrayBuffer> {
+export async function encryptWirePayload(plain: ArrayBuffer | Uint8Array, kind: 'chunk' | 'manifest' | 'preview' | 'chat' | 'clipboard' = 'chunk', peerId?: string | null): Promise<ArrayBuffer> {
   const s = resolveSession(peerId)
   if (!s.key) throw new Error('E2E session not active')
   const nonce = randomBytes(NONCE_LEN)
@@ -379,7 +379,7 @@ export async function encryptWirePayload(plain: ArrayBuffer | Uint8Array, kind: 
 }
 
 /** Decrypt a wire payload (nonce(12) || ciphertext). Throws on tamper/inactive. */
-export async function decryptWirePayload(enc: ArrayBuffer | Uint8Array, kind: 'chunk' | 'manifest' | 'preview' | 'chat' = 'chunk', peerId?: string | null): Promise<ArrayBuffer> {
+export async function decryptWirePayload(enc: ArrayBuffer | Uint8Array, kind: 'chunk' | 'manifest' | 'preview' | 'chat' | 'clipboard' = 'chunk', peerId?: string | null): Promise<ArrayBuffer> {
   const s = resolveSession(peerId)
   if (!s.key) throw new Error('E2E session not active')
   const bytes = enc instanceof Uint8Array ? enc : new Uint8Array(enc)

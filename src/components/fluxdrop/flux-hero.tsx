@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge'
 import { FluxLogo } from './flux-logo'
 import { ParticleField } from './particle-field'
 import { EcoBadge } from './eco-badge'
+import { useT } from '@/lib/fluxdrop/i18n'
 
 interface FluxHeroProps {
   onSend: () => void
@@ -16,6 +17,7 @@ interface FluxHeroProps {
 }
 
 export function FluxHero({ onSend, onReceive, onHelp }: FluxHeroProps) {
+  const t = useT()
   return (
     <section className="flux-mesh-bg flux-grid-overlay relative overflow-hidden">
       <ParticleField count={20} />
@@ -53,9 +55,11 @@ export function FluxHero({ onSend, onReceive, onHelp }: FluxHeroProps) {
             transition={{ duration: 0.5, delay: 0.2 }}
             className="text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight"
           >
-            Files that <span className="flux-gradient-text">flow directly</span>
-            <br />
-            between your devices
+            {t('hero.title', 'Files that flow directly between your devices').split(' ').map((w, i, a) => (
+              <span key={i}>
+                {i === 1 ? <span className="flux-gradient-text">{w} </span> : `${w}${i < a.length - 1 ? ' ' : ''}`}
+              </span>
+            ))}
           </motion.h1>
 
           <motion.p
@@ -64,9 +68,7 @@ export function FluxHero({ onSend, onReceive, onHelp }: FluxHeroProps) {
             transition={{ duration: 0.5, delay: 0.3 }}
             className="mt-6 text-lg sm:text-xl text-muted-foreground max-w-2xl mx-auto"
           >
-            FluxDrop beams files peer-to-peer over WebRTC. No accounts, no cloud
-            storage, no servers holding your data. Just a QR scan and a direct,
-            encrypted tunnel.
+            {t('hero.subtitle', 'FluxDrop beams files peer-to-peer over WebRTC. No accounts, no cloud storage, no servers holding your data.')}
           </motion.p>
 
           <motion.div
@@ -81,7 +83,7 @@ export function FluxHero({ onSend, onReceive, onHelp }: FluxHeroProps) {
               className="w-full sm:w-auto h-12 px-8 text-base bg-flux-600 hover:bg-flux-700 text-white shadow-lg shadow-flux-600/25"
             >
               <Upload className="mr-2 h-5 w-5" />
-              Send files
+              {t('hero.send', 'Send files')}
               <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
             <Button
@@ -91,7 +93,7 @@ export function FluxHero({ onSend, onReceive, onHelp }: FluxHeroProps) {
               className="w-full sm:w-auto h-12 px-8 text-base border-flux-500/40 hover:bg-flux-500/10"
             >
               <Download className="mr-2 h-5 w-5" />
-              Receive files
+              {t('hero.receive', 'Receive files')}
             </Button>
           </motion.div>
 

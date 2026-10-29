@@ -58,6 +58,10 @@ import {
   type E2ERelayMessage,
 } from '@/lib/fluxdrop/e2e'
 import { toast } from 'sonner'
+// v4: merkle integrity tree (1.7), clipboard sync (4.6), prefs (1.3/5.4/etc).
+import { computeTransferMerkle } from '@/lib/fluxdrop/merkle'
+import { isValidClipboardFrame, deliverClipboardSync, attachClipboardSender, CLIPBOARD_MAX_LEN } from '@/lib/fluxdrop/clipboard-sync'
+import { usePrefsStore } from '@/lib/fluxdrop/prefs'
 
 /**
  * v1.1: file-interleaved send order (pipelining).
@@ -139,6 +143,42 @@ const CHAT_MAX_LEN = 2000
 // Chat frames are transfer-agnostic: the header's transferId field stays zero.
 const CHAT_WIRE_TRANSFER_ID = '0'
 
+// v4 (1.7): sender-side Merkle leaves kept in memory for this send session
+// (the manifest only carries the root; leaves enable spot-verifications).
+let merkleLeavesCache: string[] | null = null
+
+// v4 (6.2): verified received files, cached per transferId for "send onward"
+// (relay-to-peer chaining) — the completion screen can re-queue them into a
+// fresh send without touching the vault. Bounded: only the LAST transfer's
+// blobs are kept (memory), older entries are dropped.
+const receivedFilesCache = new Map<string, { name: string; blob: Blob; type: string }[]>()
+function cacheReceivedFiles(transferId: string, files: { name: string; blob: Blob; type: string }[]): void {
+  if (receivedFilesCache.size > 2) {
+    const oldest = receivedFilesCache.keys().next().value
+    if (oldest !== undefined) receivedFilesCache.delete(oldest)
+  }
+  receivedFilesCache.set(transferId, files)
+}
+
+/** v4 (1.8): optional post-transfer automation — auto-open the first file. */
+function maybeAutoOpenFirstFile(m: TransferManifest): void {
+  try {
+    if (!usePrefsStore.getState().autoOpenFirstFile) return
+    const files = receivedFilesCache.get(m.transferId)
+    const first = files?.[0]
+    if (!first) return
+    const url = URL.createObjectURL(first.blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.target = '_blank'
+    a.rel = 'noopener'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 120_000)
+  } catch { /* best-effort automation */ }
+}
+
 // --- v1.3 (1.6): streamed receive ---
 // Transfers above this cutoff never assemble full Blobs in RAM: chunks spill
 // into one OPFS temp file at their byte offsets, and per-file bytes are cut
@@ -157,6 +197,13 @@ function opfsAvailable(): boolean {
  */
 function shouldStreamReceive(m: TransferManifest): boolean {
   return m.totalSize > STREAM_RECEIVE_CUTOFF && opfsAvailable()
+}
+
+/** v4 (6.2): direct access to the verified-received cache (summary card UI). */
+export function getReceivedFilesFromCache(transferId: string): { name: string; blob: Blob; type: string }[] | null {
+  const cached = receivedFilesCache.get(transferId)
+  if (!cached || cached.length === 0) return null
+  return cached
 }
 
 export function useFluxDrop() {
@@ -2183,6 +2230,31 @@ export function useFluxDrop() {
         })()
         break
       }
+      case MessageType.CLIPBOARD: {
+        // v4 (4.6): opt-in clipboard sync over the DataChannel. Same rules as
+        // chat: E2E-sealed when the PAKE session is active (plaintext frames
+        // dropped while E2E is on), shape-guarded, strictly fail-soft. The
+        // receiving side only opted-in surfaces this (the sync pref gates
+        // delivery).
+        void (async () => {
+          try {
+            if (!usePrefsStore.getState().clipboardSync) return // not opted in here
+            const e2eOn = isE2EActive(peerId)
+            let body: unknown
+            if (e2eOn) {
+              const json = await decryptWirePayload(msg.payload, 'clipboard', peerId)
+              body = JSON.parse(new TextDecoder().decode(json))
+            } else {
+              body = msg.body
+            }
+            if (!isValidClipboardFrame(body)) return
+            deliverClipboardSync({ text: body.text, at: body.at })
+          } catch (err: any) {
+            console.warn('[FluxDrop] Clipboard frame dropped:', err?.message ?? err)
+          }
+        })()
+        break
+      }
     }
   }, [persistTransferRecord, flushReceiverBuffers, syncPeerProgress, tryAggregateChunk, markPeerCompleted])
 
@@ -2518,6 +2590,34 @@ export function useFluxDrop() {
         transferRef.current.markFileComplete(i)
       }
 
+      // v4 (1.7): independent Merkle verification — rebuild the tree from the
+      // bytes we actually stored and compare the root sealed in the manifest.
+      // The per-file SHA-256 checks above already passed; this is a second,
+      // code-path-independent confirmation over the RAW global byte stream
+      // (catches anything a per-file hash path could miss, e.g. cross-file
+      // framing corruption). Mismatch = loud warning, never a silent pass.
+      if (m.merkle) {
+        try {
+          const { root: rebuilt } = await computeTransferMerkle(
+            async (ci) => tempFile.slice(ci * m.chunkSize, Math.min((ci + 1) * m.chunkSize, m.totalSize)).arrayBuffer(),
+            m.totalChunks
+          )
+          if (rebuilt === m.merkle.root) {
+            console.log(`[FluxDrop] Merkle root verified independently (${m.merkle.leaves} leaves)`)
+          } else {
+            console.error(`[FluxDrop] MERKLE ROOT MISMATCH: manifest ${m.merkle.root} vs rebuilt ${rebuilt}`)
+            toast.warning('Merkle integrity check mismatch', {
+              description: 'Per-file checksums passed, but the sealed Merkle root differs. Please re-send to be safe.',
+            })
+          }
+        } catch (err: any) {
+          console.warn('[FluxDrop] Merkle verification failed to run:', err?.message ?? err)
+        }
+      }
+
+      // v4 (6.2): cache verified files for "send onward" (relay chaining).
+      cacheReceivedFiles(m.transferId, verifiedFiles.map((f) => ({ name: f.name, blob: f.blob, type: f.blob.type })))
+
       // 5. Vault copy BEFORE the save pickers — the vault copy always exists
       // even if the user cancels the picker. Failure never blocks the transfer.
       let vaultSaved = false
@@ -2586,6 +2686,7 @@ export function useFluxDrop() {
       playSuccess()
       await persistTransferRecord('receiver', 'COMPLETE', { checksumVerified: true })
       void flushAllPendingAcks()
+      maybeAutoOpenFirstFile(m)
       toast.success('All files received and verified!', {
         description: `${m.files.length} file${m.files.length > 1 ? 's' : ''} saved · SHA-256 ✓`,
       })
@@ -2741,6 +2842,51 @@ export function useFluxDrop() {
         transferRef.current.markFileComplete(i)
       }
 
+      // v4 (1.7): independent Merkle verification (in-memory path) — same
+      // rationale as the streamed path, reading the assembled blobs through
+      // the global slice plan so chunk boundaries match the sender exactly.
+      if (m.merkle && assembledFiles.length === m.files.length) {
+        try {
+          const plan1 = slicePlanRef.current
+          const blobFor = (fi: number): Blob | null => assembledFiles[fi]?.blob ?? null
+          const { root: rebuilt } = await computeTransferMerkle(
+            async (ci) => {
+              const r = resolveChunk(plan1, ci, m.chunkSize)
+              if (!r || r.segments.length === 0) return null
+              if (r.segments.length === 1) {
+                const seg = r.segments[0]
+                const b = blobFor(seg.fileIndex)
+                return b ? await b.slice(seg.localStart, seg.localEnd).arrayBuffer() : null
+              }
+              const combined = new Uint8Array(r.totalLength)
+              let off = 0
+              for (const seg of r.segments) {
+                const b = blobFor(seg.fileIndex)
+                if (!b) return null
+                const part = new Uint8Array(await b.slice(seg.localStart, seg.localEnd).arrayBuffer())
+                combined.set(part, off)
+                off += part.byteLength
+              }
+              return combined.buffer
+            },
+            m.totalChunks
+          )
+          if (rebuilt === m.merkle.root) {
+            console.log(`[FluxDrop] Merkle root verified independently (${m.merkle.leaves} leaves)`)
+          } else {
+            console.error(`[FluxDrop] MERKLE ROOT MISMATCH: manifest ${m.merkle.root} vs rebuilt ${rebuilt}`)
+            toast.warning('Merkle integrity check mismatch', {
+              description: 'Per-file checksums passed, but the sealed Merkle root differs. Please re-send to be safe.',
+            })
+          }
+        } catch (err: any) {
+          console.warn('[FluxDrop] Merkle verification failed to run:', err?.message ?? err)
+        }
+      }
+
+      // v4 (6.2): cache verified files for "send onward" (relay chaining).
+      cacheReceivedFiles(m.transferId, assembledFiles.map((f) => ({ name: f.name, blob: f.blob, type: f.blob.type })))
+
       // v1.3 (4.1): keep a verified copy in the Files vault BEFORE the save
       // pickers — the vault copy always exists even if the user cancels the
       // picker. Failure never blocks the transfer.
@@ -2825,6 +2971,7 @@ export function useFluxDrop() {
       // Record the outcome in transfer history (COMPLETE + verified).
       await persistTransferRecord('receiver', 'COMPLETE', { checksumVerified: true })
       void flushAllPendingAcks()
+      maybeAutoOpenFirstFile(m)
       toast.success('All files received and verified!', {
         description: `${m.files.length} file${m.files.length > 1 ? 's' : ''} saved · SHA-256 ✓`,
       })
@@ -3255,7 +3402,7 @@ export function useFluxDrop() {
   // history-resume keeps the same transferId, checksums, and record. When
   // provided, files must exactly match the manifest (name + size) and hashing
   // is skipped — checksums are already baked into the manifest.
-  const startSend = useCallback(async (files: File[], resumeManifest?: TransferManifest) => {
+  const startSend = useCallback(async (files: File[], resumeManifest?: TransferManifest, claim?: { roomCode: string; pin: string }) => {
     try {
       const validation = validateFiles(files)
       if (!validation.ok) {
@@ -3304,6 +3451,47 @@ export function useFluxDrop() {
           })
         }, compress ? 'gzip' : undefined)
         transferRef.current.setHashingProgress(null)
+        // v4 (1.7): streaming Merkle tree over per-chunk SHA-256 leaves — the
+        // root is sealed into the manifest BEFORE the room exists, so the E2E
+        // manifest seal covers it and the receiver rebuilds the same tree at
+        // completion for an independent integrity check. Skipped above 2 GB
+        // (the extra full read would double pre-send latency on huge queues).
+        if (usePrefsStore.getState().merkleEnabled && m.totalSize <= 2 * 1024 * 1024 * 1024) {
+          try {
+            const plan0 = buildSlicePlan(m)
+            transferRef.current.setHashingProgress({ current: 1, total: 1, fileName: 'Sealing Merkle integrity tree…' })
+            const readChunk = async (ci: number): Promise<ArrayBuffer | null> => {
+              const r = resolveChunk(plan0, ci, m.chunkSize)
+              if (!r || r.segments.length === 0) return null
+              if (r.segments.length === 1) {
+                const seg = r.segments[0]
+                const f = files[seg.fileIndex]
+                if (!f) return null
+                return await f.slice(seg.localStart, seg.localEnd).arrayBuffer()
+              }
+              const combined = new Uint8Array(r.totalLength)
+              let off = 0
+              for (const seg of r.segments) {
+                const f = files[seg.fileIndex]
+                if (!f) return null
+                const part = new Uint8Array(await f.slice(seg.localStart, seg.localEnd).arrayBuffer())
+                combined.set(part, off)
+                off += part.byteLength
+              }
+              return combined.buffer
+            }
+            const { root, leaves } = await computeTransferMerkle(readChunk, m.totalChunks)
+            m.merkle = { root, leaves: leaves.length }
+            merkleLeavesCache = leaves
+          } catch (err: any) {
+            merkleLeavesCache = null
+            console.warn('[FluxDrop] Merkle tree skipped (hashing failed):', err?.message ?? err)
+          } finally {
+            transferRef.current.setHashingProgress(null)
+          }
+        } else {
+          merkleLeavesCache = null
+        }
       }
       // Persist the files so history-resume can re-attach them later
       // (removed automatically once the transfer completes).
@@ -3373,6 +3561,8 @@ export function useFluxDrop() {
           deviceId,
           role: 'sender',
           withPin: true,
+          // v4 (3.4): claim a pre-created share-link room (code+pin from POST /link).
+          ...(claim ? { claim } : {}),
         })
       }
     } catch (err: any) {
@@ -3634,6 +3824,91 @@ export function useFluxDrop() {
     connect(true)
   }, [connect])
 
+  // ---- v4 (4.6): opt-in clipboard sync — public API ----
+  // Mirrors sendChat's fan-out exactly: every open receiver channel (sender)
+  // or the primary channel (receiver), per-peer E2E seal when active.
+  const sendClipboardSync = useCallback((text: string): boolean => {
+    if (!usePrefsStore.getState().clipboardSync) return false
+    const trimmed = text.trim().slice(0, CLIPBOARD_MAX_LEN)
+    if (!trimmed) return false
+    const wireBody = new TextEncoder().encode(JSON.stringify({ text: trimmed, at: Date.now() }))
+    const targets: { peerId: string | null; rtc: FluxDropWebRTC }[] = []
+    for (const peer of senderPeersRef.current.values()) {
+      if (peer.rtc.isOpen) targets.push({ peerId: peer.id, rtc: peer.rtc })
+    }
+    if (targets.length === 0) {
+      const rtc = getRtc()
+      if (rtc?.isOpen) targets.push({ peerId: peerDeviceIdRef.current, rtc })
+    }
+    if (targets.length === 0) return false
+    void (async () => {
+      for (const t of targets) {
+        try {
+          let payload: ArrayBuffer | Uint8Array = wireBody
+          if (isE2EActive(t.peerId)) {
+            payload = await encryptWirePayload(wireBody, 'clipboard', t.peerId)
+          }
+          if (!t.rtc.isOpen) continue
+          t.rtc.sendRawFrame(MessageType.CLIPBOARD, CHAT_WIRE_TRANSFER_ID, 0, payload)
+        } catch (err: any) {
+          console.warn('[FluxDrop] Clipboard sync failed for a peer:', err?.message ?? err)
+        }
+      }
+    })()
+    return true
+  }, [])
+
+  // Clipboard sender: while the sync pref is ON and a channel is live, native
+  // copies are forwarded (document 'copy' capture — gesture-free by design).
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+    let detach: (() => void) | null = null
+    let attached = false
+    const unsub = usePrefsStore.subscribe((s) => {
+      const want = s.clipboardSync
+      if (want && !attached) {
+        attached = true
+        detach = attachClipboardSender((text) => {
+          // Only sync while some channel is actually open.
+          const hasOpen = getRtc()?.isOpen || [...senderPeersRef.current.values()].some((p) => p.rtc.isOpen)
+          if (hasOpen) sendClipboardSync(text)
+        })
+      } else if (!want && attached) {
+        attached = false
+        detach?.()
+        detach = null
+      }
+    })
+    // Initial state application (mount with the pref already on).
+    if (usePrefsStore.getState().clipboardSync) {
+      attached = true
+      detach = attachClipboardSender((text) => {
+        const hasOpen = getRtc()?.isOpen || [...senderPeersRef.current.values()].some((p) => p.rtc.isOpen)
+        if (hasOpen) sendClipboardSync(text)
+      })
+    }
+    return () => {
+      unsub()
+      detach?.()
+    }
+  }, [sendClipboardSync])
+
+  // ---- v4 (1.3): QoS cap — apply the prefs slider to every live transport ----
+  // Fires on change AND keeps future pairings honest (beginSending seeds the
+  // window per transport, so re-asserting the cap there would race the seed;
+  // instead the wave loop's pacing gates enforce it continuously).
+  useEffect(() => {
+    const apply = (mbps: number) => {
+      getRtc()?.setQosCapMbps(mbps > 0 ? mbps : null)
+      for (const peer of senderPeersRef.current.values()) {
+        peer.rtc.setQosCapMbps(mbps > 0 ? mbps : null)
+      }
+    }
+    const unsub = usePrefsStore.subscribe((s) => apply(s.qosCapMbps))
+    apply(usePrefsStore.getState().qosCapMbps)
+    return unsub
+  }, [])
+
   return {
     session,
     transfer,
@@ -3647,6 +3922,13 @@ export function useFluxDrop() {
     resumeTransfer,
     requestPreviews,
     sendChat,
+    sendClipboardSync,
+    /** v4 (6.2): verified received files of a completed transfer (for onward sending). */
+    getReceivedFiles: (transferId: string): File[] | null => {
+      const cached = receivedFilesCache.get(transferId)
+      if (!cached || cached.length === 0) return null
+      return cached.map((f) => new File([f.blob], f.name, { type: f.type || 'application/octet-stream' }))
+    },
     cleanup,
   }
 }

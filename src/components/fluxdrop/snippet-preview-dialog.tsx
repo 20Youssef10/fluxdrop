@@ -1,25 +1,63 @@
 'use client'
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { MessageSquareText, Copy, Check, X } from 'lucide-react'
+import { MessageSquareText, Copy, Check, X, FileCode2, BookOpen, Hash } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { useTransferStore } from '@/stores/transfer-store'
+import { guessSnippetLanguage, looksLikeMarkdown } from '@/lib/fluxdrop/snippet'
+
+/** Lazy-loaded highlighter + markdown renderer (heavy Prism bundle only pays
+ * its cost when a snippet actually needs it). */
+let highlighterMod: typeof import('react-syntax-highlighter') | null = null
+let prismTheme: typeof import('react-syntax-highlighter').PrismTheme | null = null
+let markdownMod: typeof import('react-markdown') | null = null
+let modPromise: Promise<void> | null = null
+
+function ensureMods(): Promise<void> {
+  if (!modPromise) {
+    modPromise = (async () => {
+      const [hl, theme, md] = await Promise.all([
+        import('react-syntax-highlighter'),
+        // One Dark theme — matches the app's dark surfaces; harmless in light.
+        import('react-syntax-highlighter/dist/esm/styles/prism').then((m) => m.vscDarkPlus),
+        import('react-markdown'),
+      ])
+      highlighterMod = hl
+      prismTheme = theme
+      markdownMod = md
+    })()
+  }
+  return modPromise
+}
 
 /**
  * Receiver-side snippet preview: when a small text snippet arrives, show its
  * content immediately with a one-click copy — no need to hunt for the file.
+ * v4 (4.6): rich rendering — syntax-highlighted code (auto language guess)
+ * and Markdown preview alongside the raw text.
  */
 export function SnippetPreviewDialog() {
   const preview = useTransferStore((s) => s.snippetPreview)
   const setSnippetPreview = useTransferStore((s) => s.setSnippetPreview)
   const [copied, setCopied] = useState(false)
+  const [mode, setMode] = useState<'auto' | 'raw' | 'markdown'>('auto')
+  const [modsReady, setModsReady] = useState(false)
+
+  const language = useMemo(() => (preview ? guessSnippetLanguage(preview.text) : 'text'), [preview])
+  const isMarkdown = useMemo(() => (preview ? looksLikeMarkdown(preview.text) : false), [preview])
+
+  // Load the highlighter/markdown bundles only when a snippet is open.
+  if (preview && !modsReady && !modPromise) {
+    void ensureMods().then(() => setModsReady(true))
+  }
 
   const close = () => {
     setSnippetPreview(null)
     setCopied(false)
+    setMode('auto')
   }
 
   const copy = async () => {
@@ -30,6 +68,9 @@ export function SnippetPreviewDialog() {
       setTimeout(() => setCopied(false), 1800)
     } catch { /* ignore */ }
   }
+
+  const showHighlight = modsReady && language !== 'text' && language !== 'markdown' && mode === 'auto'
+  const showMarkdown = modsReady && isMarkdown && mode === 'markdown'
 
   return (
     <AnimatePresence>
@@ -72,15 +113,63 @@ export function SnippetPreviewDialog() {
                 </Badge>
               </div>
 
+              {/* v4: view mode switch — highlight / markdown / raw */}
+              <div className="flex items-center gap-1.5 px-4 pt-3">
+                <Button
+                  variant={mode === 'auto' ? 'secondary' : 'ghost'}
+                  size="sm"
+                  className="h-6 gap-1 px-2 text-[10px]"
+                  onClick={() => setMode('auto')}
+                  aria-pressed={mode === 'auto'}
+                >
+                  <FileCode2 className="h-3 w-3" />
+                  {language !== 'text' ? language : 'highlight'}
+                </Button>
+                {isMarkdown && (
+                  <Button
+                    variant={mode === 'markdown' ? 'secondary' : 'ghost'}
+                    size="sm"
+                    className="h-6 gap-1 px-2 text-[10px]"
+                    onClick={() => setMode('markdown')}
+                    aria-pressed={mode === 'markdown'}
+                  >
+                    <BookOpen className="h-3 w-3" />
+                    Markdown
+                  </Button>
+                )}
+                <Button
+                  variant={mode === 'raw' ? 'secondary' : 'ghost'}
+                  size="sm"
+                  className="h-6 gap-1 px-2 text-[10px]"
+                  onClick={() => setMode('raw')}
+                  aria-pressed={mode === 'raw'}
+                >
+                  <Hash className="h-3 w-3" />
+                  Raw
+                </Button>
+              </div>
+
               {/* Content */}
               <div className="p-4">
-                <div className="max-h-64 overflow-y-auto flux-scroll rounded-lg border border-border/50 bg-card/60 p-3">
-                  <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-foreground">
-                    {preview.text}
-                  </pre>
+                <div className="max-h-64 overflow-y-auto flux-scroll rounded-lg border border-border/50 bg-card/60">
+                  {showHighlight && highlighterMod && prismTheme ? (
+                    <highlighterMod.Prism language={language} style={prismTheme} customStyle={{ margin: 0, background: 'transparent', fontSize: '11px' }}>
+                      {preview.text}
+                    </highlighterMod.Prism>
+                  ) : showMarkdown && markdownMod ? (
+                    <div className="flux-markdown-preview p-3 text-xs leading-relaxed [&_h1]:text-base [&_h2]:text-sm [&_a]:text-flux-600 [&_a]:underline [&_code]:font-mono [&_code]:text-[11px] [&_pre]:overflow-x-auto [&_li]:ml-4 [&_li]:list-disc">
+                      <markdownMod.default>{preview.text}</markdownMod.default>
+                    </div>
+                  ) : (
+                    <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-foreground p-3">
+                      {preview.text}
+                    </pre>
+                  )}
                 </div>
                 <p className="mt-2 text-[10px] text-muted-foreground">
                   {preview.text.length.toLocaleString()} characters
+                  {language !== 'text' ? ` · detected ${language}` : ''}
+                  {isMarkdown ? ' · markdown' : ''}
                 </p>
               </div>
 

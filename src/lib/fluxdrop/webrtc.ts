@@ -5,6 +5,8 @@
 'use client'
 
 import { CONSTANTS, MessageType, HEADER_SIZE, type TransportClass } from './protocol'
+import { recordDatachannelBytes, recordIceCandidate } from './telemetry'
+import { usePrefsStore } from './prefs'
 import {
   encodeChunkData,
   encodeChunkAck,
@@ -59,6 +61,68 @@ export class FluxDropWebRTC {
   private flowWindow: number = CONSTANTS.FLOW_WINDOW_DEFAULT
   private cleanSends: number = 0
 
+  // --- v4 (1.3) QoS pacing: sender-side bandwidth cap ---
+  // Token-bucket rate limiter: tokens refill at qosCapBytesPerSec; a send
+  // needs tokens ≥ chunk size. The flow window is also clamped to ~0.5 s of
+  // capped data so AIMD growth doesn't fight the pacer. null = unlimited.
+  private qosCapBytesPerSec: number | null = null
+  private qosTokens: number = 0
+  private qosLastRefill: number = 0
+
+  /**
+   * v4 (1.3): cap the send rate ("polite mode" QoS slider). Pass 0/null to
+   * lift the cap. Takes effect immediately on live transfers.
+   */
+  setQosCapMbps(mbps: number | null): void {
+    const mbpsNum = typeof mbps === 'number' && mbps > 0 ? mbps : null
+    this.qosCapBytesPerSec = mbpsNum ? mbpsNum * 125_000 : null
+    if (this.qosCapBytesPerSec) {
+      const burst = this.qosBurst()
+      this.qosTokens = burst
+      this.qosLastRefill = performance.now()
+      // Clamp the AIMD window to the burst size — the pacer is the boss now.
+      if (this.flowWindow > burst) {
+        this.flowWindow = burst
+        this.cleanSends = 0
+        this.applyWindowThreshold()
+      }
+      console.log(`[FluxDrop] QoS cap set to ${mbpsNum} Mbit/s (window ${ (burst / 1024 / 1024).toFixed(2) } MB)`)
+    } else {
+      this.qosTokens = 0
+    }
+  }
+
+  get qosCapMbps(): number | null {
+    return this.qosCapBytesPerSec ? this.qosCapBytesPerSec / 125_000 : null
+  }
+
+  /** Token bucket capacity: half a second of capped data (≥ 1 chunk). */
+  private qosBurst(): number {
+    if (!this.qosCapBytesPerSec) return Infinity
+    return Math.max(this.qosCapBytesPerSec / 2, CONSTANTS.CHUNK_SIZE)
+  }
+
+  private refillQosTokens(): void {
+    if (!this.qosCapBytesPerSec) return
+    const now = performance.now()
+    const elapsed = (now - this.qosLastRefill) / 1000
+    if (elapsed <= 0) return
+    this.qosLastRefill = now
+    this.qosTokens = Math.min(this.qosBurst(), this.qosTokens + elapsed * this.qosCapBytesPerSec)
+  }
+
+  private qosAllowsSend(): boolean {
+    if (!this.qosCapBytesPerSec) return true
+    this.refillQosTokens()
+    return this.qosTokens >= CONSTANTS.CHUNK_SIZE
+  }
+
+  private qosConsume(n: number): void {
+    if (!this.qosCapBytesPerSec) return
+    this.refillQosTokens()
+    this.qosTokens = Math.max(0, this.qosTokens - n)
+  }
+
   /** Current adaptive flow window (bytes). */
   get flowWindowBytes(): number {
     return this.flowWindow
@@ -98,14 +162,16 @@ export class FluxDropWebRTC {
     }
   }
 
-  /** AIMD: clean send → grow slowly after a streak (capped at MAX_BUFFERED). */
+  /** AIMD: clean send → grow slowly after a streak (capped at MAX_BUFFERED,
+   * and never beyond the QoS burst when a cap is active). */
   private noteSendOk(): void {
     this.cleanSends++
     if (this.cleanSends >= CONSTANTS.FLOW_WINDOW_CLEAN_STREAK) {
       this.cleanSends = 0
       const next = Math.min(
         Math.floor(this.flowWindow * CONSTANTS.FLOW_WINDOW_GROW_FACTOR),
-        CONSTANTS.MAX_BUFFERED_BYTES
+        CONSTANTS.MAX_BUFFERED_BYTES,
+        this.qosBurst()
       )
       if (next !== this.flowWindow) {
         this.flowWindow = next
@@ -135,9 +201,17 @@ export class FluxDropWebRTC {
       iceServers: config.iceServers ?? DEFAULT_ICE,
       iceTransportPolicy: 'all',
     })
+    // v4 (1.3): a live QoS cap from Settings applies to every NEW transport
+    // too (the prefs subscribe-effect in use-fluxdrop handles live changes).
+    try {
+      const cap = usePrefsStore.getState().qosCapMbps
+      if (cap > 0) this.setQosCapMbps(cap)
+    } catch { /* prefs unavailable — uncapped */ }
 
     this.pc.onicecandidate = (event) => {
       if (event.candidate) {
+        // v4 (2.6/3.5): transparency + IPv6 availability tracking.
+        try { recordIceCandidate(event.candidate.toJSON(), 'local') } catch { /* ignore */ }
         this.config.onIceCandidate(event.candidate.toJSON())
       }
     }
@@ -232,6 +306,8 @@ export class FluxDropWebRTC {
         this.config.onError(new Error(`Unexpected DataChannel message type: ${typeof event.data}`))
         return
       }
+      // v4 (2.6): transparency — wire bytes received (payload sizes only).
+      recordDatachannelBytes(0, event.data.byteLength)
       // Wrap decode in try/catch so a malformed frame doesn't kill the channel.
       try {
         const msg = decodeMessage(event.data)
@@ -261,6 +337,7 @@ export class FluxDropWebRTC {
     channel.onmessage = (event) => {
       // Secondary channels use the same message handler (for ACKs, etc.)
       if (!(event.data instanceof ArrayBuffer)) return
+      recordDatachannelBytes(0, event.data.byteLength)
       try {
         const msg = decodeMessage(event.data)
         this.config.onDataChannelMessage(msg)
@@ -282,9 +359,13 @@ export class FluxDropWebRTC {
       ch = this.secondaryChannels.get(channelIndex) ?? null
     }
     if (!ch || ch.readyState !== 'open') return false
+    // v4 (1.3): pacing gate — the token bucket must hold a chunk's worth.
+    if (!this.qosAllowsSend()) return false
     const msg = encodeChunkData(transferId, chunkIndex, payload, gzipOrOpts)
     try {
       ch.send(msg)
+      this.qosConsume(msg.byteLength)
+      recordDatachannelBytes(msg.byteLength, 0)
       this.noteSendOk()
       return true
     } catch (err: any) {
@@ -305,19 +386,19 @@ export class FluxDropWebRTC {
     }
   }
 
-  /** Check if a specific channel can send (backpressure). */
+  /** Check if a specific channel can send (backpressure + QoS tokens). */
   canSendOnChannel(channelIndex: number): boolean {
     if (channelIndex === 0) return this.canSend()
     const ch = this.secondaryChannels.get(channelIndex)
-    return !!ch && ch.readyState === 'open' && ch.bufferedAmount < this.flowWindow
+    return !!ch && ch.readyState === 'open' && ch.bufferedAmount < this.flowWindow && this.qosAllowsSend()
   }
 
-  /** Wait for a specific channel to drain. */
+  /** Wait for a specific channel to drain (also waits for QoS tokens). */
   async waitForDrainOnChannel(channelIndex: number): Promise<void> {
     if (channelIndex === 0) return this.waitForDrain()
     const ch = this.secondaryChannels.get(channelIndex)
     if (!ch) return
-    if (ch.bufferedAmount < this.flowWindow) return
+    if (ch.bufferedAmount < this.flowWindow && this.qosAllowsSend()) return
     await new Promise<void>((resolve) => {
       let resolved = false
       const finish = () => {
@@ -334,7 +415,7 @@ export class FluxDropWebRTC {
       ch.addEventListener('bufferedamountlow', onLow)
       ch.addEventListener('close', onClose)
       const pollId = setInterval(() => {
-        if (ch.bufferedAmount < this.flowWindow) finish()
+        if (ch.bufferedAmount < this.flowWindow && this.qosAllowsSend()) finish()
       }, 50)
       const timeoutId = setTimeout(finish, 10000)
     })
@@ -398,7 +479,8 @@ export class FluxDropWebRTC {
   canSend(): boolean {
     if (!this.channel) return false
     // Adaptive AIMD window (v1.1) — replaces the fixed 8 MB threshold.
-    return this.channel.bufferedAmount < this.flowWindow
+    // v4 (1.3): QoS token bucket gates the rate on top of the window.
+    return this.channel.bufferedAmount < this.flowWindow && this.qosAllowsSend()
   }
 
   /**
@@ -410,7 +492,7 @@ export class FluxDropWebRTC {
   async waitForDrain(): Promise<void> {
     const channel = this.channel
     if (!channel) return
-    if (channel.bufferedAmount < this.flowWindow) return
+    if (channel.bufferedAmount < this.flowWindow && this.qosAllowsSend()) return
 
     // Wait for bufferedamountlow event, with polling fallback.
     // The key: poll every 50ms AND listen for the event, whichever fires first.
@@ -432,8 +514,10 @@ export class FluxDropWebRTC {
       channel.addEventListener('close', onClose)
 
       // Poll every 50ms — more reliable than just the event in some browsers.
+      // v4 (1.3): the poll also honors the QoS pacer so a capped sender
+      // sleeps exactly as long as the token bucket needs.
       const pollId = setInterval(() => {
-        if (channel.bufferedAmount < this.flowWindow) {
+        if (channel.bufferedAmount < this.flowWindow && this.qosAllowsSend()) {
           finish()
         }
       }, 50)
@@ -450,9 +534,12 @@ export class FluxDropWebRTC {
    */
   sendChunkData(transferId: string, chunkIndex: number, payload: ArrayBuffer | Uint8Array, gzipOrOpts: boolean | ChunkEncodeOpts = false): boolean {
     if (!this.channel || this.channel.readyState !== 'open') return false
+    if (!this.qosAllowsSend()) return false
     const msg = encodeChunkData(transferId, chunkIndex, payload, gzipOrOpts)
     try {
       this.channel.send(msg)
+      this.qosConsume(msg.byteLength)
+      recordDatachannelBytes(msg.byteLength, 0)
       this.noteSendOk()
       return true
     } catch (err: any) {

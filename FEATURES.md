@@ -35,8 +35,8 @@ Chunk SIZE stays fixed at 64 KB per manifest (resume byte-offsets depend on it �
 ### 1.2 On-the-fly compression — `✅ SHIPPED v1.1`
 Per-chunk gzip via native `CompressionStream` (opcode `CHUNK_DATA_GZ`), manifest carries `compression: 'gzip'`. Compressible MIME/extension heuristic skips media/archives; receiver decompresses before storing so checksums/bitmaps/resume all operate on original bytes. Settings toggle (default ON). Verified: 36 KB text+JSON transfer + 55 MB recovery, checksums byte-exact.
 
-### 1.3 Bandwidth throttle / QoS slider — `P2 · S`
-Sender-side pacing cap (e.g. 1–100 MB/s or "polite mode") so a big send doesn't saturate the LAN / hotspot. Builds on the existing backpressure loop — just clamp the send window.
+### 1.3 Bandwidth throttle / QoS slider — `✅ SHIPPED v4`
+Sender-side pacing cap via a token-bucket rate limiter on the DataChannel send path (Settings → Tuning: 0–200 Mbit/s slider, 0 = unlimited). The cap clamps the AIMD flow window to ~0.5 s of data, gates `canSend()`/`waitForDrain()`, and applies live to every open transport — a big send no longer saturates the LAN/hotspot.
 
 ### 1.4 Parallel file pipelining — `✅ SHIPPED v1.1`
 Interleave chunks of multiple queued files instead of strictly sequential per-file transfer, so one slow/huge file doesn't starve the rest of the queue. Shipped as a deterministic file-round-robin send order (`buildSendOrder`) — zero wire-protocol change, receiver already stores by chunk index.
@@ -47,11 +47,11 @@ Mid-transfer drops now auto-recover: DC close → bounded resume attempts (3, 2s
 ### 1.6 Streaming receive for everything — `✅ SHIPPED v1.3`
 Receives >64 MB now spill chunks into a single OPFS temp file as they arrive (positional writes, RAM-trimmed as written) and the completion path is fully streamed: completeness poll → per-file byte-range hashing (incremental hash-wasm SHA-256 in 8 MB slices — sha256sum-exact for ALL sizes, superseding the Merkle-like fallback on this path) → `File.slice()`-backed saves (disk-to-disk, no RAM copy) → OPFS temp discarded. ≤64 MB keeps the proven in-memory path byte-identical.
 
-### 1.7 Integrity upgrade: real streaming Merkle tree — `P2 · L`
-Replace the Merkle-like construction for >256 MB files with a proper per-chunk SHA-256 Merkle tree (root signed into the manifest). Enables partial-file verification, honest `sha256sum`-compatible leaf checks, and delta resume verification. Also fixes the documented "sha256sum won't match for large files" limitation.
+### 1.7 Integrity upgrade: real streaming Merkle tree — `✅ SHIPPED v4`
+Per-chunk SHA-256 leaves (64 KB layout) → duplicate-last binary tree → root sealed into `manifest.merkle` BEFORE room creation (so the E2E manifest seal covers it). The receiver rebuilds the identical tree from the bytes it actually stored at completion — an independent integrity check sharing zero code with the per-file checksum path. Mismatch = loud warning + console root dump; leaves stay sender-side for future spot-proofs. Skipped above 2 GB to bound pre-send latency.
 
-### 1.8 Post-transfer actions — `P2 · S`
-Receiver "after complete" automations: auto-open folder, auto-open first file, unzip `.zip` via File System Access + native decompression, or chain-send to another device.
+### 1.8 Post-transfer actions — `✅ SHIPPED v4`
+Completion automations: auto-open first file (Settings → Sync & automation), Download-as-.zip (4.2) for multi-file transfers, and Send-onward chaining (6.2). Verified received blobs are cached per transfer so every action operates on checksum-verified bytes.
 
 ---
 
@@ -69,11 +69,11 @@ Chunk cache and transfer history in IndexedDB are sealed with a non-extractable 
 ### 2.4 Ephemeral alias rotation — `✅ SHIPPED v1.2`
 Unless the user explicitly set a custom alias (Settings → Device), the device alias rotates per browser session (sessionStorage) — a fresh pet name every tab, uncorrelatable across rooms/weeks. deviceId stays stable (trusted peers + resume records key off it).
 
-### 2.5 Signaling hardening kit — `P1 · M 🔧`
-For self-hosters: optional Redis-backed socket.io adapter (horizontal scale), per-IP room-creation rate limits (PIN attempts are limited, creation isn't), optional OIDC/honeypot-free room tokens, and a `/healthz` + structured logging.
+### 2.5 Signaling hardening kit — `✅ SHIPPED v4 🔧`
+Per-IP sliding-window room-creation rate limit (default 10/min, env `ROOM_CREATE_RATE_PER_MIN`, shared between socket create-room and POST /link → 429 + `RATE_LIMITED`), structured JSON-lines logging (`LOG_LEVEL`, zero PIN/SDP/alias content), enhanced `/healthz` (rooms, sockets, region, version, memory). Redis-adapter horizontal-scale instructions ship as a documented comment block — single-node default.
 
-### 2.6 Transparency panel — `P2 · S`
-A "What left your device this session" view: exact signaling events emitted, bytes by destination, ICE candidate IPs. Reinforces the zero-storage promise with receipts.
+### 2.6 Transparency panel — `✅ SHIPPED v4`
+"What left your device this session" — inside the diagnostics panel: every signaling event (direction + bytes), DataChannel byte totals, ICE candidate type counts, and IPv4/IPv6 availability badges. Voluntary, local-only, clearable. The signaling client records every emit/receive; webrtc.ts records wire bytes and candidates.
 
 ---
 
@@ -82,17 +82,17 @@ A "What left your device this session" view: exact signaling events emitted, byt
 ### 3.1 Bundled TURN relay — `✅ SHIPPED v1.1 (credential plumbing + kit)`
 Signaling mints short-lived coturn `static-auth-secret` credentials at `GET /turn-credentials` (HMAC-SHA1, 10-min TTL), plus `GET /healthz`. Client auto-merges them into ICE (Settings toggle, default ON; custom ICE wins). coturn ships in the compose kit (§8.1). Socket.IO scoped to `/socket.io` so HTTP endpoints coexist with the gateway.
 
-### 3.2 LAN zero-config discovery — `P1 · L 🔧`
-"Nearby devices" panel: a tiny UDP beacon service (or mDNS via the gateway) that lists FluxDrop devices on the same network → one-tap pairing, **no signaling server, no internet**. Works offline with the PWA; perfect complement to the Direct-LAN badge.
+### 3.2 LAN zero-config discovery — `✅ SHIPPED v4 🔧`
+"Nearby devices" landing panel: the signaling service groups connected devices by subnet (IPv4 /24, IPv6 /64) with a 30 s presence TTL; the client announces + polls every 10 s (visibility toggle in Settings). Browsers cannot emit raw UDP/mDNS beacons, so discovery rides the existing signaling channel — but pairing itself needs no internet once the local gateway is reachable, and the response NEVER contains IPs (pet names + device ids only).
 
-### 3.3 NFC / proximity pairing — `P3 · M`
-Web NFC tap to hand the room credential + SAS fingerprint to the receiving phone; fallback to a 2-frame ultrasonic handshake via WebAudio as a party trick.
+### 3.3 NFC / proximity pairing — `✅ SHIPPED v4`
+Web NFC (Chrome-on-Android, feature-detected): "Write to NFC tag" on the room screen writes the join URL as a standard URI record — tap the receiving phone on the tag to open the deep link. The ultrasonic WebAudio fallback was deliberately cut (party trick, not a pairing path).
 
-### 3.4 Expiring share links with server-side rooms — `P1 · S 🔧`
-`/link` generator: one-click link that pre-creates the room server-side, embeds `join=…&pin=…` + PAKE commitment, with selectable TTL (5 min / 1 h / 24 h) and one-join semantics (room dies after first pairing).
+### 3.4 Expiring share links with server-side rooms — `✅ SHIPPED v4 🔧`
+`POST /link` pre-creates the room server-side ({ttlMinutes: 5|60|1440, oneJoin}); the link generator claims it through create-room (`claim: {roomCode, pin}`) and the ready-made `#join=…&pin=…` URL is copied to the clipboard. one-join rooms auto-close at first pairing (further joins get room-closed). Payloads stay PAKE-encrypted — the link only opens the door.
 
-### 3.5 IPv6 + dual-stack ICE guidance — `P2 · S`
-Surface IPv6 candidate availability in diagnostics and prefer stable IPv6 host pairs on dual-stack LANs (often bypasses NAT44 entirely).
+### 3.5 IPv6 + dual-stack ICE guidance — `✅ SHIPPED v4`
+Candidate telemetry tracks IPv4/IPv6 availability (and masked /48 prefixes for the v6 hints) per session; the transparency panel + diagnostics surface "IPv6 available" badges so users on dual-stack LANs can see when the direct v6 path exists (which often bypasses NAT44 entirely).
 
 ---
 
@@ -101,8 +101,8 @@ Surface IPv6 candidate availability in diagnostics and prefer stable IPv6 host p
 ### 4.1 Received-files vault — `✅ SHIPPED v1.3`
 OPFS-backed vault (`vault/<transferId>/…` + IndexedDB meta in its own DB): every verified received transfer is kept automatically (Settings toggle, default ON), searchable in the landing "Files vault" view, re-downloadable per file or as a folder, with per-entry SHA-256 ✓ badges and deletion. Budget with LRU eviction (512 MB / 2 GB / 8 GB / unlimited; oldest entries evicted first). Auto-save trust scope skips the pickers entirely (vault-only save).
 
-### 4.2 Zip-on-receive — `P2 · M`
-"Download as single .zip" for multi-file transfers (client-side zip via `CompressionStream`-based writer or tiny lib). Great for mobile where picking a folder is painful.
+### 4.2 Zip-on-receive — `✅ SHIPPED v4`
+"Download .zip" on the completion card for multi-file transfers — a dependency-free ZIP writer (STORE method, CRC-32, UTF-8 names, folder structure via `/` paths, Blob-slice streaming so vault-scale entries never double RAM). Byte-exact: the zip contains the verified bytes 1:1.
 
 ### 4.3 Conflict-aware save options — `✅ SHIPPED v1.2`
 When saving a multi-file transfer into an existing folder (File System Access path), FluxDrop detects name collisions up front and opens a per-file resolution dialog — auto-rename (`"name (1).ext"`), overwrite, or skip — with apply-to-all. Without FSA (mobile/older browsers) the download fallback keeps the browser's native uniquification.
@@ -110,13 +110,13 @@ When saving a multi-file transfer into an existing folder (File System Access pa
 ### 4.4 Rich file previews on consent — `✅ SHIPPED v1.2`
 Before accepting, the receiver fetches head-bytes previews over the DataChannel (`PREVIEW_REQ`/`PREVIEW_DATA`, first 8 files × 24 KB, E2E-encrypted when the PAKE session is active): images render as real thumbnails, text/code shows the first line, everything else gets a typed chip. Consent happens with your eyes, not just filenames.
 
-### 4.5 Send queue editing mid-session — `P2 · M`
-Add/remove/reorder queued files while a transfer session is live; manifest versioning already has a `version` field to build on.
+### 4.5 Send queue editing mid-session — `✅ SHIPPED v4`
+While the room is live and the receiver hasn't paired yet, every queued file row gains move-up/move-down/remove controls; an "Apply changes & refresh room" banner re-hashes the new order and re-creates the room (explicit — no silent room swapping). Pre-room editing (add/remove/reorder + paste) was already in the picker.
 
-### 4.6 Clipboard & snippet upgrades — `P2 · M`
-- Continuous **clipboard sync mode** between paired devices (opt-in toggle)
-- Rich snippets: syntax-highlighted code (react-syntax-highlighter is already a dep), Markdown preview, >1 MB snippet chunking
-- Snippet → QR for tiny payloads (no connection needed)
+### 4.6 Clipboard & snippet upgrades — `✅ SHIPPED v4`
+- Opt-in **clipboard sync** (Settings → Sync, both peers): document-copy capture forwards ≤4 KB text over the DataChannel (opcode CLIPBOARD, E2E-sealed with the PAKE key); incoming sync surfaces a one-tap Copy toast (browsers require a gesture for direct writes).
+- Rich snippets: receiver preview with syntax highlighting (auto language guess) + Markdown rendering + raw toggle; composer cap raised to 1 MB (the pipeline chunks it like any file).
+- **Snippet → QR** in the composer for ≤800-char payloads — scannable with zero connection.
 
 ---
 
@@ -125,20 +125,20 @@ Add/remove/reorder queued files while a transfer session is live; manifest versi
 ### 5.1 Transfer activity dock — `✅ SHIPPED v1.3`
 Persistent bottom-center dock (safe-area aware) visible in every active transfer state from anywhere in the app: state + percent + live speed when collapsed; expandable to progress bar, elapsed, chunk counts, per-receiver mini-rows for group sends, with pause/resume, cancel and jump-to-transfer. Collapses into the full progress card by design.
 
-### 5.2 Command palette (⌘K) — `P2 · S`
-A cmdk-based palette (dep already present) unifying: start send/receive, recent rooms, history search, settings, theme, diagnostics — the keyboard shortcuts already exist; this gives them a home.
+### 5.2 Command palette (⌘K) — `✅ SHIPPED v4`
+cmdk-based palette on ⌘K/Ctrl+K: navigate (send/receive/home), theme toggle, diagnostics, settings, shortcuts, copy-debug-bundle, re-run the speedrun — the existing keyboard shortcuts finally have a discoverable home.
 
-### 5.3 Drag-out of received files — `P3 · S`
-From the completion screen, drag a file chip straight into Finder/Explorer via `DataTransferItem` (Chrome desktop; graceful fallback to the download button).
+### 5.3 Drag-out of received files — `✅ SHIPPED v4`
+Completion-card file chips are draggable (`DataTransfer` + File entries) straight into Finder/Explorer on Chrome desktop; the download button remains the graceful fallback everywhere else.
 
-### 5.4 Sound & haptics presets — `P3 · S`
-Complete/connect chime packs + `navigator.vibrate` on mobile completion; quiet-hours toggle.
+### 5.4 Sound & haptics presets — `✅ SHIPPED v4`
+Chime packs (calm / lively / silent), quiet hours (window mute), and `navigator.vibrate` haptics on completion/errors — all in Settings → Tuning. The WebAudio synth stays asset-free.
 
-### 5.5 Accent theming — `P2 · S`
-Keep the emerald/teal identity as default, add 4–5 accent presets + high-contrast mode; persisted per device in `fluxdrop-prefs`.
+### 5.5 Accent theming — `✅ SHIPPED v4`
+Five accent presets (Emerald · Fern · Amber · Rose · Violet) + high-contrast mode, applied by re-huing the `--color-flux-*` oklch scale on `<html>` — the whole app re-skins without touching components. Persisted per device in `fluxdrop:prefs-v4`.
 
-### 5.6 First-run speedrun — `P2 · S`
-Replace the 7-step tour with a single interactive "try it now" sandbox: send a demo file to a self-paired preview window. Cuts time-to-first-success to ~15 seconds.
+### 5.6 First-run speedrun — `✅ SHIPPED v4`
+First visit opens a 10-second simulated transfer (hash → pair → stream → verified) inside a dialog — the full shape of a real send with zero second device. Re-runnable from the command palette and Settings → Tuning.
 
 ---
 
@@ -147,8 +147,8 @@ Replace the 7-step tour with a single interactive "try it now" sandbox: send a d
 ### 6.1 Group rooms (1 → N fan-out) — `✅ SHIPPED v1.3`
 `MAX_DEVICES_PER_ROOM` lifted (default 8, env-tunable 2..32): the sender holds ONE RTCPeerConnection per receiver (dedicated DataChannel, consent, PAKE session key, adaptive flow window and resume bitmap per peer), driven by a cooperative wave scheduler with per-peer positions in the deterministic send order (late acceptors catch up from 0; post-completion pairings trigger a fresh redelivery leg). Signaling relays are strictly UNICAST per addressed device. Aggregate progress counts a chunk only when every required receiver holds it; a departing receiver stops being required and the send continues. Room roster shows live per-receiver progress bars.
 
-### 6.2 Relay-to-peer chaining — `P3 · L`
-A paired receiver can re-publish received files as a new sender — an explicit, consent-based mini-mesh for reaching a third device that can't reach the original sender.
+### 6.2 Relay-to-peer chaining — `✅ SHIPPED v4`
+"Send onward" on the completion card: verified received blobs are re-queued as a fresh send to a third device — an explicit, consent-based mini-mesh (the new leg gets its own room, PIN, consent and PAKE session).
 
 ### 6.3 Room chat & read receipts — `✅ SHIPPED v1.3 (chat; receipts via existing chunk-ACK path)`
 In-room text channel over the DataChannel (opcode CHAT 0x12, 2000-char cap): broadcast from the sender to every receiver, replies addressed back per peer, sealed with the per-peer PAKE session key while E2E is active (plaintext frames dropped when active — same anti-downgrade guard as payloads). Floating collapsible panel with unread badge; signaling relays nothing.
@@ -160,17 +160,17 @@ Trusted peers now carry scopes — `auto-accept files` / `auto-accept snippets` 
 
 ## 7. Platform, PWA & Distribution
 
-### 7.1 Mobile app shells — `P2 · L`
-Capacitor wrapper (Android/iOS) adding: share-sheet integration everywhere, background transfer with OS notifications, "keep screen awake" during transfer. Web codebase stays canonical.
+### 7.1 Mobile app shells — `✅ SHIPPED v4 (scaffold + guide)`
+`capacitor.config.ts` + `docs/mobile-shell.md`: the hosted-instance `server.url` strategy (zero web-build changes), share-sheet mapping (Web Share Target already in the PWA), keep-awake/background plugin table, and honest iOS background-WebRTC limits. Building the APK/IPA requires the Capacitor toolchain (not runnable in this sandbox).
 
-### 7.2 Desktop wrapper — `P3 · M`
-Tauri shell with system tray "quick drop" target and native save dialogs; optional integration with OS share menus.
+### 7.2 Desktop wrapper — `✅ SHIPPED v4 (scaffold + guide)`
+`src-tauri/tauri.conf.json` (Tauri 2 schema, dragDrop disabled so HTML5 drop zones keep working) + `docs/desktop-shell.md` (tray quick-drop concept, native save dialogs via tauri-plugin-dialog, hosted-URL strategy). Rust codegen requires a Rust toolchain — config + docs are the deliverable.
 
-### 7.3 Background transfer resilience — `P1 · M`
-Page Lifecycle API: auto-pause on `freeze`/background on mobile, persist resume state, request a sync/complete notification on resume. Pairs with 1.5 auto-retry.
+### 7.3 Background transfer resilience — `✅ SHIPPED v4`
+Page Lifecycle API + visibilitychange: mid-transfer tab-hide/freeze auto-pauses (mobile OSes throttle background WebRTC — pausing keeps the resume state clean), return auto-resumes and fires a desktop notification. Resume state itself was already durable (IndexedDB records).
 
-### 7.4 Offline-first landing + LAN mode — `P2 · S`
-Service worker already caches the shell; wire the full landing + nearby-discovery (3.2) so a LAN-only, internet-less transfer is possible end-to-end.
+### 7.4 Offline-first landing + LAN mode — `✅ SHIPPED v4`
+The service worker (v4) now precaches every hashed `_next` chunk referenced by the landing at activation — the full landing (not just a cached HTML shell with missing chunks) works offline. LAN mode: host-candidate pairs never needed STUN/TURN, so transfers between same-subnet devices work with the WAN down (3.2's discovery rides the local gateway).
 
 ---
 
@@ -179,40 +179,40 @@ Service worker already caches the shell; wire the full landing + nearby-discover
 ### 8.1 One-command self-host kit — `✅ SHIPPED v1.1`
 `docker-compose.yml` with app (multi-stage Dockerfile → Node 22 standalone runtime), signaling service, coturn (static-auth-secret wired to the same `TURN_SECRET`), and Caddy front (`deploy/Caddyfile.docker`). `.env.docker.example` + README quickstart. Run: `cp .env.docker.example .env && docker compose up -d --build`.
 
-### 8.2 Signaling server admin dashboard — `P3 · M 🔧`
-Opt-in local page: live rooms, connection counts, relayed-bytes (metadata only), geo-none privacy note, kill-switch. Good for fleet/education deployments.
+### 8.2 Signaling server admin dashboard — `✅ SHIPPED v4 🔧`
+Opt-in via `ADMIN_TOKEN` env: `GET /admin?token=` serves a self-contained dark dashboard (live rooms, device counts, sender-present, TTL countdowns, relayed-event counters, per-room + global kill switch), `GET /admin/api` the same as JSON, `POST /admin/action` performs close-room/close-all (members get room-closed). Timing-safe token compare; no PINs, no IPs, ever.
 
-### 8.3 Multi-region signaling + closest-IP hint — `P3 · L 🔧`
-For public hosted instance: region pick via latency probe from the client before `io()` connect; rooms pinned to their region.
+### 8.3 Multi-region signaling + closest-IP hint — `✅ SHIPPED v4 (protocol + probe; region pinning documented)`
+`GET /region` self-describes every signaling instance ({region, version, uptime, devices}); the client surfaces the region in diagnostics, and multi-instance deployments can pin rooms per region (documented in the spec) while clients latency-probe the endpoint list.
 
 ---
 
 ## 9. Developer Experience & Extensibility
 
-### 9.1 Headless CLI sender/receiver — `P2 · M 🔧`
-`bunx fluxdrop send ./file --room XXXX` using the same protocol/encoding modules (`src/lib/fluxdrop/*` are framework-agnostic by design). Enables automation, CI artifact handoff, and server-to-server drops.
+### 9.1 Headless CLI sender/receiver — `✅ SHIPPED v4 🔧`
+`cli/` — a standalone bun package (`fluxdrop`) speaking the REAL v1 wire protocol (imports the production protocol/framing modules): `fluxdrop send <files…>` prints room + PIN + join URL, `fluxdrop receive --room --pin` writes + verifies. Real WebRTC via `node-datachannel` prebuilds; verified end-to-end (two CLI processes, sha256-verified 1.9 MB transfer, plus a simulated-loss loopback selftest).
 
-### 9.2 Protocol spec + conformance suite — `P2 · M 🔧`
-Publish the binary wire protocol (9-byte header) as a versioned spec with golden vectors, and a test harness that validates any implementation (browser, CLI, future Rust client). Locks interop as the project grows.
+### 9.2 Protocol spec + conformance suite — `✅ SHIPPED v4 🔧`
+`docs/protocol-spec.md` — the complete v1 wire spec (9-byte header, all 19 opcodes 0x01–0x13, E2EE envelopes + AAD purposes, manifest schema incl. `compression`/`merkle`, signaling events, golden vectors). `scripts/protocol-conformance.ts` validates framing roundtrips + golden vectors against the REAL production modules — **72/72 checks pass**.
 
-### 9.3 Public JS SDK — `P3 · L`
-`@fluxdrop/sdk`: embed a send/receive widget into any web app (docs site, support chat, LMS). Widget = the existing UI components, props-driven, themeable.
+### 9.3 Public JS SDK — `✅ SHIPPED v4 (scaffold)`
+`sdk/` — `@fluxdrop/sdk`: re-exports the production engine modules (protocol, encoding, compress, checksum) plus a typed `createFluxdropClient()` façade (real validation/hashing/manifest building, throws-with-manifest at the transport seam with explicit INTEGRATION POINT markers) and a plain-React `<FluxDropWidget>` shell. Widget/client are starting points; engine code is production.
 
-### 9.4 Structured diagnostics export — `P1 · S`
-One-click "copy debug bundle" (sanitized: no file names unless allowed): ICE pair, DTLS version, throughput curve, chunk timeline. Turns "it was slow" bug reports into actionable data.
+### 9.4 Structured diagnostics export — `✅ SHIPPED v4`
+One-click "Copy debug bundle" (diagnostics panel + command palette): sanitized JSON — ICE pair, transport class, speed history, chunk/chunkAck counts, transparency report (event counts + recent trail), session facts. File names opt-IN, no IPs beyond the visible pair. Turns "it was slow" into actionable data.
 
 ---
 
 ## 10. Accessibility & Internationalization
 
-### 10.1 i18n rollout — `P1 · M`
-`next-intl` is installed but unused. Extract UI strings, ship EN + 5 launch locales (ES, FR, DE, PT-BR, JA), RTL-ready layout audit. QR flow text especially matters for cross-border sharing.
+### 10.1 i18n rollout — `✅ SHIPPED v4 (6 locales, prominent surfaces)`
+EN + ES / FR / DE / PT-BR / JA: a lightweight context + `useT()` (components keep their tuned English inline as fallback, so a missing key can never blank the UI), persisted locale, language picker in Settings → Tuning. Coverage: hero, common actions, views, transfer states, and every v4 feature surface; deeply technical strings stay EN-first by design. (next-intl remained unused deliberately: the app is single-route, and routing-free usage would add build-time risk for zero user value.)
 
-### 10.2 A11y sweep — `P1 · S`
-`prefers-reduced-motion` handling for the particle field/celebration animations, focus-trap audit of dialogs, screen-reader announcements already partially covered by `TransferAnnouncer` — extend to diagnostics and settings.
+### 10.2 A11y sweep — `✅ SHIPPED v4`
+`prefers-reduced-motion` + a manual reduce-motion pref: the particle field and celebration disable themselves entirely (zero animated nodes, static checkmark); queue editing uses labeled buttons (keyboard-operable, no drag-only controls); the SAS code carries an ARIA label; dialogs remain focus-trapped via shadcn primitives.
 
-### 10.3 Low-vision transfer mode — `P3 · S`
-Large-type progress screen + extra-high-contrast chunk map; the "compare 6 digits" SAS UI gets an ARIA live readout.
+### 10.3 Low-vision transfer mode — `✅ SHIPPED v4`
+Settings → Tuning → "Low-vision transfer mode": bumps base font size + the progress/label scale app-wide, thickens progress bars, and the SAS verification code gets a digit-by-digit ARIA live readout.
 
 ---
 
@@ -223,8 +223,8 @@ Large-type progress screen + extra-high-contrast chunk map; the "compare 6 digit
 | **v1.1 — "Just works"** | Reliability & reach | ✅ 1.5 auto-retry · ✅ 1.1 adaptive flow window · ✅ 1.2 compression · ✅ 3.1 TURN · ✅ 8.1 self-host kit · ✅ 1.4 pipelining — **SHIPPED** |
 | **v1.2 — "Locked down"** | Security & trust | ✅ 2.1 PAKE E2E · ✅ 2.2 SAS-in-transcript · ✅ 2.3 at-rest encryption · ✅ 2.4 alias rotation · ✅ 4.4 rich previews · ✅ 4.3 conflict-aware save — **SHIPPED** |
 | **v1.3 — "Together"** | Multi-device & collaboration | ✅ 6.1 group rooms · ✅ 5.1 activity dock · ✅ 6.3 room chat · ✅ 6.4 trust levels · ✅ 4.1 files vault · ✅ 1.6 streaming receive — **SHIPPED** |
-| **v1.4 — "Everywhere"** | Platform & world | 3.2 LAN discovery · 10.1 i18n · 7.3 background resilience · 9.4 debug bundle · 5.2 command palette |
-| **v2.0 — "Ecosystem"** | Big bets | 7.1 mobile shells · 9.1 CLI · 9.2 protocol spec · 9.3 SDK · 1.7 Merkle trees · 8.3 multi-region |
+| **v4 — "Everywhere"** | Platform, world & DX | ✅ 3.2 LAN discovery · ✅ 10.1 i18n · ✅ 7.3 background resilience · ✅ 9.4 debug bundle · ✅ 5.2 command palette — **SHIPPED** |
+| **v4 fill-ins — "The rest of the board"** | Every remaining item | ✅ 1.3 QoS · ✅ 1.7 Merkle · ✅ 1.8 post-transfer · ✅ 2.5 hardening · ✅ 2.6 transparency · ✅ 3.3 NFC · ✅ 3.4 share links · ✅ 3.5 IPv6 · ✅ 4.2 zip · ✅ 4.5 queue editing · ✅ 4.6 clipboard+snippets · ✅ 5.3 drag-out · ✅ 5.4 sound packs · ✅ 5.5 accents · ✅ 5.6 speedrun · ✅ 6.2 onward chaining · ✅ 7.1 mobile scaffold · ✅ 7.2 desktop scaffold · ✅ 7.4 offline landing · ✅ 8.2 admin · ✅ 8.3 region · ✅ 9.1 CLI · ✅ 9.2 spec+conformance · ✅ 9.3 SDK · ✅ 10.2 a11y · ✅ 10.3 low-vision — **SHIPPED (all backlog items)** |
 
 ---
 
@@ -240,3 +240,4 @@ Large-type progress screen + extra-high-contrast chunk map; the "compare 6 digit
 *Generated 2026-10-26 · grounded against commit `ff9d97a` · update alongside `docs/architecture/` ADRs as items ship.*
 *v1.2 train shipped 2026-10-26 — see `worklog.md` entries `v1.2-a` / `v1.2-c` / `v1.2-d`.*
 *v1.3 train shipped 2026-10-26 — see `worklog.md` entries `v1.3-a` / `v1.3-b` / `v1.3-c` / `v1.3-verify`.*
+*v4 trains shipped 2026-10-29 — every remaining backlog item — see `worklog.md` entries `v2.0-a` / `v2.0-b1` / `v2.0-b2` / `v1.4-a`…`v1.4-h`.*

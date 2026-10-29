@@ -1,0 +1,19 @@
+{
+  "name": "fluxdrop",
+  "version": "1.0.0",
+  "description": "FluxDrop headless CLI — send and receive files over the FluxDrop wire protocol (WebRTC DataChannel + socket.io signaling)",
+  "type": "module",
+  "module": "src/index.ts",
+  "bin": {
+    "fluxdrop": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "bun src/index.ts",
+    "loopback": "bun src/index.ts loopback",
+    "selftest": "bun src/index.ts loopback --size 5242880"
+  },
+  "dependencies": {
+    "node-datachannel": "^0.33.6",
+    "socket.io-client": "^4.8.1"
+  }
+}
