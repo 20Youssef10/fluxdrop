@@ -7,7 +7,6 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { formatBytes, fileTypeCategory } from '@/lib/fluxdrop/format'
 import { FileIcon } from './file-icon'
 import { isTrustedPeer } from '@/lib/fluxdrop/trusted-peers'
@@ -99,11 +98,11 @@ export function ConsentDialog({ manifest, peerAlias, peerDeviceId, onAccept, onR
         initial={{ scale: 0.92, opacity: 0, y: 12 }}
         animate={{ scale: 1, opacity: 1, y: 0 }}
         transition={{ type: 'spring', stiffness: 280, damping: 24 }}
-        className="w-full max-w-md"
+        className="flex max-h-full w-full max-w-md flex-col"
       >
-        <Card className="flux-glass overflow-hidden">
+        <Card className="flux-glass flex min-h-0 flex-1 flex-col overflow-hidden">
           {/* Header */}
-          <div className="relative border-b border-border/50 p-5">
+          <div className="relative shrink-0 border-b border-border/50 p-5">
             {/* Incoming pulse — animated ring behind the shield icon */}
             <div className="pointer-events-none absolute left-[26px] top-[30px] h-10 w-10 rounded-lg bg-flux-500/20 animate-ping [animation-duration:2s]" aria-hidden />
             <div className="relative flex items-center gap-3">
@@ -127,8 +126,9 @@ export function ConsentDialog({ manifest, peerAlias, peerDeviceId, onAccept, onR
             </div>
           </div>
 
-          {/* Summary */}
-          <div className="p-5 space-y-4">
+          {/* Summary — flex-1 + min-h-0 so this section (never the action
+              buttons) absorbs height pressure on short viewports */}
+          <div className="flux-scroll min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
             <div className="grid grid-cols-3 gap-3">
               <div className="rounded-lg border border-border/50 bg-card/40 p-2.5 text-center">
                 <p className="text-lg font-bold tabular-nums">{manifest.files.length}</p>
@@ -155,9 +155,11 @@ export function ConsentDialog({ manifest, peerAlias, peerDeviceId, onAccept, onR
               </div>
             )}
 
-            {/* File list */}
-            <ScrollArea className="max-h-48 flux-scroll">
-              <div className="space-y-1.5 pr-2">
+            {/* File list — native scroll: must NEVER overflow onto the
+                trust row / Accept / Reject buttons (live regression once
+                covered them and made the dialog undisposable) */}
+            <div className="flux-scroll max-h-40 overflow-y-auto pr-1 sm:max-h-48">
+              <div className="space-y-1.5">
                 {manifest.files.map((f, i) => {
                   const cat = fileTypeCategory(f.type, f.name)
                   const pv = filePreviews[i]
@@ -191,7 +193,7 @@ export function ConsentDialog({ manifest, peerAlias, peerDeviceId, onAccept, onR
                   )
                 })}
               </div>
-            </ScrollArea>
+            </div>
 
             {/* Validation errors */}
             {hasErrors && (
@@ -227,26 +229,29 @@ export function ConsentDialog({ manifest, peerAlias, peerDeviceId, onAccept, onR
               </label>
             )}
 
-            {/* Actions */}
-            <div className="flex gap-2 pt-2 border-t border-border/50">
-              <Button
-                variant="outline"
-                onClick={onReject}
-                className="flex-1 text-destructive hover:bg-destructive/5"
-              >
-                <X className="mr-1.5 h-4 w-4" />
-                Reject
-              </Button>
-              <Button
-                onClick={() => onAccept(trust || undefined)}
-                disabled={hasErrors}
-                autoFocus
-                className="flex-1 bg-flux-600 hover:bg-flux-700 text-white"
-              >
-                <Check className="mr-1.5 h-4 w-4" />
-                Accept
-              </Button>
-            </div>
+          </div>
+
+          {/* Actions — pinned footer OUTSIDE the scrollable summary, so
+              Reject / Accept are always visible and tappable no matter how
+              many files the manifest lists or how short the viewport is */}
+          <div className="flex shrink-0 gap-2 border-t border-border/50 px-5 py-4">
+            <Button
+              variant="outline"
+              onClick={onReject}
+              className="flex-1 text-destructive hover:bg-destructive/5"
+            >
+              <X className="mr-1.5 h-4 w-4" />
+              Reject
+            </Button>
+            <Button
+              onClick={() => onAccept(trust || undefined)}
+              disabled={hasErrors}
+              autoFocus
+              className="flex-1 bg-flux-600 hover:bg-flux-700 text-white"
+            >
+              <Check className="mr-1.5 h-4 w-4" />
+              Accept
+            </Button>
           </div>
         </Card>
       </motion.div>

@@ -13,7 +13,10 @@ function ScrollArea({
   return (
     <ScrollAreaPrimitive.Root
       data-slot="scroll-area"
-      className={cn("relative", className)}
+      // overflow-hidden is required: without it a max-h-* constraint still
+      // lets the viewport's content paint over everything below the box
+      // (e.g. consent-dialog file rows covering the Accept/Reject buttons).
+      className={cn("relative overflow-hidden", className)}
       {...props}
     >
       <ScrollAreaPrimitive.Viewport

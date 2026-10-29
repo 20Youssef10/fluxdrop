@@ -1979,3 +1979,19 @@ Work Log:
   - E2E transfer (two isolated sessions): sender WU4XWR/544967 → receiver consent dialog visible+onTop+interactive → Accept → both sides "Transfer complete · SHA-256 ✓" (191 B, ~2s).
   - History list renders the received transfer; reload after speedrun skip → no tour, no dialog, body PE normal.
 - `bun run lint` clean; dev.log free of errors; GET / 200.
+
+---
+
+Task ID: ui-fix-2
+Agent: main
+Task: Fix consent dialog — Reject/Accept buttons covered by overflowing file rows (user screenshot: 12-file manifest, rows painting over Trust row and action buttons).
+
+Work Log:
+- Root cause: project's ui/scroll-area.tsx Root was missing `overflow-hidden` (stock shadcn has it). With max-h-48 + a list taller than the box, Radix viewport content painted over all following siblings — file rows visually buried "Trust this device" and Reject/Accept, and intercepted taps. Not caught by the earlier 1-file E2E (list never exceeded the box).
+- Fixes:
+  1. scroll-area.tsx Root: restored `overflow-hidden` — fixes ALL 5 constrained usages (consent-dialog, transfer-detail-dialog, transfer-history max-h-80, save-conflict-dialog, error-log-panel).
+  2. consent-dialog.tsx hardened structurally: Card is now flex-col clamped to max-h-full; header shrink-0; summary section (stats + native-scroll file list max-h-40/sm:max-h-48 + errors + trust) is flex-1 min-h-0 overflow-y-auto; Reject/Accept moved to a pinned footer OUTSIDE the scroll area — always visible and tappable regardless of file count or viewport height.
+- Browser verification (2 isolated sessions, gateway :81):
+  - 8-file manifest, desktop 1280px: list clipped to 3 rows and scrolls (338/530px), hit-test on Reject/Accept → "NOTHING (clickable)", card fits viewport (16..561 @577vh), Accept → both sides "Transfer complete · SHA-256 ✓".
+  - 8-file manifest, mobile 390×844: card 110..735 fits, list cleanly clipped mid-row, footer buttons on-screen, hit-test passes, Accept → complete SHA-256 ✓ both sides.
+- History ScrollArea confirmed overflow:hidden after the primitive fix. bun run lint clean, dev.log clean.
