@@ -29,6 +29,8 @@ import { wipeChunkCache } from '@/lib/fluxdrop/resume'
 import { listVault, deleteVaultEntry, vaultSupported, enforceVaultBudget } from '@/lib/fluxdrop/vault'
 import { formatBytes } from '@/lib/fluxdrop/format'
 import { usePrefsStore, ACCENTS, type AccentId, type LocaleId, type SoundPack } from '@/lib/fluxdrop/prefs'
+// v5-a1: caps the fast-lane segmented control (1..4).
+import { FAST_LANE_MAX } from '@/lib/fluxdrop/protocol'
 import { LOCALES } from '@/lib/fluxdrop/i18n'
 import { useT } from '@/lib/fluxdrop/i18n'
 import { FluxLogo, FluxWordmark } from './flux-logo'
@@ -880,6 +882,50 @@ export function SettingsDialog({
                   <span>200 Mbit/s</span>
                 </div>
               </div>
+
+              {/* v5-a1: fast lanes — parallel connections for big transfers. */}
+              <div className="rounded-lg border border-border/60 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="pr-3">
+                    <p className="text-sm font-medium">Fast lanes</p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {t('tuning.fastLanes', 'Fast lanes (parallel connections for big transfers — best on lossy Wi-Fi)')}
+                    </p>
+                  </div>
+                  <span className="shrink-0 text-xs font-semibold tabular-nums text-flux-600 dark:text-flux-400">
+                    {prefs.fastLanes === 1 ? 'Off' : `${prefs.fastLanes}×`}
+                  </span>
+                </div>
+                <div className="mt-2.5 flex gap-2" role="group" aria-label="Fast lane count">
+                  {Array.from({ length: FAST_LANE_MAX }, (_, i) => i + 1).map((n) => (
+                    <button
+                      key={n}
+                      onClick={() => prefs.setFastLanes(n)}
+                      className={`flex-1 rounded-md border px-2 py-1.5 text-[11px] transition-colors ${
+                        prefs.fastLanes === n
+                          ? 'border-flux-500/60 bg-flux-500/10 font-medium'
+                          : 'border-border/60 hover:bg-card/60'
+                      }`}
+                      aria-pressed={prefs.fastLanes === n}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-1.5 text-[10px] text-muted-foreground">
+                  Applies to the next transfer (16 MB+). Lanes need a v5 receiver.
+                </p>
+              </div>
+
+              {/* v5-a2: server relay fallback — last-ditch chunk relay through
+                  the signaling server when P2P is impossible. */}
+              <PrefRow
+                icon={<Server className="h-4.5 w-4.5" />}
+                title="Server relay fallback"
+                desc={t('tuning.relayFallback', 'Relay via server when P2P is impossible (end-to-end encrypted, rate-limited)')}
+                checked={prefs.relayFallback}
+                onCheckedChange={prefs.setRelayFallback}
+              />
               <PrefRow
                 icon={<ShieldCheck className="h-4.5 w-4.5" />}
                 title="Merkle integrity tree"

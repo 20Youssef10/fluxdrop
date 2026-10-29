@@ -5,6 +5,8 @@ import { Wifi, CheckCircle2, AlertCircle, Loader2, XCircle } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { useSessionStore } from '@/stores/session-store'
+import { useTransferStore } from '@/stores/transfer-store'
+import { useT } from '@/lib/fluxdrop/i18n'
 import type { TransferState } from '@/lib/fluxdrop/protocol'
 
 const STATE_LABELS: Record<TransferState, { label: string; color: string }> = {
@@ -27,6 +29,9 @@ const STATE_LABELS: Record<TransferState, { label: string; color: string }> = {
 export function ConnectionStatus({ transferState }: { transferState: TransferState }) {
   const rtcState = useSessionStore((s) => s.rtcState)
   const dataChannelOpen = useSessionStore((s) => s.dataChannelOpen)
+  // v5-a2: this transfer is streaming through the server-relay fallback.
+  const relayed = useTransferStore((s) => s.relayed)
+  const t = useT()
 
   const meta = STATE_LABELS[transferState] ?? STATE_LABELS.IDLE
 
@@ -57,6 +62,20 @@ export function ConnectionStatus({ transferState }: { transferState: TransferSta
             <Badge variant="outline" className="text-[10px] py-0 h-4 capitalize">
               {transferState}
             </Badge>
+            {/* v5-a2: server-relay fallback marker — subtle, amber, with the
+                full explanation as a native tooltip. */}
+            {relayed && (
+              <Badge
+                variant="outline"
+                className="text-[10px] py-0 h-4 border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                title={t(
+                  'relay.tooltip',
+                  'Direct connection impossible — your end-to-end-encrypted chunks are relayed through the signaling server, rate-limited.'
+                )}
+              >
+                {t('relay.badge', 'Relayed via server')}
+              </Badge>
+            )}
           </div>
           <p className="text-xs text-muted-foreground mt-0.5">
             {describeState(transferState, rtcState, dataChannelOpen)}

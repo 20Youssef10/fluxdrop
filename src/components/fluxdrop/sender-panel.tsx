@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { ArrowDown, ArrowLeft, ArrowUp, RotateCcw, Send, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Switch } from '@/components/ui/switch'
 import { FilePicker } from './file-picker'
 import { QRDisplay } from './qr-display'
 import { DeviceList } from './device-list'
@@ -12,12 +13,14 @@ import { TransferProgress } from './transfer-progress'
 import { DiagnosticsPanel } from './diagnostics-panel'
 import { useSessionStore } from '@/stores/session-store'
 import { useTransferStore } from '@/stores/transfer-store'
+import { usePrefsStore } from '@/lib/fluxdrop/prefs'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { formatBytes, fileTypeCategory } from '@/lib/fluxdrop/format'
 import { FileIcon, getFileCategoryColors } from './file-icon'
 import { FilePreview } from './file-preview'
 import { HashingProgress } from './hashing-progress'
+import { WatchFolderPanel } from './watch-folder-panel'
 import { useT } from '@/lib/fluxdrop/i18n'
 
 interface SenderPanelProps {
@@ -36,6 +39,8 @@ interface SenderPanelProps {
 export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, onBack, onPause, onResume, isResuming }: SenderPanelProps) {
   const session = useSessionStore()
   const transfer = useTransferStore()
+  // v5-a3w: delta sync pref (toggle lives in the pre-room card below).
+  const prefs = usePrefsStore()
   const [showFiles, setShowFiles] = useState(false)
   const [dirtyQueue, setDirtyQueue] = useState(false)
   const t = useT()
@@ -66,6 +71,14 @@ export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, on
           Sender mode
         </Badge>
       </div>
+
+      {/* v5-a6: watch folder + scheduled send — compact card that stays
+          mounted across the whole sender flow so the poller (and auto-send)
+          keep running while a room is live. */}
+      <WatchFolderPanel
+        onStartSend={(fs) => onStartSend(fs)}
+        onCancel={onCancel}
+      />
 
       {/* Hashing progress (during VALIDATING state) */}
       {isValidating && (
@@ -110,6 +123,24 @@ export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, on
               </ol>
               <div className="mt-4 rounded-lg border border-flux-500/30 bg-flux-500/5 p-3 text-xs text-muted-foreground">
                 No file data ever touches the signaling server — only connection setup metadata.
+              </div>
+              {/* v5-a3w: delta sync toggle — small switch, pref-backed.
+                  Applies to the NEXT transfer (read at manifest time). */}
+              <div className="mt-3 flex items-start justify-between gap-3 rounded-lg border border-border/60 bg-card/40 p-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-foreground">
+                    {t('delta.toggle', 'Delta sync — send only what changed when the receiver already has an older copy')}
+                  </p>
+                  <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">
+                    Single-file transfers, first version. Uses the receiver&apos;s kept-files vault to skip unchanged blocks.
+                  </p>
+                </div>
+                <Switch
+                  checked={prefs.deltaSync}
+                  onCheckedChange={prefs.setDeltaSync}
+                  aria-label="Toggle delta sync"
+                  className="mt-0.5 shrink-0"
+                />
               </div>
             </Card>
           </div>

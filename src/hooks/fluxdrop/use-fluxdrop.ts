@@ -15,8 +15,9 @@ import { FluxDropSignaling } from '@/lib/fluxdrop/signaling'
 import { FluxDropWebRTC, sdpOrigin } from '@/lib/fluxdrop/webrtc'
 import { buildManifest, buildSlicePlan, resolveChunk } from '@/lib/fluxdrop/manifest'
 import { verifyChecksum, hashBlobRange } from '@/lib/fluxdrop/checksum'
-import { destroyHashWorker } from '@/lib/fluxdrop/hash-worker-client'
-import { validateFiles, formatBytes } from '@/lib/fluxdrop/format'
+// v5-a4: pooled hashing — also used by v5-a3w to hash the delta patch Blob.
+import { destroyHashWorker, hashFileWorker } from '@/lib/fluxdrop/hash-worker-client'
+import { validateFiles, formatBytes, computeTotalChunks } from '@/lib/fluxdrop/format'
 import { randomUUID } from '@/lib/fluxdrop/random'
 import {
   saveTransferRecord,
@@ -35,33 +36,51 @@ import {
 import { assembleBlob, saveBlobWithPicker, saveFilesToDirectory } from '@/lib/fluxdrop/file-io'
 // v1.3 (4.1): Files vault (OPFS) — verified received transfers are kept on
 // device before the save pickers, with a byte budget + LRU eviction.
-import { saveToVault, vaultSupported, enforceVaultBudget } from '@/lib/fluxdrop/vault'
+import { saveToVault, vaultSupported, enforceVaultBudget, listVault, getVaultFileBlob } from '@/lib/fluxdrop/vault'
 import { resolveSaveConflicts } from '@/components/fluxdrop/save-conflict-dialog'
 import type { FilePreview } from '@/stores/transfer-store'
 import { useChatStore } from '@/stores/chat-store'
 import { addRecentRoom } from '@/lib/fluxdrop/recent-rooms'
 import { isTrustedPeer, addTrustedPeer } from '@/lib/fluxdrop/trusted-peers'
 import { playSuccess, playError, playConnect, playPause, playResume } from '@/lib/fluxdrop/sound'
-import { MessageType, CONSTANTS, type TransferManifest, type TransferSummary, type TransferState } from '@/lib/fluxdrop/protocol'
+import { MessageType, CONSTANTS, FAST_LANE_MAX, FAST_LANE_MIN_BYTES, DELTA_MSG, DELTA_MAX_PATCH_BYTES, DELTA_SOURCE_MAX, DELTA_PLAN_WAIT_MS, type TransferManifest, type TransferSummary, type TransferState, type DeltaHashesBody, type DeltaPlanBody, type DeltaDeclinedBody } from '@/lib/fluxdrop/protocol'
 import { gzipCompress, gzipDecompress, shouldCompressTransfer, isCompressionSupported } from '@/lib/fluxdrop/compress'
 import { fetchTurnCredentials, mergeTurnIntoIceServers } from '@/lib/fluxdrop/turn'
 import {
   E2EHandshake,
   activateE2ESession,
   decryptWirePayload,
+  decryptJsonFromSignaling,
   encryptWirePayload,
+  encryptJsonForSignaling,
   isE2EActive,
   isE2EActiveForPeer,
   isE2EActiveForRoom,
+  isEncryptedSignalingPayload,
   resetE2ESession,
   setE2EStatus,
   type E2ERelayMessage,
 } from '@/lib/fluxdrop/e2e'
+// v5-a2: server-relayed fallback transport (last rung of the recovery ladder).
+import { RelayTransport, createRelayReceiver } from '@/lib/fluxdrop/relay-transport'
+// v5-a3w: delta sync (rsync-lite) — the pure library from v5-a3; this task
+// wires it into the engine (sealed signaling negotiation + patch streaming
+// over the normal chunk transports).
+import {
+  DELTA_BLOCK_SIZE,
+  blockHashes,
+  buildPatch,
+  encodePatch,
+  decodePatchStream,
+  applyPatch,
+} from '@/lib/fluxdrop/delta'
 import { toast } from 'sonner'
 // v4: merkle integrity tree (1.7), clipboard sync (4.6), prefs (1.3/5.4/etc).
 import { computeTransferMerkle } from '@/lib/fluxdrop/merkle'
 import { isValidClipboardFrame, deliverClipboardSync, attachClipboardSender, CLIPBOARD_MAX_LEN } from '@/lib/fluxdrop/clipboard-sync'
 import { usePrefsStore } from '@/lib/fluxdrop/prefs'
+// v5-a1: inline-fallback translations for the (muted) lane-drop toast.
+import { t } from '@/lib/fluxdrop/i18n'
 
 /**
  * v1.1: file-interleaved send order (pipelining).
@@ -121,7 +140,10 @@ function buildSendOrder(manifest: TransferManifest, plan: { fileIndex: number; s
  */
 interface SenderPeer {
   id: string
-  rtc: FluxDropWebRTC
+  // v5-a2: null for a relay-mode peer (no PC exists — the relay transport in
+  // relayModeRef is its ONLY transport). Non-relay peers always hold a live
+  // (or dead-but-present) FluxDropWebRTC.
+  rtc: FluxDropWebRTC | null
   active: boolean                 // participating in the current transfer
   nextPos: number                 // position in the send order array
   skip: Set<number>               // chunks this peer already stores (resume bitmap)
@@ -132,6 +154,20 @@ interface SenderPeer {
   skipQueryPending: boolean       // resumed send: awaiting this peer's bitmap
   completedSent: boolean          // TRANSFER_COMPLETE sent to this peer
   completed: boolean              // peer confirmed verification
+}
+
+// v5-a1: one EXTRA striped transport for the fast-lane subsystem. Lanes are
+// additive parallel RTCPeerConnections used only for large single-receiver
+// transfers: the primary (in peerRtcsRef) keeps every control message and the
+// resume bitmap continuity; lanes only ever carry chunk payloads + their acks.
+// Array index 0 in fastLaneRtcsRef === lane 1, etc. (0 is the primary, never
+// stored here).
+interface FastLane {
+  lane: number                       // 1..FAST_LANE_MAX-1
+  rtc: FluxDropWebRTC
+  bytesSent: number                  // wire bytes pushed through this lane (observability)
+  bytesReceived: number              // wire bytes ingested through this lane
+  graceTimer: ReturnType<typeof setTimeout> | null   // 3 s drop grace
 }
 
 const PREVIEW_HEAD_BYTES = 24 * 1024
@@ -206,6 +242,115 @@ export function getReceivedFilesFromCache(transferId: string): { name: string; b
   return cached
 }
 
+// ================= v5-a3w: delta sync (rsync-lite) wiring =================
+// Sealed CONTROL channel for the delta negotiation. It mirrors the v5-a2
+// sealed-manifest plumbing ("enc1.<hex>" — AES-256-GCM under the PAKE session
+// key, AAD 'manifest') but binds to the SPECIFIC peer: a group sender holds
+// one key per receiver, and encryptJsonForSignaling's peer-less fallback only
+// resolves on 1:1 legs. The messages themselves ride the OPAQUE e2e-relay
+// signaling envelope (server forwards `data` verbatim — ZERO server changes).
+
+function fdBytesToHex(b: Uint8Array): string {
+  let out = ''
+  for (let i = 0; i < b.length; i++) out += b[i].toString(16).padStart(2, '0')
+  return out
+}
+
+function fdHexToBytes(h: string): Uint8Array {
+  const clean = h.length % 2 ? '0' + h : h
+  const out = new Uint8Array(clean.length / 2)
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16)
+  return out
+}
+
+/** Seal a delta control body → "enc1.<hex>", or null when E2E is unavailable
+ *  (callers then decline — delta never falls back to plaintext control). */
+async function sealDeltaMessage(body: unknown, peerId: string | null): Promise<string | null> {
+  try {
+    const json = new TextEncoder().encode(JSON.stringify(body))
+    const enc = new Uint8Array(await encryptWirePayload(json, 'manifest', peerId))
+    return `enc1.${fdBytesToHex(enc)}`
+  } catch {
+    return null
+  }
+}
+
+/** Inverse of sealDeltaMessage — null on any tamper/desync/shape problem. */
+async function unsealDeltaMessage<T>(sealed: string, peerId: string | null): Promise<T | null> {
+  try {
+    if (typeof sealed !== 'string' || !sealed.startsWith('enc1.')) return null
+    const json = await decryptWirePayload(fdHexToBytes(sealed.slice(5)), 'manifest', peerId)
+    return JSON.parse(new TextDecoder().decode(json)) as T
+  } catch {
+    return null
+  }
+}
+
+// v5-a3w: receiver-side resume-determinism anchor, persisted in localStorage
+// (survives the mid-delta reload that wipes every in-memory ref): the digest
+// of the patch stream THIS device is (or was) accumulating for a transferId.
+// A digest change on re-negotiation means the prior file changed — the stored
+// patch-stream chunks are garbage and the progress/bitmap resets (fresh start).
+const DELTA_RECORD_KEY_PREFIX = 'fluxdrop:delta:'
+
+function readDeltaRecord(transferId: string): { patchDigest: string; patchedSize: number } | null {
+  try {
+    const raw = localStorage.getItem(DELTA_RECORD_KEY_PREFIX + transferId)
+    if (!raw) return null
+    const v = JSON.parse(raw) as { patchDigest?: unknown; patchedSize?: unknown }
+    if (typeof v.patchDigest !== 'string' || !v.patchDigest) return null
+    return { patchDigest: v.patchDigest, patchedSize: Number(v.patchedSize) || 0 }
+  } catch {
+    return null
+  }
+}
+
+function writeDeltaRecord(transferId: string, v: { patchDigest: string; patchedSize: number }): void {
+  try {
+    localStorage.setItem(DELTA_RECORD_KEY_PREFIX + transferId, JSON.stringify(v))
+  } catch { /* best-effort */ }
+}
+
+function clearDeltaRecord(transferId: string): void {
+  try {
+    localStorage.removeItem(DELTA_RECORD_KEY_PREFIX + transferId)
+  } catch { /* best-effort */ }
+}
+
+// v5-a3w: module-level mirror of the live delta mode (either side) for the
+// debug bundle — the engine owns the authoritative refs, this answers the
+// "is a delta transfer in flight" question outside the hook tree.
+let deltaModeActiveMirror = false
+
+/** v5-a3w: true while THIS device is streaming/receiving a delta patch. */
+export function isDeltaModeActive(): boolean {
+  return deltaModeActiveMirror
+}
+
+// v5-a3w: sender-side armed delta plan — when set for the live transfer, the
+// wire stream is the PATCH Blob, not the original file.
+interface DeltaSenderPlan {
+  transferId: string
+  patchBlob: Blob
+  patchedSize: number
+  patchDigest: string
+  /** Chunk count of the PATCH stream (ceil(patchedSize / chunkSize)). */
+  totalChunks: number
+}
+
+// v5-a3w: receiver-side armed delta mode — incoming chunk bytes are the PATCH
+// stream; they are accumulated by index (memory + IndexedDB for resume) and
+// decoded + reconstructed against the vault prior at completion.
+interface DeltaReceiverMode {
+  transferId: string
+  patchDigest: string
+  patchedSize: number
+  originalSize: number
+  totalChunks: number
+  /** The vault prior file the DELTA_HASHES were computed from (block source). */
+  priorBlob: Blob
+}
+
 export function useFluxDrop() {
   const session = useSessionStore()
   const transfer = useTransferStore()
@@ -220,6 +365,36 @@ export function useFluxDrop() {
   // v1.3 (6.1): ALL peer connections live here (sender → one per receiver;
   // receiver → one entry keyed by the sender's deviceId). Lookup helper below.
   const peerRtcsRef = useRef<Map<string, FluxDropWebRTC>>(new Map())
+  // v5-a1: EXTRA fast-lane transports per peer (index 0 = lane 1). The
+  // primary stays in peerRtcsRef and is NEVER restructured — an empty map
+  // (fastLanes=1, the default) is byte-identical legacy behavior.
+  const fastLaneRtcsRef = useRef<Map<string, FastLane[]>>(new Map())
+  // v5-a1 fix: fair-share striping cursor. Budget-max alone STARVES lanes on
+  // any link with headroom (equal windows → primary wins every tie → the
+  // lane PC idles for the whole transfer). The cursor rotates tie-breaks so
+  // equal-budget transports alternate chunk slots; congested transports are
+  // still excluded by the canSend gate, so lossy links keep budget-max
+  // behavior (the drained lane simply isn't a candidate).
+  const laneRotationRef = useRef<Map<string, number>>(new Map())
+  // v5-a1 fix: synchronous in-flight marker for maybeStartFastLanes — see
+  // the idempotency note there (racing triggers must not double-spin lanes).
+  const laneSpinningRef = useRef<Set<string>>(new Set())
+  // v5-a1: per-peer protocol capabilities learned from the receiver's
+  // pairing-request (see onPairingRequest). No advertisement → never send
+  // lane messages to that peer (hard backwards rule).
+  const peerCapsRef = useRef<Map<string, { fastLanes: boolean; relay: boolean }>>(new Map())
+  // v5-a2: active server-relay fallback transports per peer (relay mode).
+  // A peer in this map has NO usable P2P path — the send loop treats its
+  // RelayTransport as the ONLY transport (lanes/primary are dead by
+  // definition). While P2P works this map stays empty (dead weight only).
+  const relayModeRef = useRef<Map<string, RelayTransport>>(new Map())
+  // v5-a2: one-shot dev flag armed by window.__fluxdropRelay.forceNext() —
+  // the NEXT pairing skips PC creation entirely and goes straight to relay.
+  // Auto-cleared after a single use (engaged or not).
+  const forceRelayNextRef = useRef(false)
+  // v5-a2: dispose handle of the page-lifetime relay receiver (connect()
+  // arms it; cleanup()/unmount disposes it).
+  const relayReceiverRef = useRef<{ dispose(): void } | null>(null)
   // v1.3 (6.1): sender-side per-peer fan-out state.
   const senderPeersRef = useRef<Map<string, SenderPeer>>(new Map())
   // Device ids that MUST receive this transfer (paired+accepted when the send
@@ -297,6 +472,20 @@ export function useFluxDrop() {
   // and let completion seal the gap (or fall back to the in-memory pipeline).
   const receiverStreamBrokenRef = useRef<boolean>(false)
 
+  // --- v5-a3w: delta sync state ---
+  // SENDER: the armed plan (patch Blob as the chunk source). Set ONLY when
+  // no send loop is running (the atomic engage in onDeltaHashes re-checks
+  // synchronously before swapping), so a running loop can never observe a
+  // source change mid-stream.
+  const deltaPlanRef = useRef<DeltaSenderPlan | null>(null)
+  // RECEIVER: armed delta mode (incoming chunks are the PATCH stream).
+  const deltaModeRef = useRef<DeltaReceiverMode | null>(null)
+  // RECEIVER: the vault prior file of the CURRENT negotiation (kept for
+  // reconstruction — the plan's copy ops index into it).
+  const deltaPriorBlobRef = useRef<Blob | null>(null)
+  // RECEIVER: the pending pre-accept DELTA_PLAN wait (negotiation flow).
+  const deltaPlanWaitRef = useRef<{ transferId: string; resolve: (b: DeltaPlanBody | null) => void } | null>(null)
+
   // --- v1.2 (4.4): consent-dialog rich previews (receiver side) ---
   // One PREVIEW_REQ per manifest; PREVIEW_DATA frames resolve per-file entries
   // in the transfer store. `previewsWaitingRef` gates the 4s window after the
@@ -331,6 +520,11 @@ export function useFluxDrop() {
   const receiverStallTicksRef = useRef<number>(0)
   const receiverPokeCountRef = useRef<number>(0)
   const receiverLastPokeAtRef = useRef<number>(0)
+  // v5-a2: last relay-data frame routed into the ingest (receiver side). A
+  // recent frame means the server-relay fallback is carrying the transfer —
+  // the stall watchdog must NOT mistake that for a dead transport and poke
+  // (which would trigger the sender's P2P re-offer ladder mid-relay).
+  const relayLastChunkAtRef = useRef<number>(0)
   // --- v1.1: file-interleaved send order (pipelining) ---
   // Deterministic per manifest: same manifest → same order, so resume
   // positions (order indices) stay stable across reconnection.
@@ -349,6 +543,21 @@ export function useFluxDrop() {
   const e2eGenRef = useRef<number>(0)
 
   const isPaused = () => pauseLocalRef.current || pausePeerRef.current
+
+  // v5-a3w: receiver-side effective stream length — while a delta plan is
+  // armed for THIS transfer the live stream is the PATCH (fewer, smaller
+  // chunks than the manifest's ORIGINAL counts). Every receiver-side
+  // "totalChunks" consumer that gates on the live stream must use this.
+  const deltaStreamChunks = useCallback((m: TransferManifest): number => {
+    const d = deltaModeRef.current
+    return d && d.transferId === m.transferId ? d.totalChunks : m.totalChunks
+  }, [])
+
+  // v5-a3w: has the sender's stream kicked off? Read fresh from the LIVE
+  // store (never a narrowed ref path) — onDeltaHashes checks this twice
+  // (before the build, and synchronously before the source swap).
+  const deltaStreamingStarted = (): boolean =>
+    sendingRef.current || useTransferStore.getState().transferState === 'TRANSFERRING'
 
   // ---- Receiver chunk persistence ----
   // Chunks live in memory while streaming (per-chunk IDB writes would kill
@@ -535,6 +744,19 @@ export function useFluxDrop() {
         try { rtc.close() } catch { /* ignore */ }
       }
       peerRtcsRef.current.clear()
+      // v5-a1: lanes die with the component — no leaked PCs or grace timers.
+      for (const lanes of fastLaneRtcsRef.current.values()) {
+        for (const l of lanes) {
+          if (l.graceTimer) clearTimeout(l.graceTimer)
+          try { l.rtc.close() } catch { /* ignore */ }
+        }
+      }
+      fastLaneRtcsRef.current.clear()
+      peerCapsRef.current.clear()
+      // v5-a2: relay legs + the page-lifetime receiver die with the component.
+      teardownRelay()
+      relayReceiverRef.current?.dispose()
+      relayReceiverRef.current = null
       signalingRef.current?.disconnect()
       destroyHashWorker()
     }
@@ -719,6 +941,339 @@ export function useFluxDrop() {
     }
   }, [failE2E])
 
+  // ================= v5-a3w: delta sync negotiation =================
+  // Flow (single-file transfers only; every failure = silent full send):
+  //   receiver manifest ── has vault prior? ──> DELTA_HASHES (sealed)
+  //          │ no prior → DELTA_DECLINED (sealed)                 │
+  //          ▼                                                 ▼
+  //   [consent / full send]                    sender: buildPatch → guard →
+  //                                            DELTA_PLAN { accepted, patchedSize,
+  //                                            patchDigest } (sealed), chunk source
+  //                                            swapped to the patch Blob
+  //   receiver: plan accepted → delta mode armed BEFORE any chunk arrives
+  //   (the negotiation completes before the consent dialog / auto-accept can
+  //   send transfer-accepted; a late plan is still handled defensively).
+
+  /** Send one sealed delta control message over the opaque e2e-relay envelope. */
+  const sendDeltaControl = useCallback(async (to: string, type: string, body: unknown): Promise<boolean> => {
+    const roomId = sessionRef.current.roomId
+    if (!roomId) return false
+    const sealed = await sealDeltaMessage(body, to)
+    if (!sealed) return false // E2E unavailable — never a plaintext fallback
+    try {
+      signalingRef.current?.sendE2ERelay({
+        roomId,
+        from: sessionRef.current.deviceId,
+        to,
+        data: { type, v: 1, sealed },
+      })
+      return true
+    } catch {
+      return false
+    }
+  }, [])
+
+  /**
+   * Find the NEWEST readable vault copy of `name` (disk-backed OPFS Blob —
+   * no RAM copy). Newest-first so a re-send of v3 after v2 patches against
+   * v2, not some older sibling.
+   */
+  const findVaultPriorFile = useCallback(async (name: string): Promise<Blob | null> => {
+    try {
+      const entries = await listVault() // newest first
+      for (const e of entries) {
+        if (e.verified === false) continue
+        for (const f of e.files) {
+          if (f.name !== name) continue
+          const blob = await getVaultFileBlob(e, f)
+          if (blob && blob.size > 0) return blob
+        }
+      }
+    } catch { /* vault problems never break transfers */ }
+    return null
+  }, [])
+
+  /** Bounded wait for DELTA_PLAN — resolved by onDeltaPlan, nulled on timeout. */
+  const waitForDeltaPlan = (transferId: string, timeoutMs: number): Promise<DeltaPlanBody | null> =>
+    new Promise((resolve) => {
+      let settled = false
+      const done = (b: DeltaPlanBody | null): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        if (deltaPlanWaitRef.current?.transferId === transferId) deltaPlanWaitRef.current = null
+        resolve(b)
+      }
+      const timer = setTimeout(() => done(null), timeoutMs)
+      deltaPlanWaitRef.current = { transferId, resolve: done }
+    })
+
+  /**
+   * RECEIVER, on manifest arrival — BEFORE any accept path (manual consent,
+   * trusted auto-accept, resume auto-accept) so the sender swaps its chunk
+   * source before a single byte streams. Bounded by DELTA_PLAN_WAIT_MS; on
+   * timeout/decline we simply proceed with the normal (full-send) flow.
+   */
+  const negotiateDelta = useCallback(async (m: TransferManifest): Promise<void> => {
+    // Sender devices never negotiate (their manifests are outgoing; a stray
+    // inbound manifest on a sender is ignored here).
+    if (filesRef.current.length > 0) return
+    // A new transferId is in town — reset any previous negotiation state.
+    deltaModeRef.current = null
+    deltaPriorBlobRef.current = null
+    const entry = m.files[0]
+    // EDGE CASE: DELTA is single-file only. The sender never sets the flag on
+    // multi-file manifests — this guard also keeps a hand-crafted/hostile
+    // manifest from opting itself into delta.
+    if (!entry?.deltaCandidate || m.files.length !== 1) return
+    const senderId = peerDeviceIdRef.current
+    const roomId = sessionRef.current.roomId
+    if (!senderId || !roomId) return
+    const declineNow = (): void => {
+      // EDGE CASE: no vault prior (or unreadable) → DELTA_DECLINED so the
+      // sender never waits — the full send is the default.
+      void sendDeltaControl(senderId, DELTA_MSG.DECLINED, {
+        transferId: m.transferId,
+        fileIndex: 0,
+      } satisfies DeltaDeclinedBody)
+    }
+    try {
+      const prior = await findVaultPriorFile(entry.name)
+      if (!prior) {
+        declineNow()
+        return
+      }
+      deltaPriorBlobRef.current = prior
+      // Fingerprint the prior (main thread — blockHashes yields internally,
+      // keeping the page responsive; no receiver-side status line exists for
+      // manifest processing, so this stays UI-neutral by design).
+      const blocks = await blockHashes(prior)
+      if (blocks.length === 0) {
+        declineNow()
+        return
+      }
+      const sent = await sendDeltaControl(senderId, DELTA_MSG.HASHES, {
+        transferId: m.transferId,
+        fileIndex: 0,
+        blocks,
+        patchNote: `prior ${formatBytes(prior.size)}`,
+      } satisfies DeltaHashesBody)
+      if (!sent) return // E2E unavailable — silent full send
+      // Plan wait: onDeltaPlan arms delta mode (or the timeout abandons it —
+      // a late plan is still handled there defensively).
+      await waitForDeltaPlan(m.transferId, DELTA_PLAN_WAIT_MS)
+    } catch (err: any) {
+      // Any negotiation failure → silent full send (decline best-effort so
+      // the sender isn't left expecting hashes).
+      console.log(`[FluxDrop] v5-a3w: delta negotiation abandoned: ${err?.message ?? err}`)
+      declineNow()
+    }
+  }, [sendDeltaControl, findVaultPriorFile])
+
+  /**
+   * SENDER, on DELTA_HASHES — build the patch and (atomically) swap the
+   * transfer's chunk source. Declines whenever anything is off; a decline is
+   * always cheaper than a broken transfer.
+   */
+  const onDeltaHashes = useCallback(async (from: string, body: DeltaHashesBody) => {
+    const m = manifestRef.current
+    // EDGE CASE (ignored): DELTA for a stale/unknown transfer, or one that is
+    // not EXACTLY one file — v5 delta is single-file only.
+    if (!m || m.transferId !== body.transferId || filesRef.current.length !== 1) return
+    const file = filesRef.current[0]
+    if (!file) return
+    const decline = (why: string): void => {
+      console.log(`[FluxDrop] v5-a3w: delta declined (${why}) — full send`)
+      void sendDeltaControl(from, DELTA_MSG.PLAN, {
+        transferId: m.transferId,
+        fileIndex: 0,
+        accepted: false,
+        patchedSize: 0,
+        patchDigest: '',
+        originalSize: m.totalSize,
+      } satisfies DeltaPlanBody)
+    }
+    // The pref may have been switched off since the manifest was built (a
+    // resumed delta transfer re-rides its candidacy) — honor the live value.
+    if (!usePrefsStore.getState().deltaSync) {
+      decline('pref off')
+      return
+    }
+    // EDGE CASE: streaming already began (the receiver accepted before this
+    // message arrived — auto-accept paths race the hash computation) — the
+    // ORIGINAL bytes are in flight; swapping now would corrupt the stream.
+    if (deltaStreamingStarted()) {
+      decline('streaming already started')
+      return
+    }
+    // EDGE CASE: source too big to read fully into RAM for buildPatch.
+    if (file.size > DELTA_SOURCE_MAX) {
+      decline('source above 512 MiB')
+      return
+    }
+    try {
+      const fileBytes = new Uint8Array(await file.arrayBuffer())
+      const { ops } = await buildPatch(fileBytes, body.blocks)
+      const patchBlob = encodePatch(ops)
+      const patchedSize = patchBlob.size
+      // EDGE CASE: patch bigger than the guard → declined (full send). The
+      // patch must clear min(256 MiB, 50% of the original) to be worth it.
+      if (patchedSize > Math.min(DELTA_MAX_PATCH_BYTES, m.totalSize * 0.5)) {
+        decline(`patch ${patchedSize}B exceeds guard`)
+        return
+      }
+      // patchDigest = SHA-256 hex of the patch Blob (≤ 256 MiB, so the hash
+      // worker is preferred — keeps the main thread free).
+      const patchDigest = await hashFileWorker(new File([patchBlob], 'fluxdrop-delta.bin'))
+      // ATOMIC ENGAGE — no awaits from here on: re-check that streaming has
+      // not begun (and the transfer is not terminal — the receiver may have
+      // cancelled while we built), then swap the chunk source. JS is
+      // single-threaded, so this check+swap pair cannot interleave with a
+      // beginSending kickoff.
+      if (deltaStreamingStarted()) {
+        decline('streaming started during build')
+        return
+      }
+      {
+        const stNow = useTransferStore.getState().transferState
+        if (stNow === 'CANCELLED' || stNow === 'FAILED' || stNow === 'ERROR') {
+          // EDGE CASE: the transfer died while the patch was building —
+          // promise orphans are fine, an armed plan for a dead transfer is not.
+          decline('transfer terminal')
+          return
+        }
+      }
+      const totalChunks = computeTotalChunks(patchedSize, m.chunkSize)
+      deltaPlanRef.current = { transferId: m.transferId, patchBlob, patchedSize, patchDigest, totalChunks }
+      deltaModeActiveMirror = true
+      // Sender-side progress totals → the patch stream (consistent %).
+      const prevChunks = transferRef.current.chunksAcked
+      const prevBytes = Math.min(transferRef.current.bytesTransferred, patchedSize)
+      transferRef.current.resetProgress(totalChunks, patchedSize)
+      // A re-negotiation (receiver reload) that arrives while nothing acked is
+      // the common case; if progress existed, re-seed it (deterministic patch
+      // → same stream) instead of silently zeroing the sender's counter.
+      if (prevChunks > 0 && prevBytes > 0) transferRef.current.seedProgress(prevChunks, prevBytes)
+      void sendDeltaControl(from, DELTA_MSG.PLAN, {
+        transferId: m.transferId,
+        fileIndex: 0,
+        accepted: true,
+        patchedSize,
+        patchDigest,
+        originalSize: m.totalSize,
+      } satisfies DeltaPlanBody)
+      console.log(
+        `[FluxDrop] v5-a3w: delta plan armed — ${formatBytes(m.totalSize)} → ${formatBytes(patchedSize)} patch ` +
+          `(${Math.round((1 - patchedSize / Math.max(1, m.totalSize)) * 100)}% saved)`
+      )
+    } catch (err: any) {
+      // EDGE CASE: build failure → declined (full send). Any delta failure is
+      // a silent full send — the transfer itself must never be at risk.
+      decline(`build failed: ${err?.message ?? err}`)
+    }
+  }, [sendDeltaControl])
+
+  /**
+   * RECEIVER, on DELTA_PLAN — arm delta mode (chunks become the PATCH stream)
+   * and re-target the progress totals. Declined plans are a no-op: default
+   * mode IS the full send.
+   */
+  const onDeltaPlan = useCallback((from: string, body: DeltaPlanBody) => {
+    // Plans are receiver-side; a sender never arms delta mode (EDGE CASE:
+    // echoed/misdirected plans to a device with queued files are ignored).
+    if (filesRef.current.length > 0) return
+    const m = manifestRef.current
+    // EDGE CASE (ignored): DELTA for a stale/unknown transfer or a
+    // non-single-file manifest.
+    if (!m || m.transferId !== body.transferId || m.files.length !== 1) return
+    // Unblock the pre-accept negotiation wait when it belongs to this transfer.
+    const wait = deltaPlanWaitRef.current
+    if (wait && wait.transferId === m.transferId) {
+      deltaPlanWaitRef.current = null
+      wait.resolve(body)
+    }
+    // EDGE CASE: terminal transfer (e.g. the sender cancelled mid-build and
+    // the plan raced the cancel notice) — resolve the wait, never arm. Read
+    // the LIVE store (transferRef snapshots can lag a render).
+    {
+      const stNow = useTransferStore.getState().transferState
+      if (stNow === 'CANCELLED' || stNow === 'FAILED' || stNow === 'ERROR' || stNow === 'COMPLETE') return
+    }
+    // EDGE CASE: declined (patch over guard / build failure / streaming race)
+    // → full send. Default mode is the full send — nothing to arm.
+    if (!body.accepted) return
+    // Already armed for this exact stream (re-negotiation, same digest) —
+    // re-arming would wipe the receiver's progress; the stream is identical.
+    const already = deltaModeRef.current
+    if (already && already.transferId === m.transferId && already.patchDigest === body.patchDigest) return
+    // Resume determinism: if the digest recorded for this in-progress
+    // transfer changed, the prior file (or the sender's source) changed — the
+    // stored patch-stream chunks are garbage. RESET the progress/bitmap for a
+    // fresh start of the NEW patch stream.
+    const recorded = readDeltaRecord(m.transferId)
+    if (recorded && recorded.patchDigest !== body.patchDigest) {
+      console.warn('[FluxDrop] v5-a3w: delta patch digest changed — resetting stored progress for a fresh patch stream')
+      receiverBuffersRef.current.clear()
+      flushedChunkIdsRef.current = new Set()
+      // The resume-skip bitmap sources from the record's chunksAcked —
+      // emptying it makes the sender re-send the whole NEW patch stream.
+      void updateTransferRecord(m.transferId, (rec) => (rec ? { ...rec, chunksAcked: [] } : null))
+    }
+    const patchChunks = computeTotalChunks(body.patchedSize, m.chunkSize)
+    deltaModeRef.current = {
+      transferId: m.transferId,
+      patchDigest: body.patchDigest,
+      patchedSize: body.patchedSize,
+      originalSize: body.originalSize,
+      totalChunks: patchChunks,
+      // The prior the hashes were computed from. Missing (vault evicted
+      // between hashes and plan) → an empty Blob: every readBlock fails and
+      // reconstruction aborts loudly rather than writing a corrupt file.
+      priorBlob: deltaPriorBlobRef.current ?? new Blob(),
+    }
+    deltaModeActiveMirror = true
+    writeDeltaRecord(m.transferId, { patchDigest: body.patchDigest, patchedSize: body.patchedSize })
+    // Receiver-side progress totals → the patch stream (the manifest keeps
+    // the ORIGINAL size — verification targets it).
+    const heldChunks = transferRef.current.chunksAcked
+    const heldBytes = Math.min(transferRef.current.bytesTransferred, body.patchedSize)
+    transferRef.current.resetProgress(patchChunks, body.patchedSize)
+    // Pathological ordering (plan raced the first chunks over the DC): the
+    // already-acked chunk indices ARE patch-stream indices — re-seed them so
+    // the counter never restarts mid-stream.
+    if (heldChunks > 0 && heldBytes > 0) transferRef.current.seedProgress(heldChunks, heldBytes)
+    console.log(
+      `[FluxDrop] v5-a3w: delta mode armed — ${formatBytes(body.originalSize)} → ${formatBytes(body.patchedSize)} on the wire`
+    )
+  }, [])
+
+  /** Router for delta frames arriving over the opaque e2e-relay envelope. */
+  const handleDeltaSignaling = useCallback(async (payload: { from: string; data: unknown }): Promise<void> => {
+    const envelope = payload?.data as { type?: unknown; sealed?: unknown } | null | undefined
+    if (!envelope || typeof envelope.sealed !== 'string') return
+    const from = payload.from
+    if (envelope.type === DELTA_MSG.HASHES) {
+      const body = await unsealDeltaMessage<DeltaHashesBody>(envelope.sealed, from)
+      if (body) await onDeltaHashes(from, body)
+    } else if (envelope.type === DELTA_MSG.PLAN) {
+      const body = await unsealDeltaMessage<DeltaPlanBody>(envelope.sealed, from)
+      if (body) onDeltaPlan(from, body)
+    } else if (envelope.type === DELTA_MSG.DECLINED) {
+      const body = await unsealDeltaMessage<DeltaDeclinedBody>(envelope.sealed, from)
+      // EDGE CASE: receiver declined (no vault prior). Full send is the
+      // default; disarm any live plan for THIS transfer so a later resume
+      // leg never streams a patch the receiver can't reconstruct. (A running
+      // loop is unaffected — it captured its plan at start.)
+      if (body) {
+        console.log(`[FluxDrop] v5-a3w: receiver declined delta (${body.transferId.slice(0, 8)}) — full send`)
+        if (deltaPlanRef.current?.transferId === body.transferId) {
+          deltaPlanRef.current = null
+          deltaModeActiveMirror = false
+        }
+      }
+    }
+  }, [onDeltaHashes, onDeltaPlan])
+
   // ================= v1.3 (6.1): fan-out aggregate helpers =================
 
   /** Push one peer's live progress into the transfer store (roster UI). */
@@ -792,6 +1347,14 @@ export function useFluxDrop() {
     for (let fi = 0; fi < (manifestRef.current?.files.length ?? 0); fi++) {
       transferRef.current.markFileComplete(fi)
     }
+    // v5-a3w: delta completion — record the bandwidth the patch saved
+    // (originalSize - patchedSize; the receiver sets its own copy from the
+    // plan body at its finish). Both sides badge the summary card from it.
+    const dPlan = deltaPlanRef.current
+    if (dPlan && dPlan.transferId === manifestRef.current?.transferId) {
+      transferRef.current.setDeltaSavedBytes(Math.max(0, manifestRef.current.totalSize - dPlan.patchedSize))
+      deltaModeActiveMirror = false
+    }
     void persistTransferRecord('sender', 'COMPLETE', { checksumVerified: true })
     void flushAllPendingAcks()
     const m = manifestRef.current
@@ -820,14 +1383,20 @@ export function useFluxDrop() {
     const peer = senderPeersRef.current.get(deviceId)
     if (!peer) return
     peer.active = false
-    try { peer.rtc.close() } catch { /* ignore */ }
+    try { peer.rtc?.close() } catch { /* ignore */ }
     peerRtcsRef.current.delete(deviceId)
+    // v5-a1: a departed peer's lanes are orphans — tear them all down. (The
+    // capability entry stays: the same device may re-join and re-pair, and
+    // only a fresh pairing-request refreshes it.)
+    teardownFastLanes(deviceId)
+    // v5-a2: its relay leg is an orphan too.
+    teardownRelay(deviceId)
     senderPeersRef.current.delete(deviceId)
     requiredPeersRef.current.delete(deviceId)
     transferRef.current.removePeerProgress(deviceId)
     recomputeAggregateAfterDrop()
     const st = transferRef.current.transferState
-    const anyActive = [...senderPeersRef.current.values()].some((p) => p.active && p.rtc.isOpen)
+    const anyActive = [...senderPeersRef.current.values()].some((p) => p.active && (relayModeRef.current.has(p.id) || !!p.rtc?.isOpen))
     if (!anyActive && (st === 'TRANSFERRING' || st === 'PAUSED')) {
       transferRef.current.setTransferState('RESUMING')
       toast.warning('All receivers left the room', {
@@ -837,6 +1406,204 @@ export function useFluxDrop() {
       toast.info('A receiver left — continuing to the remaining devices')
     }
   }, [recomputeAggregateAfterDrop])
+
+  // ====================================================================
+  // v5-a2: SERVER-RELAYED FALLBACK TRANSPORT — the last rung of the recovery
+  // ladder. Engages ONLY where transferState would become FAILED (retry
+  // budget / resume budget exhausted) and P2P is provably impossible. When
+  // P2P works, everything below is dead weight: relayModeRef stays empty and
+  // the send loop never takes the relay branch.
+  //
+  // Encryption: the send loop seals every chunk with AES-256-GCM under the
+  // per-peer PAKE key BEFORE it reaches any transport (see encryptWirePayload
+  // in beginSending) — the relay carries opaque ciphertext. Engagement is
+  // therefore hard-gated on isE2EActive(peerId): a relayed transfer can never
+  // downgrade a session to plaintext.
+  // ====================================================================
+
+  /**
+   * v5-a2: close + forget the relay transport(s). One peer, or the whole map
+   * when `peerId` is omitted. Terminal states, cancel, cleanup, peer
+   * departure and a restored P2P path all funnel through here.
+   */
+  const teardownRelay = useCallback((peerId?: string) => {
+    const ids = peerId ? [peerId] : [...relayModeRef.current.keys()]
+    for (const id of ids) {
+      const t = relayModeRef.current.get(id)
+      relayModeRef.current.delete(id)
+      try { t?.close() } catch { /* ignore */ }
+    }
+  }, [])
+
+  /**
+   * v5-a2: put ONE peer into relay mode. Returns false (untouched state) when
+   * any gate fails: pref off, no room, signaling down, no manifest, no relay
+   * capability advertisement, or no active E2E session (chunks must be
+   * ciphertext before we ever hand them to a server relay). A peer that is
+   * ALREADY relaying reports true immediately — with a rewind + loop re-kick,
+   * so a re-entered ladder (resume exhaustion while relaying) restarts the
+   * stream instead of failing.
+   */
+  const engageRelayForPeer = useCallback((peerId: string, why: string): boolean => {
+    const m = manifestRef.current
+    const roomId = sessionRef.current.roomId
+    if (!peerId || !m || !roomId || !signalingRef.current?.isConnected) return false
+    const already = relayModeRef.current.has(peerId)
+    if (!already) {
+      if (peerCapsRef.current.get(peerId)?.relay !== true) return false
+      // Hard crypto gate — see the subsystem comment above.
+      if (!isE2EActive(peerId)) return false
+
+      const transport = new RelayTransport(signalingRef.current, {
+        roomId,
+        deviceId: sessionRef.current.deviceId,
+        peerDeviceId: peerId,
+        transferId: m.transferId,
+      })
+      transport.onAck((chunkIndex) => {
+        // v5-a2: exact mirror of the DC CHUNK_ACK bookkeeping (chunk-index
+        // based, transport-agnostic).
+        if (resumeAttemptsRef.current > 0) {
+          resumeAttemptsRef.current = 0
+          toast.success('Connection restored — transfer resumed')
+        }
+        const peer = senderPeersRef.current.get(peerId)
+        if (peer) {
+          if (!peer.acked.has(chunkIndex)) {
+            peer.acked.add(chunkIndex)
+            if (!chunkAckVotersRef.current.has(chunkIndex)) {
+              chunkAckVotersRef.current.set(chunkIndex, new Set())
+            }
+            syncPeerProgress(peer)
+          }
+          tryAggregateChunk(chunkIndex)
+        }
+      })
+      transport.onFatal((reason) => {
+        // The relay itself died — the ladder is out of rungs. Fail for real.
+        console.error(`[FluxDrop] v5-a2 relay transport fatal: ${reason}`)
+        teardownRelay(peerId)
+        playError()
+        transferRef.current.setTransferState('FAILED')
+        transferRef.current.setError(`Server relay failed — ${reason}`)
+        void persistTransferRecord('sender', 'FAILED')
+        toast.error('Relay fallback failed', { description: reason, duration: 10000 })
+      })
+      relayModeRef.current.set(peerId, transport)
+    }
+
+    // Fan-out entry for the relay leg: no PC exists (rtc: null) — the send
+    // loop treats the relay transport as this peer's ONLY transport.
+    // `accepted` is NOT forced true: a mid-transfer fallback peer keeps its
+    // consent, while a forced (dev-hook) fresh leg waits for the receiver's
+    // transfer-accepted over signaling — chunks never precede the manifest.
+    let peer = senderPeersRef.current.get(peerId)
+    if (!peer) {
+      peer = {
+        id: peerId,
+        rtc: null,
+        active: true,
+        nextPos: 0,
+        skip: new Set(),
+        skipCount: 0,
+        acked: new Set(),
+        enc: true, // the E2E gate above guarantees the encrypted framing
+        accepted: false,
+        skipQueryPending: false,
+        completedSent: false,
+        completed: false,
+      }
+      senderPeersRef.current.set(peerId, peer)
+    }
+    if (!requiredPeersRef.current.has(peerId)) requiredPeersRef.current.add(peerId)
+    // Rewind to the first chunk this peer doesn't hold: chunks that died
+    // in-flight with the DC are re-sent over relay (the receiver's ackChunk
+    // dedupes by index, so overlap is harmless). A fresh (forceNext) leg has
+    // an empty acked set → starts at 0 naturally.
+    {
+      const held = new Set([...peer.acked, ...peer.skip])
+      const order = sendOrderRef.current
+      let pos = 0
+      while (pos < order.length && held.has(order[pos])) pos++
+      peer.nextPos = pos
+    }
+
+    // UI + state: TRANSFERRING (the send loop continues from the rewound
+    // position — the resume bitmap semantics already track what's unsent).
+    transferRef.current.setRelayed(true)
+    transferRef.current.setTransferState('TRANSFERRING')
+    transferRef.current.startTimer()
+    resumeAttemptsRef.current = 0
+    if (!already) {
+      console.log(`[FluxDrop] v5-a2 relay engaged for peer ${peerId.slice(0, 8)} (${why})`)
+      toast.info(
+        t(usePrefsStore.getState().locale, 'relay.engaged', 'P2P unreachable — relaying through server (end-to-end encrypted)'),
+        { duration: 8000 }
+      )
+    }
+    // Restart the send loop from the rewound position (generation bump
+    // supersedes any loop still wedged in a dead-channel waitForDrain). Only
+    // when the peer already consented — a fresh (forced) leg starts streaming
+    // from the receiver's transfer-accepted event instead, mirroring the DC
+    // MANIFEST_ACK handshake.
+    if (peer.accepted) {
+      sendLoopGenRef.current++
+      sendingRef.current = false
+      void beginSendingRef.current?.()
+    }
+    return true
+  }, [persistTransferRecord, syncPeerProgress, tryAggregateChunk, teardownRelay])
+
+  /**
+   * v5-a2: the FAILED-site interception. Called at every recovery-ladder
+   * exhaustion point BEFORE transferState becomes FAILED — engages relay for
+   * every still-required peer that can relay; returns true when at least one
+   * leg engaged (caller then skips the FAILED transition).
+   */
+  const tryEngageRelayFallback = useCallback((why: string): boolean => {
+    if (!usePrefsStore.getState().relayFallback) return false
+    const targets = new Set<string>(requiredPeersRef.current)
+    if (peerDeviceIdRef.current) targets.add(peerDeviceIdRef.current)
+    let engaged = false
+    for (const peerId of targets) {
+      if (engageRelayForPeer(peerId, why)) engaged = true
+    }
+    return engaged
+  }, [engageRelayForPeer])
+
+  /**
+   * v5-a2: manifest over SIGNALING for a relay-mode leg with no DataChannel
+   * (forced-relay / dev-hook path). Sealed with the PAKE session key
+   * (enc1.<hex> — same envelope format e2e.ts ships for signaling payloads);
+   * the receiver's anti-downgrade guard accepts sealed manifests only. Control
+   * NEVER rides the chunk relay itself.
+   */
+  const sendManifestViaSignaling = useCallback(async (peerId: string) => {
+    const m = manifestRef.current
+    const roomId = sessionRef.current.roomId
+    if (!m || !roomId) return
+    if (!senderPeersRef.current.has(peerId)) return
+    // engageRelayForPeer guarantees E2E here; the wait is a defensive belt.
+    if (!isE2EActive(peerId)) await waitForE2EActive(3500, peerId)
+    if (!isE2EActive(peerId)) return
+    try {
+      const sealed = await encryptJsonForSignaling(m, 'manifest')
+      signalingRef.current?.sendTransferManifest({
+        roomId,
+        from: sessionRef.current.deviceId,
+        to: peerId,
+        manifest: sealed,
+      })
+      console.log(`[FluxDrop] v5-a2 manifest sent SEALED over signaling to ${peerId.slice(0, 8)} (relay mode)`)
+    } catch (err: any) {
+      // Fail CLOSED — never send a plaintext manifest while E2E is expected.
+      console.error('[FluxDrop] v5-a2 manifest sealing failed:', err?.message)
+      playError()
+      transferRef.current.setTransferState('ERROR')
+      transferRef.current.setError('Encryption failed — transfer aborted')
+      void persistTransferRecord('sender', 'ERROR')
+    }
+  }, [persistTransferRecord])
 
   // ---- Connect to signaling server ----
   // silent=true suppresses the connect/disconnect toasts (used for the
@@ -899,11 +1666,28 @@ export function useFluxDrop() {
             sessionRef.current.addPeer({ id: p.id, alias: p.alias, role: p.role })
           }
           peerDeviceIdRef.current = senderPeer.id
-          sig.sendPairingRequest({
+          // v5-a1: capability negotiation — the receiver advertises
+          // { fastLanes: true } on the pairing request it sends right after
+          // joining. The signaling server relays pairing-request payloads
+          // verbatim (verified: relayToDevice emits the payload object as-is),
+          // so no server change is needed. A plain-object VARIABLE (not a
+          // literal) is used so TypeScript's excess-property check for fresh
+          // literals doesn't reject the extra field against sendPairingRequest's
+          // narrower signature.
+          // v5-a2: `relay: true` added — advertises the server-relay fallback
+          // capability (chunk relay through the signaling service).
+          const pairingReq: {
+            roomId: string
+            from: string
+            to: string
+            capabilities: { fastLanes: boolean; relay: boolean }
+          } = {
             roomId: payload.roomId,
             from: sessionRef.current.deviceId,
             to: peerDeviceIdRef.current!,
-          })
+            capabilities: { fastLanes: true, relay: true }, // v5 build marker
+          }
+          sig.sendPairingRequest(pairingReq)
         }
         toast.success(`Joined room ${payload.roomId}`)
       },
@@ -938,7 +1722,20 @@ export function useFluxDrop() {
         }
         toast.warning('Peer disconnected')
       },
-      onPairingRequest: (payload: { from: string; transferSummary?: TransferSummary }) => {
+      onPairingRequest: (payload: { from: string; transferSummary?: TransferSummary; capabilities?: { fastLanes?: boolean; relay?: boolean } }) => {
+        // v5-a1: store the receiver's advertised capabilities. No
+        // advertisement (older peer) → the entry is REMOVED so lanes are
+        // never offered to that peer — the hard backwards rule.
+        // v5-a2: the same rule gates the relay fallback — an unadvertising
+        // peer never receives relayed chunks either.
+        if (payload?.capabilities?.fastLanes === true || payload?.capabilities?.relay === true) {
+          peerCapsRef.current.set(payload.from, {
+            fastLanes: payload.capabilities.fastLanes === true,
+            relay: payload.capabilities.relay === true,
+          })
+        } else {
+          peerCapsRef.current.delete(payload.from)
+        }
         // Sender receives pairing request from a receiver -> auto-accept &
         // initiate a DEDICATED WebRTC connection for this peer (v1.3 groups:
         // one offer per receiver; several can pair into the same room).
@@ -976,6 +1773,26 @@ export function useFluxDrop() {
         sessionRef.current.setPairingInProgress(true)
         sessionRef.current.setPairingAccepted(true)
         sessionRef.current.setPairingInProgress(false)
+        // v5-a2 dev hook: forceNext consumed HERE — skip PC creation entirely
+        // and go straight to the server relay (E2E handshake already kicked
+        // off above; the manifest follows SEALED over signaling once the PAKE
+        // session activates). One-shot: the flag clears whether or not relay
+        // engages (falling back to normal P2P when a gate fails).
+        if (forceRelayNextRef.current) {
+          forceRelayNextRef.current = false
+          const relayPeerId = payload.from
+          console.log('[FluxDrop] v5-a2 dev hook: forceNext — skipping PC creation, going straight to relay')
+          void (async () => {
+            await waitForE2EActive(5000, relayPeerId)
+            if (!engageRelayForPeer(relayPeerId, 'dev forceNext')) {
+              console.warn('[FluxDrop] v5-a2 forceNext could not engage relay — falling back to normal P2P')
+              void initiateWebRTCAsSender(relayPeerId)
+              return
+            }
+            await sendManifestViaSignaling(relayPeerId)
+          })()
+          return
+        }
         void initiateWebRTCAsSender(payload.from)
       },
       onPairingConfirm: (payload) => {
@@ -989,16 +1806,56 @@ export function useFluxDrop() {
       },
       onWebRtcOffer: (payload) => {
         peerDeviceIdRef.current = payload.from
+        // v5-a1: lane-tagged offers (lane >= 1) go to a DEDICATED lane PC on
+        // the receiver — they never enter handleOfferAsReceiver, so the
+        // SDP-origin in-place-answer logic can only ever match PRIMARY offer
+        // traffic (no cross-contamination with ICE restarts).
+        if (typeof payload.lane === 'number' && payload.lane >= 1) {
+          void handleLaneOfferAsReceiver(payload.from, payload.lane, payload.sdp)
+          return
+        }
         void handleOfferAsReceiver(payload.sdp)
       },
       onWebRtcAnswer: (payload) => {
+        // v5-a1: lane-tagged answers land on that lane instance only.
+        if (typeof payload.lane === 'number' && payload.lane >= 1) {
+          const laneRec = fastLaneRtcsRef.current.get(payload.from)?.find((l) => l.lane === payload.lane)
+          if (laneRec) void laneRec.rtc.acceptAnswer(payload.sdp)
+          return
+        }
         getRtc(payload.from)?.acceptAnswer(payload.sdp)
       },
       onWebRtcIce: (payload) => {
+        // v5-a1: ICE trickle tagged with a lane routes to that lane instance;
+        // absent/zero (legacy) stays on the primary.
+        if (typeof payload.lane === 'number' && payload.lane >= 1) {
+          const laneRec = fastLaneRtcsRef.current.get(payload.from)?.find((l) => l.lane === payload.lane)
+          if (laneRec) void laneRec.rtc.addIceCandidate(payload.candidate)
+          return
+        }
         getRtc(payload.from)?.addIceCandidate(payload.candidate)
       },
       onTransferManifest: (payload) => {
         peerDeviceIdRef.current = payload.from
+        // v5-a2: relay-mode manifests arrive SEALED over signaling (enc1.<hex>
+        // AES-GCM envelope under the PAKE key) — the DataChannel is dead by
+        // definition on this path. Decrypt, freeze the encrypted-wire
+        // expectation, then run the standard accept pipeline. The plaintext
+        // anti-downgrade guard below never sees sealed envelopes.
+        if (isEncryptedSignalingPayload((payload as { manifest?: unknown })?.manifest)) {
+          void (async () => {
+            try {
+              const m = await decryptJsonFromSignaling(payload.manifest as string, 'manifest')
+              if (!m) return
+              e2eWireRef.current = true
+              console.log('[FluxDrop] v5-a2 sealed manifest received over signaling — decrypted OK')
+              void handleIncomingManifest(m as TransferManifest)
+            } catch (err: any) {
+              console.warn('[FluxDrop] v5-a2 sealed signaling manifest failed to decrypt:', err?.message)
+            }
+          })()
+          return
+        }
         // v1.2 anti-downgrade: once E2E is expected (enabled + handshake in
         // flight or active), a PLAINTEXT manifest over signaling is either a
         // legacy peer or an injected fake — drop it and wait for the real
@@ -1025,6 +1882,13 @@ export function useFluxDrop() {
           }
           const acceptors = [...senderPeersRef.current.values()].filter((p) => p.accepted).length
           toast.success(`Transfer accepted${acceptors > 1 ? ` by ${acceptors} devices` : ''}`)
+          // v5-a1: kick the fast-lane trigger at ACCEPT time — the earliest
+          // moment the manifest, the single-receiver shape and the peer's
+          // capability are all known AND the transfer is about to stream.
+          // Starting here (vs. at beginSending's TRANSFERRING flip) gives
+          // lane ICE+DTLS the whole transfer duration to complete; on
+          // LAN-speed links the wire can otherwise outrun the handshake.
+          void maybeStartFastLanes()
           void beginSendingRef.current?.()
         } else {
           toast.error('Transfer rejected', { description: payload.reason ?? 'Receiver declined' })
@@ -1134,6 +1998,21 @@ export function useFluxDrop() {
         }
       },
       onE2ERelay: (payload) => {
+        // v5-a3w: delta control messages ride the SAME opaque e2e-relay
+        // envelope (server forwards `data` verbatim — zero server changes).
+        // PAKE frames stay plaintext-by-design (the handshake derives the
+        // sealing key); delta frames are sealed enc1.<hex> bodies, split out
+        // by their data.type so the PAKE switch above stays untouched.
+        const dtype = (payload as { data?: { type?: unknown } } | null | undefined)?.data as
+          | { type?: unknown }
+          | undefined
+        if (
+          typeof dtype?.type === 'string' &&
+          (dtype.type === DELTA_MSG.HASHES || dtype.type === DELTA_MSG.PLAN || dtype.type === DELTA_MSG.DECLINED)
+        ) {
+          void handleDeltaSignaling(payload)
+          return
+        }
         void handleE2ERelayPayload(payload)
       },
       onSignalingError: (payload) => {
@@ -1142,6 +2021,34 @@ export function useFluxDrop() {
     })
     sig.connect()
     signalingRef.current = sig
+    // v5-a2: the page-lifetime relay receiver — every inbound relay-data
+    // frame routes through the SAME ingest as the DataChannel CHUNK_ENC path
+    // (decrypt → gunzip → processReceivedChunk). The receiver itself sends
+    // the transport-level relay-ack, so the engine never DC-acks a relay
+    // chunk (a dead primary's sendChunkAck no-ops on a closed channel).
+    relayReceiverRef.current?.dispose()
+    relayReceiverRef.current = createRelayReceiver(sig, {
+      onChunk: (chunkIndex, bytes, meta) => {
+        const m = manifestRef.current
+        // Unknown transferId / no active transfer with that peer → ignore
+        // (mid-recovery races, post-completion stragglers, other rooms).
+        if (!m || !meta || meta.transferId !== m.transferId) return
+        if (meta.from !== peerDeviceIdRef.current) return
+        const stR = transferRef.current.transferState
+        if (stR === 'CANCELLED' || stR === 'FAILED' || stR === 'ERROR' || stR === 'COMPLETE') return
+        if (!transferRef.current.relayed) transferRef.current.setRelayed(true)
+        relayLastChunkAtRef.current = Date.now()
+        // Synthesize the DC CHUNK_ENC frame and reuse the exact ingest —
+        // fromRtc omitted: processReceivedChunk's sendChunkAck lands on the
+        // (dead) primary and no-ops, while the relay receiver already sent
+        // the transport-level relay-ack itself.
+        void handleDataChannelMessage(
+          { type: MessageType.CHUNK_ENC, chunkIndex, payload: bytes },
+          meta.from,
+          null
+        )
+      },
+    })
   }, [persistTransferRecord, flushReceiverBuffers])
 
   // Proactively connect to signaling on mount (silent — no toast). Signaling only
@@ -1176,6 +2083,15 @@ export function useFluxDrop() {
   const handleConnectionFailure = useCallback((role: 'sender' | 'receiver') => {
     const currentRetry = sessionRef.current.retryCount
     if (currentRetry >= CONSTANTS.CONNECT_RETRY_MAX) {
+      // v5-a2: retry budget exhausted — the server relay is the LAST rung
+      // before FAILED. Sender-side only (the receiver cannot drive recovery);
+      // tryEngageRelayFallback gates on the pref, the peer's relay
+      // capability and the E2E session, and flips the transfer back to
+      // TRANSFERRING when it engages.
+      if (role === 'sender' && filesRef.current.length > 0 && tryEngageRelayFallback('connection retries exhausted')) {
+        sessionRef.current.setRetryCount(0)
+        return
+      }
       transferRef.current.setTransferState('FAILED')
       transferRef.current.setError(`Connection failed after ${CONSTANTS.CONNECT_RETRY_MAX} retries`)
       toast.error('Connection failed permanently', {
@@ -1278,10 +2194,22 @@ export function useFluxDrop() {
     const m = manifestRef.current
     if (!m) return
 
+    // v5-a1: a full teardown+re-offer is coming — lanes never survive a
+    // resume transition (their chunk traffic belongs to the dead session;
+    // the re-pair re-offers via initiateWebRTCAsSender and fresh lanes spin
+    // once the transfer is TRANSFERRING again).
+    teardownFastLanes()
+
     // v1.1: bounded automatic retries with exponential backoff. The DC-close
     // → re-offer path already existed; what was missing was a cap — an
     // unreachable peer used to loop resume attempts forever.
     if (resumeAttemptsRef.current >= RESUME_ATTEMPT_MAX) {
+      // v5-a2: resume budget exhausted — the LAST rung before FAILED is the
+      // server relay. Sender-side only (the receiver waits for the sender to
+      // drive recovery; its own watchdog paths handle that side).
+      if (filesRef.current.length > 0 && tryEngageRelayFallback('resume attempts exhausted')) {
+        return
+      }
       transferRef.current.setTransferState('FAILED')
       transferRef.current.setError(`Connection lost — resume failed after ${RESUME_ATTEMPT_MAX} attempts`)
       playError()
@@ -1424,6 +2352,60 @@ export function useFluxDrop() {
     }
   }, [])
 
+  // v5-a1: dev-only lane observability (mirrors __fluxdropIce above). Calling
+  // window.__fluxdropLanes() returns
+  //   { peers: [{ peerId, lanes: [{ lane, open, state, bytesSent,
+  //                bytesReceived, bufferedAmount }] }] }
+  // for E2E verification of the striping. Compiled out of production builds.
+  useEffect(() => {
+    if (process.env.NODE_ENV !== 'development') return
+    ;(window as any).__fluxdropLanes = () => ({
+      peers: [...fastLaneRtcsRef.current.entries()].map(([peerId, lanes]) => ({
+        peerId,
+        lanes: lanes.map((l) => ({
+          lane: l.lane,
+          open: l.rtc.isOpen,
+          state: l.rtc.connectionState,
+          bytesSent: l.bytesSent,
+          bytesReceived: l.bytesReceived,
+          bufferedAmount: l.rtc.bufferedAmount,
+        })),
+      })),
+    })
+    return () => {
+      delete (window as any).__fluxdropLanes
+    }
+  }, [])
+
+  // v5-a2: dev-only relay observability + E2E-test hook (mirrors
+  // __fluxdropIce / __fluxdropLanes above).
+  //   window.__fluxdropRelay.forceNext() — one-shot flag: the NEXT pairing
+  //     skips PC creation entirely and goes straight to the server relay
+  //     (auto-clears after a single use, engaged or not).
+  //   window.__fluxdropRelay.status() — { forced, peers: [...] } for the
+  //     orchestrator to assert the relay path engaged.
+  // Compiled out of production builds.
+  useEffect(() => {
+    if (process.env.NODE_ENV !== 'development') return
+    ;(window as any).__fluxdropRelay = {
+      forceNext: () => {
+        forceRelayNextRef.current = true
+        console.log('[FluxDrop] v5-a2: forceNext armed — the next transfer skips P2P and relays via the server (one-shot)')
+      },
+      status: () => ({
+        forced: forceRelayNextRef.current,
+        peers: [...relayModeRef.current.entries()].map(([peerId, t]) => ({
+          peerId,
+          availableWindow: t.availableWindow(),
+          bytesSent: t.bytesSent,
+        })),
+      }),
+    }
+    return () => {
+      delete (window as any).__fluxdropRelay
+    }
+  }, [])
+
   // ---- Helper: get effective ICE servers ----
   // v1.1: async + TURN merge. User-configured custom servers win entirely;
   // otherwise short-lived auto-minted TURN credentials are appended as a
@@ -1442,12 +2424,348 @@ export function useFluxDrop() {
     return mergeTurnIntoIceServers(undefined, turn, s.useTurnRelay)
   }, [])
 
+  // ====================================================================
+  // v5-a1: FAST LANES — additive multi-PC striping for single-receiver
+  // large transfers. The primary (peerRtcsRef) is NEVER restructured; lanes
+  // are extra RTCPeerConnections that only carry chunk payloads + their acks.
+  // Trigger gates (maybeStartFastLanes): transfer TRANSFERRING, manifest
+  // bigger than FAST_LANE_MIN_BYTES, pref fastLanes > 1, EXACTLY ONE receiver,
+  // and the receiver advertised the fastLanes capability. fastLanes=1 (the
+  // default) is a byte-identical legacy path — the only cost is one falsy
+  // map lookup per chunk slot.
+  // ====================================================================
+
+  /** v5-a1: how long a dropped lane lingers before removal (self-heal window). */
+  const FAST_LANE_GRACE_MS = 3000
+
+  /**
+   * v5-a1: apply the QoS cap as an AGGREGATE budget split across every live
+   * transport of each peer (primary + lanes) so N parallel token buckets never
+   * multiply the user's cap. Without lanes this is exactly the legacy call.
+   */
+  const applyQosCapSplit = useCallback((mbps: number) => {
+    for (const peer of senderPeersRef.current.values()) {
+      const lanes = fastLaneRtcsRef.current.get(peer.id)
+      const per = mbps > 0 ? mbps / (1 + (lanes?.length ?? 0)) : null
+      // v5-a2: relay-mode peers have no PC — the server bucket paces them.
+      peer.rtc?.setQosCapMbps(per)
+      for (const l of lanes ?? []) l.rtc.setQosCapMbps(per)
+    }
+    // No fan-out state (receiver side, or sender pre-pairing): the single
+    // primary carries the full cap. (Sender PCs created before their first
+    // DC-open already picked the cap up in the FluxDropWebRTC constructor.)
+    if (senderPeersRef.current.size === 0) {
+      getRtc()?.setQosCapMbps(mbps > 0 ? mbps : null)
+    }
+  }, [])
+
+  /**
+   * v5-a1: remove ONE lane — splice it out of the peer's lane array, clear its
+   * grace timer and close its PC. `notify` shows the single muted toast (used
+   * on the SENDER side only — the receiver has no lane UX).
+   */
+  const dropFastLane = useCallback((peerId: string, record: FastLane, notify: boolean) => {
+    const lanes = fastLaneRtcsRef.current.get(peerId)
+    if (lanes) {
+      const i = lanes.indexOf(record)
+      if (i >= 0) lanes.splice(i, 1)
+      if (lanes.length === 0) fastLaneRtcsRef.current.delete(peerId)
+    }
+    if (record.graceTimer) {
+      clearTimeout(record.graceTimer)
+      record.graceTimer = null
+    }
+    try { record.rtc.close() } catch { /* ignore */ }
+    // The QoS split changes with the transport count — re-assert it.
+    applyQosCapSplit(usePrefsStore.getState().qosCapMbps)
+    if (notify) {
+      // ONE muted toast per lane drop; the transfer keeps flowing on the rest.
+      const locale = usePrefsStore.getState().locale
+      toast.info(
+        t(locale, 'transfer.fastLaneDropped', 'Fast lane {n} dropped — continuing on remaining lanes').replace('{n}', String(record.lane)),
+        { duration: 4000 }
+      )
+    }
+  }, [])
+
+  /**
+   * v5-a1: tear down every lane (one peer, or the whole map when `peerId` is
+   * omitted). Called from: cleanup, leave-room, transfer complete/cancel
+   * (terminal states), peer departure, primary re-offer (attemptResume /
+   * handleConnectionFailure via initiateWebRTCAsSender) and primary death.
+   */
+  const teardownFastLanes = useCallback((peerId?: string) => {
+    const ids = peerId ? [peerId] : [...fastLaneRtcsRef.current.keys()]
+    let touched = false
+    for (const id of ids) {
+      const lanes = fastLaneRtcsRef.current.get(id)
+      if (!lanes) continue
+      fastLaneRtcsRef.current.delete(id)
+      touched = true
+      for (const l of lanes) {
+        if (l.graceTimer) {
+          clearTimeout(l.graceTimer)
+          l.graceTimer = null
+        }
+        try { l.rtc.close() } catch { /* ignore */ }
+      }
+    }
+    if (touched) applyQosCapSplit(usePrefsStore.getState().qosCapMbps)
+  }, [])
+
+  /**
+   * v5-a1: lane PC connection-state watcher. 'disconnected' often self-heals
+   * and 'failed'/'closed' are terminal — every drop gets a 3 s grace before
+   * removal; a revive ('connected') cancels the timer.
+   */
+  const laneConnState = useCallback((peerId: string, record: FastLane, state: RTCPeerConnectionState) => {
+    if (state === 'connected') {
+      if (record.graceTimer) {
+        clearTimeout(record.graceTimer)
+        record.graceTimer = null
+      }
+      return
+    }
+    if (state === 'disconnected' || state === 'failed' || state === 'closed') {
+      if (record.graceTimer) return
+      record.graceTimer = setTimeout(() => {
+        record.graceTimer = null
+        // Muted toast on the sender only — the receiving side has no lane UX.
+        dropFastLane(peerId, record, filesRef.current.length > 0)
+      }, FAST_LANE_GRACE_MS)
+    }
+  }, [])
+
+  /** v5-a1: a lane DataChannel opened — joins the striping rotation. */
+  const laneOpened = useCallback((peerId: string, record: FastLane) => {
+    const st = transferRef.current.transferState
+    if (st !== 'TRANSFERRING' && st !== 'PAUSED') {
+      // Lane DC opened after the transfer finished (or failed) — close
+      // immediately so no zombie PC outlives the session.
+      dropFastLane(peerId, record, false)
+      return
+    }
+    console.log(`[FluxDrop] Fast lane ${record.lane} open — joining the striping rotation`)
+  }, [])
+
+  /**
+   * v5-a1: a lane DataChannel closed — terminal (a closed DC never revives),
+   * so drop without the grace window.
+   */
+  const laneClosed = useCallback((peerId: string, record: FastLane) => {
+    dropFastLane(peerId, record, false)
+  }, [])
+
+  /**
+   * v5-a1 (sender): spin up (fastLanes - 1) extra transports for the single
+   * receiver, mirroring the primary's offer/ICE exchange with `lane`-tagged
+   * signaling payloads. Payloads are passed as plain-object VARIABLES so the
+   * extra `lane` field rides sendOffer/sendIce unchanged (TS excess-property
+   * checks only apply to fresh literals; the server forwards payload objects
+   * verbatim — verified in mini-services/signaling relayToDevice).
+   */
+  const maybeStartFastLanes = useCallback(async () => {
+    const m = manifestRef.current
+    const prefLanes = usePrefsStore.getState().fastLanes
+    // fastLanes=1 → zero-overhead legacy path (one falsy check, nothing more).
+    if (!m || prefLanes <= 1) return
+    // Transfers below the threshold never spin lanes.
+    if (m.totalSize <= FAST_LANE_MIN_BYTES) return
+    // v5 bound: striping is single-receiver only. (A receiver joining later
+    // gets no lanes — pickStripingTransport is per-peer and simply finds none.)
+    if (senderPeersRef.current.size !== 1) return
+    const peer = [...senderPeersRef.current.values()][0]
+    if (!peer?.active || !peer.rtc?.isOpen) return
+    // Capability: no advertisement → never send lane messages to that peer.
+    if (peerCapsRef.current.get(peer.id)?.fastLanes !== true) return
+    // Idempotency: a running loop (kick/restart) must not double the lanes.
+    // Two triggers can race (accept-time + beginSending both fire within the
+    // same tick) and BOTH pass a length check taken before the first
+    // await — a synchronous in-flight marker is the only reliable guard
+    // (the length>0 check stays as the steady-state fast path).
+    if (laneSpinningRef.current.has(peer.id)) return
+    if ((fastLaneRtcsRef.current.get(peer.id) ?? []).length > 0) return
+    laneSpinningRef.current.add(peer.id)
+    try {
+    const roomId = sessionRef.current.roomId
+    const deviceId = sessionRef.current.deviceId
+    if (!roomId || !deviceId) return
+
+    const wanted = Math.min(prefLanes, FAST_LANE_MAX) - 1
+    const iceServers = await getEffectiveIceServers()
+    const lanes: FastLane[] = []
+    fastLaneRtcsRef.current.set(peer.id, lanes)
+    console.log(
+      `[FluxDrop] Fast lanes: opening ${wanted} extra lane(s) to ${peer.id.slice(0, 8)} ` +
+      `(${formatBytes(m.totalSize)} > ${formatBytes(FAST_LANE_MIN_BYTES)} threshold)`
+    )
+    for (let n = 1; n <= wanted; n++) {
+      // Cancel mid lane-negotiation must not leak PCs: verify the map entry
+      // is still OURS before and after every await.
+      if (fastLaneRtcsRef.current.get(peer.id) !== lanes) return
+      const record = { lane: n, rtc: null, bytesSent: 0, bytesReceived: 0, graceTimer: null } as unknown as FastLane
+      const laneRtc = new FluxDropWebRTC(
+        {
+          iceServers,
+          channelLabel: `fluxdrop-lane${n}`,
+          channelCount: 1, // a lane PC carries exactly ONE DataChannel
+          onIceCandidate: (candidate) => {
+            const ice = {
+              roomId: sessionRef.current.roomId!,
+              from: sessionRef.current.deviceId,
+              to: peer.id,
+              candidate,
+              lane: n, // v5-a1: lane-tagged trickle
+            }
+            signalingRef.current?.sendIce(ice)
+          },
+          onConnectionStateChange: (state) => laneConnState(peer.id, record, state),
+          onDataChannelOpen: () => laneOpened(peer.id, record),
+          onDataChannelClose: () => laneClosed(peer.id, record),
+          onDataChannelMessage: (msg) => {
+            record.bytesReceived += msg?.payload?.byteLength ?? 0
+            // Same ingest as the primary: CHUNK_ACK bookkeeping is
+            // chunk-index-based and transport-agnostic. `fromRtc` makes the
+            // receiver's ack-for-this-chunk ride THIS lane back.
+            handleDataChannelMessage(msg, peer.id, laneRtc)
+          },
+          onError: (err) => {
+            // Muted: lane errors never spam the primary error toasts.
+            console.warn(`[FluxDrop] Fast lane ${n} error (muted):`, err.message)
+          },
+        },
+        true
+      )
+      record.rtc = laneRtc
+      lanes.push(record)
+      if (fastLaneRtcsRef.current.get(peer.id) !== lanes) {
+        try { laneRtc.close() } catch { /* ignore */ }
+        return
+      }
+      try {
+        const offer = await laneRtc.createOffer()
+        if (fastLaneRtcsRef.current.get(peer.id) !== lanes) {
+          try { laneRtc.close() } catch { /* ignore */ }
+          return
+        }
+        const offerPayload = {
+          roomId,
+          from: deviceId,
+          to: peer.id,
+          sdp: offer,
+          lane: n, // v5-a1: marks this as an extra-lane offer (>= 1)
+        }
+        signalingRef.current?.sendOffer(offerPayload)
+      } catch (err: any) {
+        console.warn(`[FluxDrop] Fast lane ${n} offer failed:`, err?.message)
+        dropFastLane(peer.id, record, false)
+      }
+    }
+    // Lanes change the per-transport QoS budget — re-split the cap.
+    applyQosCapSplit(usePrefsStore.getState().qosCapMbps)
+    } finally {
+      // v5-a1 fix: release the in-flight marker on EVERY exit path (including
+      // the guard-style early returns above — those return from inside the
+      // try, so this finally always runs).
+      laneSpinningRef.current.delete(peer.id)
+    }
+  }, [])
+
+  /**
+   * v5-a1 (receiver): a lane-tagged offer arrived. Creates a DEDICATED lane
+   * PC (lane offers always mean NEW PCs — they never participate in the ICE
+   * restart / in-place-answer ladder), attaches the SAME chunk ingest the
+   * primary uses, and echoes the lane id on the answer + ICE trickle.
+   */
+  const handleLaneOfferAsReceiver = useCallback(async (senderId: string, lane: number, sdp: RTCSessionDescriptionInit) => {
+    const st = transferRef.current.transferState
+    // Only accept lanes while the transfer is still LIVE (TRANSFERRING or
+    // VERIFYING — on fast links the wire finishes before lane ICE does, and
+    // VERIFYING is seconds away from a lane still being useful for the tail
+    // of the ACK drain). Mid-recovery/RESUMING/terminal → ignore: the
+    // sender's own lane lifecycle tears its half down when the lane never
+    // opens (3 s grace on its side).
+    if ((st !== 'TRANSFERRING' && st !== 'VERIFYING') || !manifestRef.current) {
+      console.warn(`[FluxDrop] Ignoring fast-lane ${lane} offer while ${st}`)
+      return
+    }
+    const roomId = sessionRef.current.roomId
+    const deviceId = sessionRef.current.deviceId
+    if (!roomId || !deviceId) return
+    // Duplicate lane id → close the old lane, accept the new one.
+    const existing = fastLaneRtcsRef.current.get(senderId) ?? []
+    const dup = existing.find((l) => l.lane === lane)
+    if (dup) {
+      console.warn(`[FluxDrop] Duplicate fast-lane ${lane} offer — replacing the old lane`)
+      dropFastLane(senderId, dup, false)
+    }
+    const record = { lane, rtc: null, bytesSent: 0, bytesReceived: 0, graceTimer: null } as unknown as FastLane
+    const laneRtc = new FluxDropWebRTC(
+      {
+        iceServers: await getEffectiveIceServers(),
+        onIceCandidate: (candidate) => {
+          const ice = {
+            roomId: sessionRef.current.roomId!,
+            from: sessionRef.current.deviceId,
+            to: senderId,
+            candidate,
+            lane, // v5-a1: lane-tagged trickle (echoed)
+          }
+          signalingRef.current?.sendIce(ice)
+        },
+        onConnectionStateChange: (state) => laneConnState(senderId, record, state),
+        onDataChannelOpen: () => laneOpened(senderId, record),
+        onDataChannelClose: () => laneClosed(senderId, record),
+        onDataChannelMessage: (msg) => {
+          record.bytesReceived += msg?.payload?.byteLength ?? 0
+          // SAME ingest as the primary offer path: chunk handling is
+          // chunk-index-based and transport-agnostic, and `fromRtc` makes the
+          // CHUNK_ACK for every lane-delivered chunk ride THIS lane back.
+          handleDataChannelMessage(msg, senderId, laneRtc)
+        },
+        onError: (err) => {
+          console.warn(`[FluxDrop] Fast lane ${lane} error (muted):`, err.message)
+        },
+      },
+      false
+    )
+    record.rtc = laneRtc
+    const lanes = fastLaneRtcsRef.current.get(senderId) ?? []
+    lanes.push(record)
+    fastLaneRtcsRef.current.set(senderId, lanes)
+    try {
+      const answer = await laneRtc.createAnswer(sdp)
+      if (!fastLaneRtcsRef.current.get(senderId)?.includes(record)) {
+        // Torn down while answering — do not revive a dead session's lane.
+        try { laneRtc.close() } catch { /* ignore */ }
+        return
+      }
+      const answerPayload = {
+        roomId,
+        from: deviceId,
+        to: senderId,
+        sdp: answer,
+        lane, // v5-a1: lane echo
+      }
+      signalingRef.current?.sendAnswer(answerPayload)
+      console.log(`[FluxDrop] Fast lane ${lane} answered — awaiting DataChannel`)
+    } catch (err: any) {
+      console.warn(`[FluxDrop] Fast lane ${lane} answer failed:`, err?.message)
+      dropFastLane(senderId, record, false)
+    }
+  }, [])
+
   // ---- Sender: initiate WebRTC as the offerer (per receiver, v1.3 groups) ----
   // Every receiver gets its OWN RTCPeerConnection + DataChannel. The manifest
   // is (re-)sent on THIS peer's channel when it opens — each peer consents,
   // and its E2E handshake is negotiated independently.
   const initiateWebRTCAsSender = useCallback(async (peerId: string | null) => {
     if (!peerId) return
+    // v5-a1: a fresh primary offer invalidates any lanes from the previous
+    // leg — tear them down before re-pairing. This one hook covers every
+    // re-offer site (attemptResume, handleConnectionFailure, retry buttons)
+    // without touching the recovery ladder itself.
+    teardownFastLanes(peerId)
     const oldRtc = peerRtcsRef.current.get(peerId)
     if (oldRtc) {
       try { oldRtc.close() } catch { /* ignore */ }
@@ -1517,7 +2835,7 @@ export function useFluxDrop() {
             // that peer and continue with the rest. Solo senders keep the
             // full retry flow.
             const othersLive = [...senderPeersRef.current.values()].some(
-              (p) => p.id !== peerId && p.active && p.rtc.isOpen
+              (p) => p.id !== peerId && p.active && (relayModeRef.current.has(p.id) || !!p.rtc?.isOpen)
             )
             if (othersLive && requiredPeersRef.current.size > 1) {
               console.warn(`[FluxDrop] Peer ${peerId.slice(0, 8)} connection failed — dropping from group send`)
@@ -1530,6 +2848,13 @@ export function useFluxDrop() {
         onDataChannelOpen: () => {
           sessionRef.current.setDataChannelOpen(true)
           sessionRef.current.setRetryCount(0)
+          // v5-a2: P2P is (back) up — the relay leg becomes dead weight.
+          // Tear it down so the send loop stripes over the live primary
+          // again ("when P2P works, relay is dead weight only").
+          if (relayModeRef.current.has(peerId)) {
+            console.log('[FluxDrop] v5-a2: P2P DataChannel (re)opened — dropping the relay fallback leg')
+            teardownRelay(peerId)
+          }
           const rtcOpen = peerRtcsRef.current.get(peerId)
           // v1.1: seed the adaptive flow window from the transport class
           // (host↔host → fat window; relayed → conservative).
@@ -1648,9 +2973,17 @@ export function useFluxDrop() {
           }
           if (transferRef.current.transferState === 'TRANSFERRING' || transferRef.current.transferState === 'PAUSED') {
             const othersLive = [...senderPeersRef.current.values()].some(
-              (p) => p.id !== peerId && p.active && p.rtc.isOpen
+              // v5-a2: a relay-mode peer counts as live — its fallback leg
+              // IS its transport while P2P is dead.
+              (p) => p.id !== peerId && p.active && (relayModeRef.current.has(p.id) || !!p.rtc?.isOpen)
             )
             if (!othersLive) {
+              // v5-a1: the PRIMARY died — lanes are orphans of the dead
+              // session. Tear them all down, then let the EXISTING recovery
+              // ladder run untouched (it re-offers via
+              // initiateWebRTCAsSender, which spins fresh lanes after the
+              // transfer resumes).
+              teardownFastLanes(peerId)
               transferRef.current.setTransferState('RESUMING')
               // Real resume: persist state and attempt ICE restart.
               void attemptResume()
@@ -1758,6 +3091,11 @@ export function useFluxDrop() {
       try { oldRtc.close() } catch { /* ignore */ }
       if (senderId) peerRtcsRef.current.delete(senderId)
     }
+    // v5-a1: a fresh-PC offer means the sender is rebuilding the primary —
+    // any lanes from the dead session are orphans (the sender spins new
+    // ones after the transfer resumes). The in-place-answer path above
+    // already returned, so ICE-restart renegotiations NEVER reach this.
+    teardownFastLanes(senderId ?? undefined)
     const rtc = new FluxDropWebRTC(
       {
         iceServers: await getEffectiveIceServers(),
@@ -1829,6 +3167,10 @@ export function useFluxDrop() {
         onDataChannelClose: () => {
           sessionRef.current.setDataChannelOpen(false)
           stopDiagnosticsPolling()
+          // v5-a1: the primary died on the receiver side — its lanes are
+          // orphans. The sender re-offers (fresh PC) when it recovers and
+          // spins new lanes for the resumed leg.
+          teardownFastLanes(peerDeviceIdRef.current ?? undefined)
         },
         onDataChannelMessage: (msg) => handleDataChannelMessage(msg, peerDeviceIdRef.current),
         onError: (err) => {
@@ -1871,15 +3213,27 @@ export function useFluxDrop() {
   // from. SENDER-side cases (MANIFEST_ACK / CHUNK_ACK / completion acks /
   // preview requests) route per peer; RECEIVER-side cases use it to address
   // replies back to the sender.
-  const handleDataChannelMessage = useCallback(async (msg: any, fromPeerId?: string | null) => {
+  const handleDataChannelMessage = useCallback(async (msg: any, fromPeerId?: string | null, fromRtc?: FluxDropWebRTC | null) => {
     const m = manifestRef.current
     const peerId = fromPeerId ?? peerDeviceIdRef.current
-    const rtcFrom = getRtc(peerId)
+    // v5-a1: `fromRtc` is the transport the frame PHYSICALLY arrived on (a
+    // fast lane). Replies — above all the CHUNK_ACK inside
+    // processReceivedChunk — go back on that SAME transport, so a lane's acks
+    // never detour through the primary. The primary paths pass nothing and
+    // resolve exactly as before.
+    const rtcFrom = fromRtc ?? getRtc(peerId)
 
     // Shared chunk-accept pipeline (v1.1): used by BOTH CHUNK_DATA and the
     // gzip variant. Bytes arriving here are always ORIGINAL (decompressed)
     // data — bitmaps, byte offsets, and checksums never see the wire format.
     const processReceivedChunk = async (mm: TransferManifest, chunkIndex: number, bytes: ArrayBuffer) => {
+      // v5-a3w: while a delta plan is armed for THIS transfer, the incoming
+      // bytes are the PATCH stream. They keep living in the memory map (+ the
+      // IndexedDB resume cache) exactly like original bytes — only the OPFS
+      // temp spill is bypassed: the patch never lands in the output file's
+      // byte layout, it is decoded + reconstructed against the vault prior at
+      // completion (see finishReceiverDelta).
+      const dMode = deltaModeRef.current?.transferId === mm.transferId ? deltaModeRef.current : null
       // Keep chunk in memory (fast). Only save to IndexedDB if the transfer
       // is interrupted — we do this lazily to avoid IDB write overhead on
       // every single chunk, which is the #1 throughput killer.
@@ -1907,7 +3261,7 @@ export function useFluxDrop() {
       // resume persistence is untouched: the %1024 lazy flush below keeps
       // covering whatever is still in memory, and completion reads trimmed
       // chunks back from the temp itself.
-      if (shouldStreamReceive(mm) && !receiverStreamBrokenRef.current) {
+      if (!dMode && shouldStreamReceive(mm) && !receiverStreamBrokenRef.current) {
         opfsWriteChainRef.current = opfsWriteChainRef.current.then(async () => {
           try {
             const writable = await ensureReceiverWritable(mm.transferId)
@@ -1931,7 +3285,10 @@ export function useFluxDrop() {
       if (chunkIndex > 0 && chunkIndex % 1024 === 0) {
         flushReceiverBuffers()
       }
-      if (chunkIndex === mm.totalChunks - 1) {
+      // v5-a3w: the live stream's length is the PATCH chunk count while a
+      // delta plan is armed (the manifest's counts describe the original).
+      const effTotal = dMode ? dMode.totalChunks : mm.totalChunks
+      if (chunkIndex === effTotal - 1) {
         // Let queued OPFS writes land before completion inspects the temp.
         const chain = opfsWriteChainRef.current
         try { await chain } catch { /* ignore */ }
@@ -2002,9 +3359,13 @@ export function useFluxDrop() {
             if (resumeSkipPendingRef.current && m) {
               // Resumed send: ask THIS receiver what it already has so stored
               // chunks never travel the wire twice (bitmap per peer).
+              // v5-a2: a relay-mode peer has no DC — the resume query can't
+              // ride the chunk-only relay; the 5 s fallback timer in the
+              // MANIFEST_ACK/resume paths then streams from the rewound
+              // position (the receiver dedupes by index, so it's only cost).
               peer.skipQueryPending = true
               console.log(`[FluxDrop] Sending resume-skip query to ${peerId.slice(0, 8)} for ${m.transferId.slice(0, 8)}`)
-              peer.rtc.sendResumeQuery(m.transferId)
+              peer.rtc?.sendResumeQuery(m.transferId)
             }
           }
           void beginSendingRef.current?.()
@@ -2318,6 +3679,12 @@ export function useFluxDrop() {
             // stored payload must NOT be skipped (it would leave a hole in the
             // reassembled file and fail verification).
             const stored = await getStoredChunkIndices(m.transferId)
+            // v5-a3w: a delta-armed resume answers over the PATCH stream — the
+            // bitmap bounds + byte cap follow its chunk count/size, not the
+            // manifest's original ones (stored chunks are patch bytes).
+            const dModeR = deltaModeRef.current?.transferId === m.transferId ? deltaModeRef.current : null
+            const streamChunks = dModeR ? dModeR.totalChunks : m.totalChunks
+            const streamBytes = dModeR ? dModeR.patchedSize : m.totalSize
             const acked: number[] = []
             for (const i of ackedSet) {
               // v1.3 (1.6): OPFS-temp chunks count as held too (same session —
@@ -2325,7 +3692,7 @@ export function useFluxDrop() {
               // completion; discardReceiverTemp clears the set when they die).
               if (
                 i >= 0 &&
-                i < m.totalChunks &&
+                i < streamChunks &&
                 (stored.has(i) || receiverBuffersRef.current.has(i) || opfsWrittenRef.current.has(i))
               ) {
                 acked.push(i)
@@ -2333,7 +3700,7 @@ export function useFluxDrop() {
             }
             console.log(`[FluxDrop] Resume-skip: record acks=${ackedSet.size}, stored=${stored.size}, usable=${acked.length}`)
             if (acked.length > 0) {
-              const storedBytes = Math.min(acked.length * m.chunkSize, m.totalSize)
+              const storedBytes = Math.min(acked.length * m.chunkSize, streamBytes)
               transferRef.current.seedProgress(acked.length, storedBytes)
               transferRef.current.setSkipped(acked.length, storedBytes, acked)
               // Seed per-file progress for skipped chunks too, so the FILES
@@ -2346,8 +3713,8 @@ export function useFluxDrop() {
                   }
                 }
               }
-              const pct = Math.round((acked.length / m.totalChunks) * 100)
-              console.log(`[FluxDrop] Resume-skip: ${acked.length}/${m.totalChunks} chunks already stored (${pct}%) — answering sender`)
+              const pct = Math.round((acked.length / streamChunks) * 100)
+              console.log(`[FluxDrop] Resume-skip: ${acked.length}/${streamChunks} chunks already stored (${pct}%) — answering sender`)
               // Mark the receiver's record as resumed too (parity with the
               // sender) so history badges and stats reflect the continuation.
               void updateTransferRecord(m.transferId, (rec) => {
@@ -2605,6 +3972,15 @@ export function useFluxDrop() {
     // v1.3 (6.4): every incoming manifest starts with auto-save OFF — only the
     // scoped auto-accept path below may turn it on.
     transferRef.current.setAutoSaveToVault(false)
+    // v5-a3w: delta savings never carry over from a previous transfer
+    // (same stale-inheritance guard as the skip stats in startSend).
+    transferRef.current.setDeltaSavedBytes(0)
+    // v5-a3w: delta pre-negotiation — runs BEFORE any accept path (trusted
+    // auto-accept, resume auto-accept, manual consent) so the sender can swap
+    // its chunk source to the patch before a single byte streams. Bounded by
+    // DELTA_PLAN_WAIT_MS; on decline/timeout the normal full-send flow simply
+    // proceeds (delta mode is armed inside onDeltaPlan on success).
+    await negotiateDelta(m)
     // Trusted auto-accept (only when the user opted in AND explicitly
     // trusted this device previously).
     // v1.3 (6.4): trust is SCOPED. A drop made entirely of small
@@ -2957,6 +4333,233 @@ export function useFluxDrop() {
     }
   }, [persistTransferRecord, closeReceiverWritable, discardReceiverTemp])
 
+  // ---- v5-a3w: delta receiver completion (patch → reconstruct → verify) ----
+  // All patch-stream chunks are in (memory + IndexedDB). Assemble the patch,
+  // decode it, reconstruct the ORIGINAL file against the vault prior, then
+  // verify SHA-256 vs the manifest's ORIGINAL digest and run the same
+  // save/history tail as the in-memory path. A decode/apply failure cannot
+  // fall back to a full send post-hoc (the wire already carried the patch) —
+  // it fails loudly with the delta.error toast and writes NO partial output.
+  const finishReceiverDelta = useCallback(async (m: TransferManifest, d: DeltaReceiverMode): Promise<void> => {
+    try {
+      // 1. Completeness poll over the PATCH stream (memory + IndexedDB) —
+      //    identical semantics to the in-memory path (parallel channels can
+      //    reorder; late TRANSFER_COMPLETE triggers wait here too).
+      {
+        let storedIdx = await getStoredChunkIndices(m.transferId)
+        let lastMissing = -1
+        let stallTicks = 0
+        for (let attempt = 0; attempt < 90; attempt++) {
+          const missing: number[] = []
+          for (let c = 0; c < d.totalChunks; c++) {
+            if (!receiverBuffersRef.current.has(c) && !storedIdx.has(c)) missing.push(c)
+          }
+          if (missing.length === 0) break
+          if (missing.length === lastMissing) {
+            stallTicks++
+            if (stallTicks >= 10) break // no progress for ~10s — genuinely stalled
+          } else {
+            stallTicks = 0
+            lastMissing = missing.length
+          }
+          if (attempt === 0) {
+            console.warn(`[FluxDrop] v5-a3w: delta assembly waiting for ${missing.length} patch chunk(s)`)
+          }
+          await new Promise((r) => setTimeout(r, 1000))
+          storedIdx = await getStoredChunkIndices(m.transferId)
+        }
+      }
+
+      // 2. Assemble the patch stream in chunk-index order (≤ 256 MiB by the
+      //    sender-side guard — fully in RAM by design).
+      const parts: ArrayBuffer[] = []
+      let assembled = 0
+      for (let c = 0; c < d.totalChunks; c++) {
+        let buf = receiverBuffersRef.current.get(c)
+        if (!buf) buf = await getChunk(m.transferId, c)
+        if (!buf) continue
+        parts.push(buf)
+        assembled += buf.byteLength
+      }
+      if (assembled !== d.patchedSize) {
+        throw new Error(`patch stream incomplete — assembled ${assembled}B of ${d.patchedSize}B`)
+      }
+      const patchBlob = assembleBlob(parts, 'application/octet-stream')
+
+      // 3. Decode + reconstruct against the vault prior. readBlock(i) reads
+      //    block i of the file the DELTA_HASHES were computed from; ANY
+      //    failure → null → applyPatch aborts (never a silently corrupt file).
+      const ops = await decodePatchStream(patchBlob)
+      const segments: Uint8Array[] = []
+      const readBlock = async (blockIndex: number): Promise<Uint8Array | null> => {
+        try {
+          const start = blockIndex * DELTA_BLOCK_SIZE
+          const end = Math.min(start + DELTA_BLOCK_SIZE, d.priorBlob.size)
+          if (end <= start) return null
+          return new Uint8Array(await d.priorBlob.slice(start, end).arrayBuffer())
+        } catch {
+          return null
+        }
+      }
+      const applied = await applyPatch(ops, readBlock, (bytes) => {
+        segments.push(bytes)
+      })
+      if (!applied.ok) throw new Error('a vault block became unreadable mid-reconstruction')
+      const entry = m.files[0]
+      if (applied.bytesWritten !== entry.size) {
+        throw new Error(`reconstructed ${applied.bytesWritten}B, expected ${entry.size}B`)
+      }
+      // The RECONSTRUCTED ORIGINAL file — verification and every downstream
+      // path (vault, save pickers, history, send-onward) consume this.
+      const reconstructed = new Blob(segments as BlobPart[], {
+        type: entry.type || 'application/octet-stream',
+      })
+
+      // 4. Verify SHA-256 vs the manifest's ORIGINAL digest.
+      const verified = await verifyChecksum(reconstructed, entry.checksum)
+      if (!verified) {
+        // EDGE CASE: patch completed but SHA-256 mismatch → fail with an error
+        // log entry (existing mechanism); never write partial output.
+        playError()
+        transferRef.current.addErrorLog({
+          message: `Delta reconstruction checksum mismatch for ${entry.name} (patch ${d.patchDigest.slice(0, 12)}…)`,
+        })
+        toast.error(t(usePrefsStore.getState().locale, 'delta.failed', 'Delta reconstruction failed — please re-send the file'), {
+          description: `The reconstructed ${entry.name} did not match the sender's SHA-256.`,
+        })
+        checksumVerifiedRef.current = false
+        transferRef.current.setChecksumVerified(false)
+        transferRef.current.setTransferState('ERROR')
+        transferRef.current.setError('Delta reconstruction failed — checksum mismatch')
+        getRtc()?.sendTransferCompleteAck(m.transferId, false)
+        await persistTransferRecord('receiver', 'ERROR', { checksumVerified: false })
+        return
+      }
+      transferRef.current.markFileComplete(0)
+
+      // v4 (1.7) parity: independent Merkle verification rebuilt from the
+      // RECONSTRUCTED blob (the in-memory path's source) — the reconstructed
+      // file must reproduce the sealed root exactly.
+      if (m.merkle) {
+        try {
+          const { root: rebuilt } = await computeTransferMerkle(
+            async (ci) =>
+              reconstructed.slice(ci * m.chunkSize, Math.min((ci + 1) * m.chunkSize, entry.size)).arrayBuffer(),
+            m.totalChunks
+          )
+          if (rebuilt === m.merkle.root) {
+            console.log(`[FluxDrop] Merkle root verified independently (${m.merkle.leaves} leaves)`)
+          } else {
+            console.error(`[FluxDrop] MERKLE ROOT MISMATCH: manifest ${m.merkle.root} vs rebuilt ${rebuilt}`)
+            toast.warning('Merkle integrity check mismatch', {
+              description: 'Per-file checksums passed, but the sealed Merkle root differs. Please re-send to be safe.',
+            })
+          }
+        } catch (err: any) {
+          console.warn('[FluxDrop] Merkle verification failed to run:', err?.message ?? err)
+        }
+      }
+
+      // v4 (6.2): cache verified files for "send onward" (relay chaining).
+      cacheReceivedFiles(m.transferId, [
+        { name: entry.name, blob: reconstructed, type: reconstructed.type },
+      ])
+
+      // 5. Vault copy BEFORE the save pickers (same fail-soft contract).
+      let vaultSaved = false
+      if (useSessionStore.getState().vaultEnabled && vaultSupported()) {
+        try {
+          const vaultEntry = await saveToVault(
+            {
+              transferId: m.transferId,
+              totalSize: m.totalSize,
+              fileCount: 1,
+              verified: true,
+              files: [
+                {
+                  name: entry.name,
+                  relativePath: entry.relativePath,
+                  size: entry.size,
+                  type: entry.type,
+                  checksum: entry.checksum,
+                },
+              ],
+            },
+            [{ relativePath: entry.relativePath, blob: reconstructed }]
+          )
+          if (vaultEntry) {
+            vaultSaved = true
+            void enforceVaultBudget()
+          } else {
+            toast.info('Vault unavailable — file not kept')
+          }
+        } catch {
+          toast.info('Vault unavailable — file not kept')
+        }
+      }
+
+      // 6. Save — autoSaveToVault (trust scope) skips pickers entirely.
+      if (transferRef.current.autoSaveToVault && vaultSaved) {
+        toast.success('Saved to vault automatically — manage in Files')
+      } else {
+        await saveBlobWithPicker(reconstructed, entry.name)
+      }
+
+      // 7. Completion tail — identical to the in-memory path.
+      flushReceiverBuffers()
+      try { await flushChainRef.current } catch { /* best-effort */ }
+      receiverBuffersRef.current.clear()
+      checksumVerifiedRef.current = true
+      transferRef.current.setChecksumVerified(true)
+      transferRef.current.setTransferState('COMPLETE')
+      // v5-a3w: the saved-bytes stat — the summary card badges this on BOTH
+      // sides (the sender sets its own from the armed plan).
+      const savedBytes = Math.max(0, d.originalSize - d.patchedSize)
+      transferRef.current.setDeltaSavedBytes(savedBytes)
+      getRtc()?.sendTransferCompleteAck(m.transferId, true)
+      // REDUNDANT RELIABLE PATH: also announce completion via signaling.
+      try {
+        signalingRef.current?.sendTransferComplete({
+          roomId: sessionRef.current.roomId!,
+          from: sessionRef.current.deviceId,
+          to: peerDeviceIdRef.current!,
+        })
+      } catch { /* DC ack is the primary path */ }
+      playSuccess()
+      await persistTransferRecord('receiver', 'COMPLETE', { checksumVerified: true })
+      void flushAllPendingAcks()
+      maybeAutoOpenFirstFile(m)
+      toast.success('All files received and verified!', {
+        description: `1 file saved · SHA-256 ✓ · ${formatBytes(savedBytes)} saved by delta sync`,
+      })
+      // Snippet preview parity with the in-memory path.
+      if (/^snippet-.*\.txt$/i.test(entry.name) && reconstructed.size <= 100 * 1024) {
+        try {
+          const text = await reconstructed.text()
+          transferRef.current.setSnippetPreview({ name: entry.name, text })
+        } catch { /* ignore — preview is best-effort */ }
+      }
+      // The resume-determinism record has served its purpose.
+      clearDeltaRecord(m.transferId)
+    } catch (err: any) {
+      // Decode/apply failure: a full-send fallback is NOT possible post-hoc
+      // (the wire already carried the patch) → fail with the clear error
+      // toast. No partial output is written (reconstruction only produced
+      // in-memory segments at this point).
+      playError()
+      console.error('[FluxDrop] v5-a3w: delta reconstruction failed:', err?.message ?? err)
+      transferRef.current.addErrorLog({ message: `Delta reconstruction failed: ${err?.message ?? err}` })
+      toast.error(t(usePrefsStore.getState().locale, 'delta.failed', 'Delta reconstruction failed — please re-send the file'))
+      transferRef.current.setTransferState('ERROR')
+      transferRef.current.setError(err?.message ?? 'Delta reconstruction failed')
+      getRtc()?.sendTransferCompleteAck(m.transferId, false)
+      await persistTransferRecord('receiver', 'ERROR')
+    } finally {
+      deltaModeRef.current = null
+      deltaModeActiveMirror = false
+    }
+  }, [persistTransferRecord])
+
   // ---- Receiver: finish transfer (assemble + verify + save) ----
   // This is called when the last chunk arrives. It assembles files, verifies
   // checksums, saves them, and sends TRANSFER_COMPLETE_ACK to the sender.
@@ -2981,6 +4584,15 @@ export function useFluxDrop() {
     // still-in-flight chunks before assembling.
     const verifyPromise = (async () => {
     transferRef.current.setTransferState('VERIFYING')
+    // v5-a3w: a delta-armed transfer completes through the PATCH pipeline —
+    // decode + reconstruct against the vault prior, verify the ORIGINAL
+    // digest, then the normal save/history tail. (This branch runs BEFORE
+    // the streamed path: delta chunks never touched the OPFS temp.)
+    const dMode = deltaModeRef.current
+    if (dMode && dMode.transferId === m.transferId) {
+      await finishReceiverDelta(m, dMode)
+      return
+    }
     // v1.3 (1.6): transfers above the 64 MB cutoff complete through the
     // streamed OPFS pipeline (no full-file RAM assembly). Below the cutoff —
     // or whenever streaming never engaged (OPFS dead from the start) — the
@@ -3248,7 +4860,7 @@ export function useFluxDrop() {
       verificationPromiseRef.current = null
     })
     await verificationPromiseRef.current
-  }, [persistTransferRecord, finishReceiverStreamed])
+  }, [persistTransferRecord, finishReceiverStreamed, finishReceiverDelta])
 
   // ---- Receiver: verify final checksum ----
   // This is called when the sender sends TRANSFER_COMPLETE.
@@ -3297,12 +4909,15 @@ export function useFluxDrop() {
         receiverCompleteTicksRef.current = 0
         return
       }
-      if (transferRef.current.chunksAcked >= m.totalChunks) {
+      // v5-a3w: delta-armed streams complete at the PATCH chunk count (the
+      // manifest's counts describe the original file).
+      const streamTotal = deltaStreamChunks(m)
+      if (transferRef.current.chunksAcked >= streamTotal) {
         receiverCompleteTicksRef.current++
         // Two consecutive ticks (~2s) — let late in-flight chunks land first.
         if (receiverCompleteTicksRef.current >= 2) {
           receiverCompleteTicksRef.current = 0
-          console.log(`[FluxDrop] Receiver completion poll: all ${m.totalChunks} chunks acked — finishing transfer`)
+          console.log(`[FluxDrop] Receiver completion poll: all ${streamTotal} chunks acked — finishing transfer`)
           void finishReceiverTransfer()
         }
       } else {
@@ -3332,8 +4947,17 @@ export function useFluxDrop() {
         receiverStallTicksRef.current = 0
         return
       }
-      if (transferRef.current.chunksAcked >= m.totalChunks) return
+      // v5-a3w: PATCH chunk count while delta-armed (see completion poll).
+      if (transferRef.current.chunksAcked >= deltaStreamChunks(m)) return
       const rtc = peerRtcsRef.current.get(peerDeviceIdRef.current ?? '')
+      // v5-a2: relay traffic within the last 15 s means the fallback
+      // transport is carrying the transfer — healthy, no poke. (The relay
+      // receiver refreshes relayLastChunkAtRef on every routed frame.)
+      if (transferRef.current.relayed && Date.now() - relayLastChunkAtRef.current < 15_000) {
+        receiverStallTicksRef.current = 0
+        receiverPokeCountRef.current = 0
+        return
+      }
       if (rtc?.isOpen && rtc.connectionState === 'connected') {
         // Healthy — a recovery succeeded; reset the budgets.
         receiverStallTicksRef.current = 0
@@ -3422,21 +5046,34 @@ export function useFluxDrop() {
     sendingRef.current = true
     transferRef.current.setTransferState('TRANSFERRING')
     transferRef.current.startTimer()
+    // v5-a1: the send loop entering TRANSFERRING is the fast-lane trigger —
+    // maybeStartFastLanes re-checks every gate (pref > 1, size threshold,
+    // single receiver, capability) and no-ops otherwise.
+    void maybeStartFastLanes()
     // Create the sender's record NOW so the debounced CHUNK_ACK flushes have
     // something to merge into — before this, the record only appeared at a
     // terminal state and every interim ack flush was silently dropped.
     void persistTransferRecord('sender', 'TRANSFERRING')
     const plan = slicePlanRef.current
 
+    // v5-a3w: delta plan armed for THIS transfer → the wire stream is the
+    // PATCH, not the original file: chunk count, send order, and the chunk
+    // source all switch to the patch Blob (Blob.slice — same API as File, so
+    // the send loop's read path is untouched below). The plan is only ever
+    // armed while no send loop runs (atomic engage in onDeltaHashes), so
+    // capturing it here at loop start is race-free.
+    const dPlan = deltaPlanRef.current?.transferId === m.transferId ? deltaPlanRef.current : null
+    const totalChunks = dPlan ? dPlan.totalChunks : m.totalChunks
+
     // v1.1: pipelining order + wire compression for this send session.
-    const order = buildSendOrder(m, plan)
+    const order = buildSendOrder(dPlan ? { ...m, totalChunks } : m, plan)
     sendOrderRef.current = order
     const useGzip = m.compression === 'gzip' && isCompressionSupported()
-    const totalChunks = m.totalChunks
 
-    // Any peer channel still open?
+    // Any peer channel still open? (v5-a2: a relay-mode peer counts — its
+    // fallback transport IS the transport while P2P is dead.)
     const anyPeerOpen = () =>
-      [...senderPeersRef.current.values()].some((p) => p.active && p.rtc.isOpen)
+      [...senderPeersRef.current.values()].some((p) => p.active && (relayModeRef.current.has(p.id) || !!p.rtc?.isOpen))
 
     // Every active peer fully delivered (position at end + all chunks held)?
     const peerHoldsAll = (p: SenderPeer) =>
@@ -3453,6 +5090,16 @@ export function useFluxDrop() {
        */
       const readCache = new Map<number, Promise<ArrayBuffer | null>>()
       const composeChunk = async (chunkIndex: number): Promise<ArrayBuffer | null> => {
+        // v5-a3w: delta stream — chunk bytes come from the patch Blob
+        // directly (the patch is a flat byte stream; the manifest's slice
+        // plan describes the ORIGINAL layout and does not apply).
+        if (dPlan) {
+          const start = chunkIndex * m.chunkSize
+          if (start >= dPlan.patchedSize) return null
+          return await dPlan.patchBlob
+            .slice(start, Math.min(start + m.chunkSize, dPlan.patchedSize))
+            .arrayBuffer()
+        }
         const resolved = resolveChunk(plan, chunkIndex, m.chunkSize)
         if (!resolved || resolved.segments.length === 0) return null
         let out: ArrayBuffer
@@ -3526,8 +5173,13 @@ export function useFluxDrop() {
         for (const peer of senderPeersRef.current.values()) {
           if (sendLoopGenRef.current !== myGen) return
           if (!peer.active || !peer.accepted) continue
+          // v5-a2: RELAY MODE — when active for a peer, the relay transport
+          // is its ONLY transport (lanes/primary are dead by definition) and
+          // canSend accounting uses its window. Non-relay peers require an
+          // OPEN primary exactly as before.
+          const relayT = relayModeRef.current.get(peer.id) ?? null
           const pRtc = peer.rtc
-          if (!pRtc.isOpen) continue
+          if (!relayT && !(pRtc?.isOpen ?? false)) continue
           if (peer.nextPos >= order.length) {
             minPos = Math.min(minPos, peer.nextPos)
             continue
@@ -3550,7 +5202,44 @@ export function useFluxDrop() {
               burst++
               continue
             }
-            if (!pRtc.canSend()) break // window full → bounded drain below
+            // ---- v5-a1: striping — pick the transport for this chunk slot ----
+            // Primary + open fast lanes; most available window budget wins,
+            // primary preferred on ties (control messages + resume bitmap
+            // continuity live there). Per-lane canSend/waitForDrain use the
+            // exact same AIMD constants as the primary (same wrapper class).
+            // No lanes → the plain legacy `pRtc.canSend()` gate, nothing else.
+            // v5-a2: relay mode takes PRECEDENCE over striping — one
+            // transport, window-gated by its own availableWindow().
+            let sendRtc: FluxDropWebRTC | null = relayT ? null : pRtc ?? null
+            let laneRec: FastLane | null = null
+            const openLanes = fastLaneRtcsRef.current.get(peer.id)
+            if (relayT) {
+              if (relayT.availableWindow() <= 0) break // window full → bounded wait below
+            } else if (!openLanes || openLanes.length === 0) {
+              if (!sendRtc || !sendRtc.canSend()) break // window full → bounded drain below
+            } else {
+              // v5-a1: candidates = primary + lanes with window budget left.
+              const cand: Array<{ rtc: FluxDropWebRTC; rec: FastLane | null; budget: number }> = []
+              if (sendRtc && sendRtc.isOpen && sendRtc.canSend()) {
+                cand.push({ rtc: sendRtc, rec: null, budget: sendRtc.flowWindowBytes - sendRtc.bufferedAmount })
+              }
+              for (const l of openLanes) {
+                if (!l.rtc.isOpen || !l.rtc.canSend()) continue
+                cand.push({ rtc: l.rtc, rec: l, budget: l.rtc.flowWindowBytes - l.rtc.bufferedAmount })
+              }
+              if (cand.length === 0) break // every transport's window is full → drain below
+              // Budget-max, ties ROTATE (fair share — see laneRotationRef):
+              // max budget first; among equals, the cursor picks so lanes
+              // actually carry data whenever they're healthy.
+              let maxBudget = -Infinity
+              for (const c of cand) if (c.budget > maxBudget) maxBudget = c.budget
+              const tied = cand.filter((c) => c.budget === maxBudget)
+              const rot = (laneRotationRef.current.get(peer.id) ?? 0) + 1
+              laneRotationRef.current.set(peer.id, rot)
+              const pick = tied[(tied.length > 1 ? rot : 0) % tied.length]
+              sendRtc = pick.rtc
+              laneRec = pick.rec
+            }
             const bufPromise = readChunk(i)
             // Pipeline: kick off the next reads while this chunk is being
             // compressed/encrypted/sent.
@@ -3596,8 +5285,26 @@ export function useFluxDrop() {
               }
             }
             const wireOpts = { gzip: useGzip && gzipped != null, enc: peer.enc }
-            const sent = pRtc.sendChunkData(m.transferId, i, wireBuf, wireOpts)
+            // v5-a2: relay mode — the SAME chunk bytes (already gzipped +
+            // E2E-encrypted above) ride the server relay; the `last` flag
+            // marks the final position of the send order. Otherwise the DC
+            // transport(s) take it exactly as before.
+            let sent = false
+            if (relayT) {
+              sent = relayT.sendChunk(
+                i,
+                wireBuf instanceof Uint8Array ? wireBuf : new Uint8Array(wireBuf),
+                peer.nextPos === order.length - 1
+              )
+            } else if (sendRtc) {
+              sent = sendRtc.sendChunkData(m.transferId, i, wireBuf, wireOpts)
+            } else {
+              break // (unreachable — the selection above guarantees a transport)
+            }
             if (sent) {
+              // v5-a1: per-lane observability (aggregated throughput already
+              // flows through the chunk-index-based ack accounting).
+              if (laneRec) laneRec.bytesSent += wireBuf.byteLength
               peer.nextPos++
               progressed = true
               burst++
@@ -3610,7 +5317,25 @@ export function useFluxDrop() {
             // burst — wait for THIS peer's buffer to drain (bounded by
             // waitForDrain's own 10s timeout), then let the next round retry
             // while other peers advance.
-            await pRtc.waitForDrain()
+            // v5-a1: with lanes live, ANY transport freeing budget unblocks
+            // the loop (race) instead of waiting on the primary alone. Only
+            // OPEN lanes join the race — a still-negotiating lane's
+            // waitForDrain resolves instantly and would degenerate this into
+            // a poll loop.
+            // v5-a2: relay mode — a dead primary's waitForDrain resolves
+            // instantly (no channel) and would spin; wait for a relay-ack to
+            // free a window slot instead (~1 RTT; the 4 s retransmit timer
+            // is the safety net for lost acks).
+            if (relayT) {
+              await new Promise((r) => setTimeout(r, 50))
+            } else {
+              const drainLanes = (fastLaneRtcsRef.current.get(peer.id) ?? []).filter((l) => l.rtc.isOpen)
+              if (drainLanes.length > 0) {
+                await Promise.race([pRtc?.waitForDrain() ?? Promise.resolve(), ...drainLanes.map((l) => l.rtc.waitForDrain())])
+              } else {
+                await pRtc?.waitForDrain()
+              }
+            }
             if (sendLoopGenRef.current !== myGen) return
           }
         }
@@ -3621,11 +5346,24 @@ export function useFluxDrop() {
         // verified ack, which drives the global completion via
         // markPeerCompleted).
         for (const peer of senderPeersRef.current.values()) {
-          if (!peer.active || peer.completedSent || !peer.rtc.isOpen) continue
+          if (!peer.active || peer.completedSent) continue
+          // v5-a2: a relay-mode peer has no DC — it still announces (over
+          // signaling; control never rides the chunk-only relay).
+          if (!(relayModeRef.current.has(peer.id) || peer.rtc?.isOpen)) continue
           if (peer.nextPos >= order.length && peerHoldsAll(peer)) {
             peer.completedSent = true
-            const combined = m.files.map((f) => f.checksum).join('')
-            peer.rtc.sendTransferComplete(m.transferId, combined)
+            if (relayModeRef.current.has(peer.id)) {
+              // v5-a2: signaling completion — the receiver's verify pipeline
+              // + its own signaling announcement close the loop idempotently.
+              signalingRef.current?.sendTransferComplete({
+                roomId: sessionRef.current.roomId!,
+                from: sessionRef.current.deviceId,
+                to: peer.id,
+              })
+            } else if (peer.rtc?.isOpen) {
+              const combined = m.files.map((f) => f.checksum).join('')
+              peer.rtc.sendTransferComplete(m.transferId, combined)
+            }
             console.log(`[FluxDrop] All chunks sent to peer ${peer.id.slice(0, 8)} — completion announced`)
           }
         }
@@ -3721,7 +5459,12 @@ export function useFluxDrop() {
       // Loop already streamed every chunk — it is waiting for the receiver's
       // TRANSFER_COMPLETE_ACK, not stalled. Force-restarting from here would
       // re-run the finished loop and spam TRANSFER_COMPLETE forever.
-      if (idx >= (transferRef.current.manifest?.totalChunks ?? Infinity)) {
+      // v5-a3w: compare against the STORE's totals — they track the LIVE
+      // stream (the PATCH chunk count while a delta plan is armed), unlike
+      // the manifest's original-file counts.
+      const effStreamTotal =
+        transferRef.current.totalChunks || transferRef.current.manifest?.totalChunks || Infinity
+      if (idx >= effStreamTotal) {
         stallTicksRef.current = 0
         return
       }
@@ -3867,6 +5610,12 @@ export function useFluxDrop() {
       resumeSkipUsedRef.current = false
       resumeAttemptsRef.current = 0
       transferRef.current.setSkipped(0, 0)
+      // v5-a3w: fresh sends start with clean delta state — no inherited plan
+      // (a new transferId makes any stale one inert anyway) and no inherited
+      // savings stat. Resumed sends keep a live same-transferId plan: the
+      // patch is deterministic, so a re-negotiation rebuilds the same blob.
+      if (!resumeManifest) deltaPlanRef.current = null
+      transferRef.current.setDeltaSavedBytes(0)
       // Resumed sends query the receiver before streaming so already-stored
       // chunks are skipped (RESUME_QUERY handshake after MANIFEST_ACK).
       resumeSkipPendingRef.current = !!resumeManifest
@@ -3988,7 +5737,8 @@ export function useFluxDrop() {
     // sender before its first pairing) fall back to the primary channel.
     const targets: { peerId: string | null; rtc: FluxDropWebRTC }[] = []
     for (const peer of senderPeersRef.current.values()) {
-      if (peer.rtc.isOpen) targets.push({ peerId: peer.id, rtc: peer.rtc })
+      // v5-a2: relay-mode peers have no DC — chat/clipboard are P2P-only.
+      if (peer.rtc?.isOpen) targets.push({ peerId: peer.id, rtc: peer.rtc })
     }
     if (targets.length === 0) {
       const rtc = getRtc()
@@ -4037,7 +5787,7 @@ export function useFluxDrop() {
     transferRef.current.pauseTimer()
     // v1.3: pause EVERY connected peer (group fan-out).
     for (const peer of senderPeersRef.current.values()) {
-      if (peer.rtc.isOpen) peer.rtc.sendPause(m.transferId)
+      if (peer.rtc?.isOpen) peer.rtc.sendPause(m.transferId)
     }
     if (senderPeersRef.current.size === 0) getRtc()?.sendPause(m.transferId)
     transferRef.current.setTransferState('PAUSED')
@@ -4051,7 +5801,7 @@ export function useFluxDrop() {
     pauseLocalRef.current = false
     transferRef.current.resumeTimer()
     for (const peer of senderPeersRef.current.values()) {
-      if (peer.rtc.isOpen) peer.rtc.sendResumeStream(m.transferId)
+      if (peer.rtc?.isOpen) peer.rtc.sendResumeStream(m.transferId)
     }
     if (senderPeersRef.current.size === 0) getRtc()?.sendResumeStream(m.transferId)
     // Only flip the UI state if the peer hasn't also paused.
@@ -4071,7 +5821,8 @@ export function useFluxDrop() {
     if (m) {
       // v1.3: cancel on EVERY connected peer (group fan-out).
       for (const peer of senderPeersRef.current.values()) {
-        if (peer.rtc.isOpen) peer.rtc.sendCancel(m.transferId, reason)
+        // v5-a2: relay-mode peers have no DC — cancel rides signaling below.
+        if (peer.rtc?.isOpen) peer.rtc.sendCancel(m.transferId, reason)
       }
       getRtc()?.sendCancel(m.transferId, reason)
     }
@@ -4089,6 +5840,8 @@ export function useFluxDrop() {
     sendLoopGenRef.current++
     sendingRef.current = false
     skipIndicesRef.current = new Set()
+    // v5-a2: a cancelled transfer tears every relay leg down too.
+    teardownRelay()
     // v1.1: reset retry/grace state on explicit cancel.
     resumeAttemptsRef.current = 0
     wireCompressionRef.current = undefined
@@ -4124,6 +5877,14 @@ export function useFluxDrop() {
       try { rtc.close() } catch { /* ignore */ }
     }
     peerRtcsRef.current.clear()
+    // v5-a1: leave-room tears every fast lane + capability entry down with
+    // the session (no leaked PCs, no stale caps for a future room).
+    teardownFastLanes()
+    peerCapsRef.current.clear()
+    // v5-a2: leave-room tears every relay leg down with the session too, and
+    // the dev forceNext flag is void from this point on.
+    teardownRelay()
+    forceRelayNextRef.current = false
     senderPeersRef.current.clear()
     requiredPeersRef.current.clear()
     chunkAckVotersRef.current.clear()
@@ -4175,6 +5936,13 @@ export function useFluxDrop() {
     void discardReceiverTemp()
     opfsWriteChainRef.current = Promise.resolve()
     receiverStreamBrokenRef.current = false
+    // v5-a3w: delta state dies with the room/session (a pending plan wait is
+    // resolved by its own timeout; the mirror powers the debug bundle).
+    deltaPlanRef.current = null
+    deltaModeRef.current = null
+    deltaPriorBlobRef.current = null
+    deltaPlanWaitRef.current = null
+    deltaModeActiveMirror = false
     sendingRef.current = false
     checksumVerifiedRef.current = null
     // v1.2: tear down the E2E session with the room. (Cancel/pause keeps the
@@ -4199,7 +5967,8 @@ export function useFluxDrop() {
     const wireBody = new TextEncoder().encode(JSON.stringify({ text: trimmed, at: Date.now() }))
     const targets: { peerId: string | null; rtc: FluxDropWebRTC }[] = []
     for (const peer of senderPeersRef.current.values()) {
-      if (peer.rtc.isOpen) targets.push({ peerId: peer.id, rtc: peer.rtc })
+      // v5-a2: relay-mode peers have no DC — chat/clipboard are P2P-only.
+      if (peer.rtc?.isOpen) targets.push({ peerId: peer.id, rtc: peer.rtc })
     }
     if (targets.length === 0) {
       const rtc = getRtc()
@@ -4235,7 +6004,7 @@ export function useFluxDrop() {
         attached = true
         detach = attachClipboardSender((text) => {
           // Only sync while some channel is actually open.
-          const hasOpen = getRtc()?.isOpen || [...senderPeersRef.current.values()].some((p) => p.rtc.isOpen)
+          const hasOpen = getRtc()?.isOpen || [...senderPeersRef.current.values()].some((p) => !!p.rtc?.isOpen)
           if (hasOpen) sendClipboardSync(text)
         })
       } else if (!want && attached) {
@@ -4248,7 +6017,7 @@ export function useFluxDrop() {
     if (usePrefsStore.getState().clipboardSync) {
       attached = true
       detach = attachClipboardSender((text) => {
-        const hasOpen = getRtc()?.isOpen || [...senderPeersRef.current.values()].some((p) => p.rtc.isOpen)
+        const hasOpen = getRtc()?.isOpen || [...senderPeersRef.current.values()].some((p) => !!p.rtc?.isOpen)
         if (hasOpen) sendClipboardSync(text)
       })
     }
@@ -4262,17 +6031,24 @@ export function useFluxDrop() {
   // Fires on change AND keeps future pairings honest (beginSending seeds the
   // window per transport, so re-asserting the cap there would race the seed;
   // instead the wave loop's pacing gates enforce it continuously).
+  // v5-a1: delegated to applyQosCapSplit — the user's cap is the AGGREGATE
+  // budget across primary + fast lanes, so each transport gets cap/N.
   useEffect(() => {
-    const apply = (mbps: number) => {
-      getRtc()?.setQosCapMbps(mbps > 0 ? mbps : null)
-      for (const peer of senderPeersRef.current.values()) {
-        peer.rtc.setQosCapMbps(mbps > 0 ? mbps : null)
-      }
-    }
-    const unsub = usePrefsStore.subscribe((s) => apply(s.qosCapMbps))
-    apply(usePrefsStore.getState().qosCapMbps)
+    const unsub = usePrefsStore.subscribe((s) => applyQosCapSplit(s.qosCapMbps))
+    applyQosCapSplit(usePrefsStore.getState().qosCapMbps)
     return unsub
   }, [])
+
+  // ---- v5-a1: terminal states tear every fast lane down (complete, cancel,
+  // fail, error). PAUSED/RESUMING keep lanes — resume continuity. ----
+  // v5-a2: the same rule closes every relay leg — terminal means terminal.
+  useEffect(() => {
+    const st = transfer.transferState
+    if (st === 'COMPLETE' || st === 'CANCELLED' || st === 'FAILED' || st === 'ERROR') {
+      teardownFastLanes()
+      teardownRelay()
+    }
+  }, [transfer.transferState])
 
   return {
     session,

@@ -1,6 +1,10 @@
 // FluxDrop shared protocol types & constants.
 // Used by both the Next.js client and (mirrored by) the signaling server.
 
+// v5-a3w: delta scan blocks (pure constants — no runtime dependency the
+// server mirror would need to know about).
+import { DELTA_BLOCK_SIZE, type BlockHash } from './delta'
+
 // === Roles ===
 export type DeviceRole = 'sender' | 'receiver'
 
@@ -18,6 +22,16 @@ export interface FileManifestEntry {
   lastModified: number
   checksum: string
   relativePath: string
+  /**
+   * v5-a3w: delta-sync candidacy — set by the SENDER only when the deltaSync
+   * pref is on, the transfer is exactly ONE file, and its size is at least
+   * DELTA_MIN_FILE_BYTES. A hint that invites the receiver to fingerprint its
+   * vault copy of the same name (DELTA_HASHES) so the sender can stream a
+   * compact patch instead of the full bytes. The manifest's checksum/size
+   * always describe the ORIGINAL file (the patch must reconstruct to it);
+   * older receivers simply ignore the unknown field.
+   */
+  deltaCandidate?: boolean
 }
 
 export interface TransferManifest {
@@ -120,6 +134,78 @@ export type MessageTypeValue = (typeof MessageType)[keyof typeof MessageType]
 export const HEADER_SIZE = 9
 export const TRANSFER_ID_BYTES = 4
 
+// === v5-a1: fast lanes (additive multi-PC striping) ===
+// Lanes only spin for transfers bigger than this (16 MB): below it the offer
+// round-trips + extra ICE cost more than the striping gains.
+export const FAST_LANE_MIN_BYTES = 16 * 1024 * 1024
+// Hard cap on transports per peer (primary + 3 extra lanes).
+export const FAST_LANE_MAX = 4
+
+// === v5-a3w: delta sync (rsync-lite) — patch streaming for known files ===
+// Sender→receiver PATCH streaming when the receiver already holds a similar
+// older copy (vault). The NEGOTIATION rides the sealed signaling path (the
+// opaque e2e-relay envelope carrying enc1.<hex> AES-GCM bodies — exactly the
+// v5-a2 sealed-manifest family, ZERO server changes); the patch itself then
+// streams over the normal per-peer-encrypted chunk transports. Any failure
+// anywhere declines to a silent full send.
+
+/** Absolute cap on a patch blob — the receiver accumulates it in RAM. */
+export const DELTA_MAX_PATCH_BYTES = 256 * 1024 * 1024 // 256 MiB
+/** Smallest file that may become a delta candidate (4 scan blocks). */
+export const DELTA_MIN_FILE_BYTES = 4 * DELTA_BLOCK_SIZE // 4 × 256 KiB = 1 MiB
+/** Largest sender-side source fully read into RAM for buildPatch. */
+export const DELTA_SOURCE_MAX = 512 * 1024 * 1024 // 512 MiB
+/**
+ * Receiver-side bounded wait for DELTA_PLAN before proceeding as a full
+ * send — sized to cover the sender's buildPatch round on the biggest
+ * allowed source (DELTA_SOURCE_MAX) on modest hardware.
+ */
+export const DELTA_PLAN_WAIT_MS = 60_000
+
+// v5-a3w: delta control message types — the `data.type` discriminator inside
+// the opaque e2e-relay envelope (each body is a sealed enc1.<hex> payload;
+// the envelope rides the existing server relay untouched).
+export const DELTA_MSG = {
+  /** receiver → sender: BlockHash[] of the vault's same-name prior file. */
+  HASHES: 'delta-hashes',
+  /** receiver → sender: no usable prior — full send, don't wait. */
+  DECLINED: 'delta-declined',
+  /** sender → receiver: accepted? + patchedSize + patchDigest. */
+  PLAN: 'delta-plan',
+} as const
+
+/** v5-a3w: sealed body of DELTA_MSG.HASHES (receiver → sender). */
+export interface DeltaHashesBody {
+  transferId: string
+  fileIndex: number
+  /** blockHashes(priorFile) — offsets tile the prior file in DELTA_BLOCK_SIZE steps. */
+  blocks: BlockHash[]
+  /** Human-readable note (e.g. the prior size) — diagnostics only. */
+  patchNote?: string
+}
+
+/** v5-a3w: sealed body of DELTA_MSG.DECLINED (receiver → sender). */
+export interface DeltaDeclinedBody {
+  transferId: string
+  fileIndex: number
+}
+
+/**
+ * v5-a3w: sealed body of DELTA_MSG.PLAN (sender → receiver).
+ * accepted=false means full send (patch over the guard, build failure, or a
+ * race with an already-streaming transfer). patchDigest is the SHA-256 hex of
+ * the patch Blob — the receiver's resume-determinism anchor (a digest change
+ * resets its stored patch-stream progress).
+ */
+export interface DeltaPlanBody {
+  transferId: string
+  fileIndex: number
+  accepted: boolean
+  patchedSize: number
+  patchDigest: string
+  originalSize: number
+}
+
 // === Tunables ===
 export const CONSTANTS = {
   // Chunk size: 64 KB + 9-byte header = 65,545 bytes.
@@ -161,6 +247,16 @@ export const CONSTANTS = {
   // mobile). Bursts keep the SCTP pipe full; the flow window (canSend)
   // remains the real throttle.
   SENDER_BURST_CHUNKS: 64,
+  // === v5-a2: server-relayed fallback transport ===
+  // Relay is the LAST rung of the recovery ladder (engages only when P2P is
+  // impossible). Window/retries/timeout mirror the in-transport semantics
+  // of the DataChannel path so the send loop treats it uniformly: 8 chunks
+  // in flight max, up to 3 transmission tries per seq, one retransmit timer
+  // tick every 4 s. Rate limiting on the SERVER side is enforced by the
+  // signaling service (see mini-services/signaling RELAY_RATE_BYTES_PER_SEC).
+  RELAY_WINDOW_CHUNKS: 8,
+  RELAY_RETRY_MAX: 3,
+  RELAY_RETRY_TIMEOUT_MS: 4_000,
   PAIRING_TIMEOUT_MS: 60_000,
   CONNECT_RETRY_MAX: 3,
   CONNECT_RETRY_BASE_MS: 1_000,
@@ -200,6 +296,18 @@ export const SIGNALING_EVENTS = {
   DEVICE_DISCOVERED: 'device-discovered',
   DEVICE_LEFT: 'device-left',
   SIGNALING_ERROR: 'signaling-error',
+} as const
+
+// === v5-a2: server-relayed fallback transport events ===
+// Deliberately OUTSIDE SIGNALING_EVENTS: that map auto-subscribes the
+// transparency recorder to every event name, and relay chunks arrive at wire
+// rate (~64 frames/s) — a notify() per chunk would storm the transparency
+// panel. The relay path tracks its own byte counters instead (see
+// relay-transport.ts getRelayStats, surfaced through the debug bundle).
+export const RELAY_EVENTS = {
+  RELAY_DATA: 'relay-data',   // sender -> server -> receiver (chunk payload)
+  RELAY_ACK: 'relay-ack',    // receiver -> server -> sender (per-seq ack)
+  RELAY_ERROR: 'relay-error', // server -> sender (e.g. quota exceeded)
 } as const
 
 // === v1.1: per-connection transport hint ===

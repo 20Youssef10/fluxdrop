@@ -4,7 +4,7 @@
 'use client'
 
 import { io, type Socket } from 'socket.io-client'
-import { SIGNALING_EVENTS } from './protocol'
+import { SIGNALING_EVENTS, RELAY_EVENTS } from './protocol'
 import { recordSignalingEvent } from './telemetry'
 
 const SIGNALING_PORT = 3003
@@ -43,6 +43,12 @@ export class FluxDropSignaling {
   // (every reconnect gets a new socket.id, and the server cleans up the old
   // socket's membership on disconnect).
   private rejoinCtx: { deviceId: string; alias?: string; role?: 'sender' | 'receiver'; pin?: string } | null = null
+  // v5-a2: relay-transport listeners. Kept as Sets (not direct socket.on)
+  // so subscriptions SURVIVE socket replacement — connect() re-attaches them
+  // to every new socket alongside the constructor callbacks.
+  private relayDataListeners = new Set<(payload: any) => void>()
+  private relayAckListeners = new Set<(payload: any) => void>()
+  private relayErrorListeners = new Set<(payload: any) => void>()
 
   constructor(callbacks: SignalingCallbacks) {
     this.callbacks = callbacks
@@ -103,6 +109,13 @@ export class FluxDropSignaling {
     s.on(SIGNALING_EVENTS.RESUME_RESPONSE, (p) => this.callbacks.onResumeResponse(p))
     s.on(SIGNALING_EVENTS.E2E_RELAY, (p) => this.callbacks.onE2ERelay(p))
     s.on(SIGNALING_EVENTS.SIGNALING_ERROR, (p) => this.callbacks.onSignalingError(p))
+    // v5-a2: relay fallback transport fan-out (listener sets — see above).
+    // Wired OUTSIDE the recordIn telemetry loop on purpose: relay chunks
+    // arrive at wire rate and a notify() per chunk would storm the
+    // transparency panel (relay bytes are tracked in relay-transport.ts).
+    s.on(RELAY_EVENTS.RELAY_DATA, (p) => { for (const cb of this.relayDataListeners) cb(p) })
+    s.on(RELAY_EVENTS.RELAY_ACK, (p) => { for (const cb of this.relayAckListeners) cb(p) })
+    s.on(RELAY_EVENTS.RELAY_ERROR, (p) => { for (const cb of this.relayErrorListeners) cb(p) })
   }
 
   get isConnected(): boolean {
@@ -238,6 +251,38 @@ export class FluxDropSignaling {
    */
   sendE2ERelay(payload: { roomId: string; from: string; to: string; data: unknown }) {
     this.emit(SIGNALING_EVENTS.E2E_RELAY, payload)
+  }
+
+  // === v5-a2: server-relayed fallback transport ===
+  // Emits bypass the transparency recorder on purpose (chunk rate would
+  // notify()-storm the panel); relay byte counters live in relay-transport.
+
+  /** Sender → server → receiver: one chunk payload (base64) + its seq. */
+  sendRelayData(payload: { roomId: string; from: string; to: string; transferId: string; seq: number; chunkIndex: number; data: string; last?: boolean }) {
+    this.socket?.emit(RELAY_EVENTS.RELAY_DATA, payload)
+  }
+
+  /** Receiver → server → sender: per-seq transport ack. */
+  sendRelayAck(payload: { roomId: string; from: string; to: string; transferId: string; seq: number }) {
+    this.socket?.emit(RELAY_EVENTS.RELAY_ACK, payload)
+  }
+
+  /** Subscribe to inbound relay-data frames. Returns an unsubscribe fn. */
+  onRelayData(cb: (payload: any) => void): () => void {
+    this.relayDataListeners.add(cb)
+    return () => { this.relayDataListeners.delete(cb) }
+  }
+
+  /** Subscribe to inbound relay-ack frames. Returns an unsubscribe fn. */
+  onRelayAck(cb: (payload: any) => void): () => void {
+    this.relayAckListeners.add(cb)
+    return () => { this.relayAckListeners.delete(cb) }
+  }
+
+  /** Subscribe to server relay errors (e.g. quota). Returns an unsubscribe fn. */
+  onRelayError(cb: (payload: any) => void): () => void {
+    this.relayErrorListeners.add(cb)
+    return () => { this.relayErrorListeners.delete(cb) }
   }
 
   leaveRoom() {

@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
-import { CheckCircle2, ShieldCheck, Clock, Database, FileStack, Gauge, Leaf, Copy, Check, FileArchive, Forward, Loader2 } from 'lucide-react'
+import { CheckCircle2, ShieldCheck, Clock, Database, FileStack, Gauge, Leaf, Copy, Check, FileArchive, Forward, Loader2, Route } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -13,6 +13,8 @@ import { getReceivedFilesFromCache } from '@/hooks/fluxdrop/use-fluxdrop'
 import { buildZip, zipNameFor } from '@/lib/fluxdrop/zip'
 import { FileIcon, getFileCategoryColors } from './file-icon'
 import { toast } from 'sonner'
+// v5-a3w: inline-fallback i18n for the delta-savings badge.
+import { useT } from '@/lib/fluxdrop/i18n'
 
 /** Clipboard write with a legacy fallback for restricted contexts. */
 async function copyText(text: string): Promise<boolean> {
@@ -48,6 +50,8 @@ interface TransferSummaryCardProps {
  */
 export function TransferSummaryCard({ onDone, onSendAnother }: TransferSummaryCardProps) {
   const t = useTransferStore()
+  // v5-a3w: i18n (the store owns the single-letter `t` in this component).
+  const tr = useT()
   const m = t.manifest
   const [receiptCopied, setReceiptCopied] = useState(false)
   const [zipping, setZipping] = useState(false)
@@ -145,6 +149,35 @@ export function TransferSummaryCard({ onDone, onSendAnother }: TransferSummaryCa
                 <ShieldCheck className="mr-1 h-3 w-3" />
                 SHA-256 verified
               </Badge>
+              {/* v5-a3w: delta-sync savings — only shown when a patch actually
+                  saved bytes (set by BOTH sides at completion). */}
+              {t.deltaSavedBytes > 0 && (
+                <Badge
+                  variant="outline"
+                  className="border-flux-500/40 bg-flux-500/10 text-flux-700 dark:text-flux-300"
+                  title="Delta sync sent only the changed bytes — the receiver reconstructed the rest from its kept copy"
+                >
+                  <Leaf className="mr-1 h-3 w-3" />
+                  {tr('delta.badge', `Δ saved ${formatBytes(t.deltaSavedBytes)}`)}
+                </Badge>
+              )}
+              {/* v5-a2: relay marker in the FINAL state too — ConnectionStatus
+                  (which carries the live badge) is unmounted once the
+                  transfer starts streaming, so without this the relay fact
+                  would only ever flash in the pre-transfer waiting view. */}
+              {t.relayed && (
+                <Badge
+                  variant="outline"
+                  className="border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                  title={tr(
+                    'relay.tooltip',
+                    'Direct connection was impossible — your end-to-end-encrypted chunks were relayed through the signaling server, rate-limited.',
+                  )}
+                >
+                  <Route className="mr-1 h-3 w-3" />
+                  {tr('relay.badge', 'Relayed via server')}
+                </Badge>
+              )}
               <span className="text-xs text-muted-foreground">
                 {m.files.length} file{m.files.length > 1 ? 's' : ''} · {formatBytes(m.totalSize)}
               </span>

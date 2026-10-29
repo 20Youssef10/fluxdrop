@@ -147,6 +147,19 @@ interface TransferStoreState {
   skippedBytes: number
   setSkipped: (chunks: number, bytes: number, indices?: number[]) => void
 
+  // v5-a2: this transfer is (or was) streaming through the signaling-server
+  // relay fallback — set when relay mode engages, surfaced as a subtle badge
+  // (connection-status) + the debug bundle. Stays true once engaged even if
+  // P2P later recovers (the transfer did relay at some point).
+  relayed: boolean
+  setRelayed: (v: boolean) => void
+
+  // v5-a3w: bytes a delta patch saved on this transfer (originalSize -
+  // patchedSize; 0 = not a delta transfer). Set by BOTH sides at completion
+  // (each knows the plan's numbers); the summary card badges it when > 0.
+  deltaSavedBytes: number
+  setDeltaSavedBytes: (v: number) => void
+
   // Hashing progress (pre-transfer, during buildManifest)
   hashingProgress: { current: number; total: number; fileName: string } | null
   setHashingProgress: (p: { current: number; total: number; fileName: string } | null) => void
@@ -370,6 +383,14 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
       skippedIndices: indices ? new Set(indices) : new Set<number>(),
     }),
 
+  // v5-a2: relay-fallback marker (set by the engine when relay mode engages).
+  relayed: false,
+  setRelayed: (v) => set({ relayed: v }),
+
+  // v5-a3w: delta-sync savings (0 until a delta transfer completes).
+  deltaSavedBytes: 0,
+  setDeltaSavedBytes: (v) => set({ deltaSavedBytes: v }),
+
   hashingProgress: null,
   setHashingProgress: (p) => set({ hashingProgress: p }),
 
@@ -409,6 +430,11 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
       skippedIndices: new Set<number>(),
       skippedChunks: 0,
       skippedBytes: 0,
+      // v5-a2: relay marker dies with the transfer.
+      relayed: false,
+      // v5-a3w: delta savings die with the transfer (fresh sends zero this
+      // explicitly too — the same stale-inheritance guard as skip stats).
+      deltaSavedBytes: 0,
       filePreviews: {},
       peerProgress: {},
       // v1.3 (6.4): auto-accept with auto-save scope — v1.3-c consumes this

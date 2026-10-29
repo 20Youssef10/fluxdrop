@@ -8,8 +8,12 @@
 'use client'
 
 import { getTransparencyReport } from './telemetry'
+import { getRelayStats } from './relay-transport'
 import { useSessionStore } from '@/stores/session-store'
 import { useTransferStore } from '@/stores/transfer-store'
+// v5-a3w: delta-sync facts (pref + live mode from the engine mirror).
+import { usePrefsStore } from './prefs'
+import { isDeltaModeActive } from '@/hooks/fluxdrop/use-fluxdrop'
 
 export interface DebugBundleOptions {
   /** Include file names (default false — privacy first). */
@@ -51,6 +55,17 @@ export async function collectDebugBundle(opts: DebugBundleOptions = {}): Promise
           bytesTransferred: transfer.bytesTransferred,
           chunksAcked: transfer.chunksAcked,
           skippedChunks: transfer.skippedChunks,
+          // v5-a2: relay fallback facts — did this transfer ride the server
+          // relay, and how many bytes crossed it (page lifetime, both dirs).
+          relayed: transfer.relayed,
+          relay: getRelayStats(),
+          // v5-a3w: delta sync — pref state, bytes a patch saved (set at
+          // completion), and whether a delta stream is live right now.
+          delta: {
+            deltaSync: usePrefsStore.getState().deltaSync,
+            deltaSavedBytes: transfer.deltaSavedBytes,
+            deltaModeActive: isDeltaModeActive(),
+          },
           elapsedMs: transfer.elapsedMs,
           // perf/resume-1: a REAL average (total bytes over pause-aware
           // elapsed time) — the old field just duplicated currentSpeed, which

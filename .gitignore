@@ -56,3 +56,10 @@ server.log
 # Sandbox scratch dirs (never commit)
 /tool-results/
 /skills/
+
+# Local-only assets & sandbox tooling (kept on disk, never committed)
+/upload/
+/.zscripts/
+/agent-ctx/
+/examples/
+/download/

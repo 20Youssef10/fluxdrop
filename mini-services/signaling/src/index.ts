@@ -145,6 +145,47 @@ const ROOM_CREATE_RATE_PER_MIN = (() => {
 })()
 const roomCreatesByIp = new Map<string, number[]>()
 
+// ─────────────────────────────────────────────────────────────────────────────
+// v5-a2: server-relayed fallback transport — chunk relay with a hard budget.
+//
+// relay-data / relay-ack only ever carry the LAST-DITCH fallback traffic of
+// transfers whose P2P DataChannel could not be established at all. Chunks
+// arrive pre-encrypted (AES-256-GCM under the room-PIN PAKE session key — the
+// client encrypts BEFORE the transport), so the server relays opaque bytes.
+// PRIVACY: relayed payloads are never logged, never stored, never inspected.
+//
+// Budget: a per-ROOM token bucket (default 4 MB/s sustained, 8 MB burst, both
+// env-tunable) plus a per-frame base64 size cap (~128 KB decoded — a 64 KB
+// chunk + gzip/encryption overhead base64-encodes to ≤ ~90 KB). Over quota →
+// the SENDER gets relay-error { reason: 'quota' } and the frame is dropped;
+// the client's 4 s retransmit timer retries once the bucket refills.
+// ─────────────────────────────────────────────────────────────────────────────
+export const RELAY_RATE_BYTES_PER_SEC = (() => {
+  const n = parseInt(process.env.RELAY_RATE_BYTES_PER_SEC ?? '', 10)
+  if (!Number.isFinite(n) || n <= 0) return 4 * 1024 * 1024
+  return n
+})()
+export const RELAY_BURST_BYTES = (() => {
+  const n = parseInt(process.env.RELAY_BURST_BYTES ?? '', 10)
+  if (!Number.isFinite(n) || n <= 0) return 8 * 1024 * 1024
+  return n
+})()
+const RELAY_MAX_B64_CHARS = 172 * 1024 // ~128 KB decoded
+
+/** Per-room token bucket state: tokens refill at RELAY_RATE_BYTES_PER_SEC. */
+const relayBuckets = new Map<string, { tokens: number; last: number }>()
+
+function relayQuotaAllows(roomId: string, costBytes: number): boolean {
+  const now = Date.now()
+  const b = relayBuckets.get(roomId) ?? { tokens: RELAY_BURST_BYTES, last: now }
+  b.tokens = Math.min(RELAY_BURST_BYTES, b.tokens + ((now - b.last) / 1000) * RELAY_RATE_BYTES_PER_SEC)
+  b.last = now
+  const allowed = b.tokens >= costBytes
+  if (allowed) b.tokens -= costBytes
+  relayBuckets.set(roomId, b)
+  return allowed
+}
+
 function checkRoomCreateRate(ip: string): { allowed: boolean; retryAfterSec: number } {
   const now = Date.now()
   const recent = (roomCreatesByIp.get(ip) ?? []).filter((t) => now - t < ROOM_CREATE_WINDOW_MS)
@@ -286,6 +327,13 @@ interface Room {
   devices: Map<string, Device>      // deviceId -> Device
   transferActive: boolean
   state: 'waiting' | 'pairing' | 'connected' | 'transferring' | 'closed'
+  // v5-a2: cumulative relayed frame bytes (base64 length) for the admin
+  // dashboard — metadata only, part of the room stats object.
+  relayedBytes: number
+  // v5-a2: best-effort same-transferId session check for the chunk relay —
+  // set when a plaintext transfer-manifest with a readable transferId
+  // passes through; sealed manifests leave it unset (no enforcement).
+  activeTransferId?: string
   // v2.0 (3.4): room was pre-created via POST /link and no socket has
   // claimed ownership yet. Claimed rooms keep the link's expiry + oneJoin.
   preCreated?: boolean
@@ -405,6 +453,7 @@ function createRoom(opts: { withPin?: boolean; alias: string; deviceId: string; 
     devices: new Map(),
     transferActive: false,
     state: 'waiting',
+    relayedBytes: 0,
   }
   rooms.set(id, room)
   return room
@@ -426,6 +475,7 @@ function createPreCreatedRoom(ttlMinutes: number, oneJoin: boolean): Room {
     devices: new Map(),
     transferActive: false,
     state: 'waiting',
+    relayedBytes: 0,
     preCreated: true,
     oneJoin,
   }
@@ -504,6 +554,8 @@ function adminSnapshot(): Record<string, unknown> {
     senderPresent: Array.from(r.devices.values()).some((d) => d.role === 'sender'),
     state: r.state,
     transferActive: r.transferActive,
+    // v5-a2: relay fallback counters (metadata only — bytes, never content).
+    relayedBytes: r.relayedBytes,
     pending: r.preCreated === true,
     oneJoin: r.oneJoin === true,
   }))
@@ -974,7 +1026,9 @@ httpServer.on('request', (req, res) => {
 setInterval(() => expireStaleRooms(io), 60 * 1000)
 
 // v2.0: housekeeping — prune expired LAN presence + aged rate-limit windows so
-// the per-IP maps never grow unbounded.
+// the per-IP maps never grow unbounded. v5-a2: drop relay token buckets of
+// rooms that no longer exist (the bucket map is otherwise bounded by the
+// live-room count, but expired rooms never evict their entry).
 setInterval(() => {
   const now = Date.now()
   for (const [ip, stamps] of roomCreatesByIp) {
@@ -984,6 +1038,9 @@ setInterval(() => {
   }
   for (const [id, entry] of nearbyPeers) {
     if (now - entry.seenAt > NEARBY_TTL_MS) nearbyPeers.delete(id)
+  }
+  for (const roomId of relayBuckets.keys()) {
+    if (!rooms.has(roomId)) relayBuckets.delete(roomId)
   }
 }, 30 * 1000)
 
@@ -1261,6 +1318,11 @@ io.on('connection', (socket) => {
     touchRoom(room)
     room.transferActive = true
     room.state = 'transferring'
+    // v5-a2 (best effort): remember the plaintext transferId so the chunk
+    // relay can drop frames of a DIFFERENT session. Sealed (enc1.*) manifests
+    // carry no readable id — relay then simply skips this check.
+    const tid = (payload?.manifest as { transferId?: unknown } | null | undefined)?.transferId
+    if (typeof tid === 'string' && tid) room.activeTransferId = tid
     log('info', 'transfer_started', { roomId: room.id, devices: room.devices.size })
     relayToDevice(io, room, 'transfer-manifest', payload)
   })
@@ -1318,6 +1380,85 @@ io.on('connection', (socket) => {
     if (!room) return
     touchRoom(room)
     relayToDevice(io, room, 'e2e-relay', payload)
+  })
+
+  // === v5-a2: server-relayed fallback chunk transport (unicast) ===
+  // LAST rung of the client recovery ladder — only used when P2P is
+  // impossible. relay-data carries one chunk payload (base64 ciphertext);
+  // relay-ack is the receiver's per-seq transport ack. `from` is NEVER
+  // trusted: like every membership-checked relay, the sender is resolved
+  // from the socket (socketToDevice) and overwritten before forwarding.
+  // Both events are validated + rate-limited (see RELAY_* constants).
+  socket.on('relay-data', (payload: { roomId: string; from: string; to: string; transferId: string; seq: number; chunkIndex: number; data: string; last?: boolean }) => {
+    try {
+      if (!payload || typeof payload !== 'object') return
+      if (!verifyMembership(socket.id, payload.roomId)) {
+        return socket.emit('signaling-error', { code: 'NOT_MEMBER', message: 'not a room member' })
+      }
+      const room = rooms.get(payload.roomId)
+      if (!room) return
+      // Resolve + overwrite the sender identity from the socket — a spoofed
+      // `from` must never route another device's traffic.
+      const fromDevice = socketToDevice.get(socket.id)
+      if (!fromDevice || !room.devices.has(fromDevice)) return
+      // Destination must be a connected member (relayToDevice double-checks).
+      const to = typeof payload.to === 'string' ? payload.to : ''
+      const dest = room.devices.get(to)
+      if (!dest || !io.sockets.sockets.get(dest.socketId)) return
+      // Shape guards.
+      const data = typeof payload.data === 'string' ? payload.data : ''
+      if (!data || data.length > RELAY_MAX_B64_CHARS) return
+      if (!/^[A-Za-z0-9+/]+={0,2}$/.test(data)) return // must be base64
+      const seq = Number(payload.seq)
+      const chunkIndex = Number(payload.chunkIndex)
+      if (!Number.isInteger(seq) || seq < 0 || !Number.isInteger(chunkIndex) || chunkIndex < 0) return
+      const transferId = typeof payload.transferId === 'string' ? payload.transferId : ''
+      if (!transferId) return
+      // Best-effort same-session check (sealed manifests leave it unset).
+      if (room.activeTransferId && transferId !== room.activeTransferId) {
+        log('debug', 'relay_data_session_mismatch', { roomId: room.id })
+        return
+      }
+      // Per-room token bucket — over quota: tell the SENDER, drop the frame.
+      if (!relayQuotaAllows(room.id, data.length)) {
+        socket.emit('relay-error', { roomId: room.id, reason: 'quota' })
+        log('warn', 'relay_quota_exceeded', { roomId: room.id })
+        return
+      }
+      touchRoom(room)
+      room.relayedBytes += data.length
+      relayToDevice(io, room, 'relay-data', {
+        roomId: room.id,
+        from: fromDevice,
+        to,
+        transferId,
+        seq,
+        chunkIndex,
+        data,
+        ...(payload.last === true ? { last: true } : {}),
+      })
+    } catch (err) {
+      log('error', 'relay_data_error', { message: String((err as Error)?.message ?? err) })
+    }
+  })
+
+  socket.on('relay-ack', (payload: { roomId: string; from: string; to: string; transferId: string; seq: number }) => {
+    try {
+      if (!payload || typeof payload !== 'object') return
+      if (!verifyMembership(socket.id, payload.roomId)) return
+      const room = rooms.get(payload.roomId)
+      if (!room) return
+      const fromDevice = socketToDevice.get(socket.id)
+      if (!fromDevice || !room.devices.has(fromDevice)) return
+      const to = typeof payload.to === 'string' ? payload.to : ''
+      const seq = Number(payload.seq)
+      const transferId = typeof payload.transferId === 'string' ? payload.transferId : ''
+      if (!to || !transferId || !Number.isInteger(seq) || seq < 0) return
+      // Tiny control frame — no quota, no room byte counter.
+      relayToDevice(io, room, 'relay-ack', { roomId: room.id, from: fromDevice, to, transferId, seq })
+    } catch (err) {
+      log('error', 'relay_ack_error', { message: String((err as Error)?.message ?? err) })
+    }
   })
 
   // === Heartbeat / activity ping ===

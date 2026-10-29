@@ -34,6 +34,18 @@ export interface WebRTCConfig {
   onError: (err: Error) => void
   /** STUN servers; defaults to a small set of public STUN. */
   iceServers?: RTCIceServer[]
+  /**
+   * v5-a1: label for the initiator's primary DataChannel. Defaults to
+   * 'fluxdrop-0' (legacy). Fast lanes pass `fluxdrop-lane{n}` so the answerer
+   * can recognize (and bind as primary) the single channel of a lane PC.
+   */
+  channelLabel?: string
+  /**
+   * v5-a1: how many DataChannels the initiator creates (primary + secondaries).
+   * Defaults to 2 (legacy). Fast lanes pass 1 — a lane PC carries exactly one
+   * channel and never needs the vestigial secondary.
+   */
+  channelCount?: number
 }
 
 const DEFAULT_ICE: RTCIceServer[] = [
@@ -267,7 +279,10 @@ export class FluxDropWebRTC {
       // Non-initiator receives data channels created by the initiator.
       // The primary channel is 'fluxdrop-0', additional channels are 'fluxdrop-1', etc.
       const label = event.channel.label
-      if (label === 'fluxdrop-0' || label === 'fluxdrop') {
+      if (label === 'fluxdrop-0' || label === 'fluxdrop' || label.startsWith('fluxdrop-lane')) {
+        // v5-a1: a 'fluxdrop-lane{n}' channel is the ONE channel of a dedicated
+        // lane RTCPeerConnection — on that PC it IS the primary (isOpen, acks
+        // and control sends all target it).
         this.bindChannel(event.channel)
       } else if (label.startsWith('fluxdrop-')) {
         this.bindSecondaryChannel(event.channel, parseInt(label.split('-')[1]) || 0)
@@ -275,8 +290,11 @@ export class FluxDropWebRTC {
     }
 
     if (isInitiator) {
+      // v5-a1: lane PCs label their single channel 'fluxdrop-lane{n}' and
+      // skip the vestigial secondary; legacy PCs keep the exact old shape.
+      this.numChannels = Math.max(1, config.channelCount ?? 2)
       // Initiator creates the primary data channel.
-      this.channel = this.pc.createDataChannel('fluxdrop-0', {
+      this.channel = this.pc.createDataChannel(config.channelLabel ?? 'fluxdrop-0', {
         ordered: true,
         negotiated: false,
       })

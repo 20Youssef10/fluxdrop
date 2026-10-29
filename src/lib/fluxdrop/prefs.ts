@@ -7,6 +7,8 @@
 'use client'
 
 import { create } from 'zustand'
+// v5-a1: clamps the fast-lane count (shared protocol constant).
+import { FAST_LANE_MAX } from './protocol'
 
 export type AccentId = 'emerald' | 'fern' | 'amber' | 'rose' | 'violet'
 export type SoundPack = 'calm' | 'lively' | 'silent'
@@ -42,6 +44,26 @@ interface PrefsState {
   qosCapMbps: number
   setQosCapMbps: (mbps: number) => void
 
+  // v5-a1 fast lanes: number of parallel transports (1 = off/legacy, up to
+  // FAST_LANE_MAX) used to stripe a large single-receiver transfer. Read once
+  // when a transfer starts — applies to the NEXT transfer.
+  fastLanes: number
+  setFastLanes: (n: number) => void
+
+  // v5-a2 server relay fallback: when the recovery ladder exhausts and P2P
+  // is impossible, stream the (already end-to-end-encrypted) chunks through
+  // the signaling server instead of failing the transfer. Rate-limited
+  // server-side; never engages while P2P works (dead code path then).
+  relayFallback: boolean
+  setRelayFallback: (v: boolean) => void
+
+  // v5-a3w delta sync: single-file sends may stream only the CHANGED bytes
+  // when the receiver already keeps a similar older copy in its files vault
+  // (rsync-lite patch). Read when a transfer starts — applies to the NEXT
+  // transfer; any failure anywhere silently falls back to a full send.
+  deltaSync: boolean
+  setDeltaSync: (v: boolean) => void
+
   // 1.7 Merkle integrity tree on send (extra pre-send read pass)
   merkleEnabled: boolean
   setMerkleEnabled: (v: boolean) => void
@@ -73,6 +95,21 @@ interface PrefsState {
   // 5.6 first-run speedrun — completed flag (also gates re-showing)
   speedrunDone: boolean
   setSpeedrunDone: () => void
+
+  // v5-a6 watch folder: auto-send the detected-file queue whenever a send
+  // session is live (open room) and no transfer is in flight. Opt-in.
+  watchAutoSend: boolean
+  setWatchAutoSend: (v: boolean) => void
+
+  // v5-a6 scheduled send: fire the watch queue at a fixed local time.
+  // scheduleTime is 'HH:MM' (24h); scheduleDaily keeps it recurring (one-shot
+  // when off — the enable switch flips itself back off after firing).
+  scheduleEnabled: boolean
+  setScheduleEnabled: (v: boolean) => void
+  scheduleTime: string
+  setScheduleTime: (v: string) => void
+  scheduleDaily: boolean
+  setScheduleDaily: (v: boolean) => void
 }
 
 const KEY = 'fluxdrop:prefs-v4'
@@ -145,6 +182,29 @@ export const usePrefsStore = create<PrefsState>((set) => ({
     persist({ qosCapMbps: v })
   },
 
+  // v5-a1: 1..FAST_LANE_MAX, default 1 (= legacy single transport).
+  fastLanes: 1,
+  setFastLanes: (n) => {
+    const v = Math.max(1, Math.min(FAST_LANE_MAX, Math.round(n) || 1))
+    set({ fastLanes: v })
+    persist({ fastLanes: v })
+  },
+
+  // v5-a2: on by default — a last-ditch relay beats a failed transfer.
+  relayFallback: true,
+  setRelayFallback: (v) => {
+    set({ relayFallback: v })
+    persist({ relayFallback: v })
+  },
+
+  // v5-a3w: on by default — an opportunistic patch beats re-sending the whole
+  // file; declining (no prior copy, oversized patch) is always safe.
+  deltaSync: true,
+  setDeltaSync: (v) => {
+    set({ deltaSync: v })
+    persist({ deltaSync: v })
+  },
+
   merkleEnabled: true,
   setMerkleEnabled: (v) => {
     set({ merkleEnabled: v })
@@ -200,6 +260,34 @@ export const usePrefsStore = create<PrefsState>((set) => ({
   setSpeedrunDone: () => {
     set({ speedrunDone: true })
     persist({ speedrunDone: true })
+  },
+
+  // v5-a6: watch folder + scheduled send knobs (consumed by watch-folder-panel.tsx).
+  watchAutoSend: false,
+  setWatchAutoSend: (v) => {
+    set({ watchAutoSend: v })
+    persist({ watchAutoSend: v })
+  },
+
+  scheduleEnabled: false,
+  setScheduleEnabled: (v) => {
+    set({ scheduleEnabled: v })
+    persist({ scheduleEnabled: v })
+  },
+
+  scheduleTime: '09:00',
+  setScheduleTime: (v) => {
+    // v5-a6: normalize to a valid 24h 'HH:MM' slot; anything else falls back to the default.
+    const m = /^(\d{2}):(\d{2})$/.exec(v)
+    const time = m && Number(m[1]) < 24 && Number(m[2]) < 60 ? v : '09:00'
+    set({ scheduleTime: time })
+    persist({ scheduleTime: time })
+  },
+
+  scheduleDaily: true,
+  setScheduleDaily: (v) => {
+    set({ scheduleDaily: v })
+    persist({ scheduleDaily: v })
   },
 
   ...stored,

@@ -6,6 +6,12 @@
  * - { type: 'init' } → { type: 'ready' }
  * - { type: 'hash', file: File, id: string } → { type: 'progress', ... } then { type: 'result', hash }
  * - { type: 'verify', blob: Blob, expected: string, id: string } → { type: 'verified', ok }
+ *
+ * v5-a4: the production client (hash-worker-client.ts) now drives a POOL of
+ * inline Blob-URL workers built from the same algorithm; this standalone
+ * module mirrors that worker body — including the v5-a4 double-buffered
+ * reads (the next 4 MiB slice's arrayBuffer() is issued before the current
+ * slice is hashed, overlapping I/O and crypto).
  */
 
 import { createSHA256 } from 'hash-wasm'
@@ -39,10 +45,18 @@ self.onmessage = async (e: MessageEvent) => {
     h.init()
 
     try {
+      // v5-a4: double-buffered reads — issue the NEXT slice's arrayBuffer()
+      // before feeding the CURRENT slice to the hasher, so I/O and crypto
+      // overlap instead of serializing. Progress cadence is unchanged.
+      let pendingRead = total > 0 ? file.slice(0, Math.min(readSize, total)).arrayBuffer() : null
       while (offset < total) {
         const end = Math.min(offset + readSize, total)
-        const slice = file.slice(offset, end)
-        const buf = await slice.arrayBuffer()
+        // v5-a4: inside the loop pendingRead is never null — it is only
+        // cleared when the previous slice reached EOF, which exits the loop.
+        const buf = (await pendingRead)!
+        pendingRead = end < total
+          ? file.slice(end, Math.min(end + readSize, total)).arrayBuffer()
+          : null
         h.update(new Uint8Array(buf))
         offset = end
         chunkNum++
@@ -77,10 +91,15 @@ self.onmessage = async (e: MessageEvent) => {
       const readSize = 4 * 1024 * 1024
       const total = blob.size
       let offset = 0
+      // v5-a4: double-buffered reads (same I/O/crypto overlap as 'hash').
+      let pendingRead = total > 0 ? blob.slice(0, Math.min(readSize, total)).arrayBuffer() : null
       while (offset < total) {
         const end = Math.min(offset + readSize, total)
-        const slice = blob.slice(offset, end)
-        const buf = await slice.arrayBuffer()
+        // v5-a4: inside the loop pendingRead is never null (see 'hash' above).
+        const buf = (await pendingRead)!
+        pendingRead = end < total
+          ? blob.slice(end, Math.min(end + readSize, total)).arrayBuffer()
+          : null
         h.update(new Uint8Array(buf))
         offset = end
       }

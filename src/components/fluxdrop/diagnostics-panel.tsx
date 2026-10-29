@@ -20,6 +20,7 @@ import { useSessionStore } from '@/stores/session-store'
 import { formatBytes } from '@/lib/fluxdrop/format'
 import { deriveQuality, QualityBars } from './connection-quality'
 import { TransparencyPanel } from './transparency-panel'
+import { NetworkWeather } from './network-weather'
 import { copyDebugBundle } from '@/lib/fluxdrop/debug-bundle'
 import { fetchSignalingRegion } from '@/lib/fluxdrop/lan-discovery'
 import { toast } from 'sonner'
@@ -201,6 +202,9 @@ export function DiagnosticsPanel() {
                   <span><code className="text-flux-600 dark:text-flux-400">relay</code> — via TURN server</span>
                 </div>
               </div>
+
+              {/* v5-a5: network weather — pre-flight NAT/TURN/loopback probe */}
+              <NetworkWeather />
 
               {/* Data usage note */}
               {isDirectLAN ? (

@@ -1,11 +1,14 @@
 // Manifest creation and parsing for FluxDrop transfers.
 
 import type { FileManifestEntry, TransferManifest } from './protocol'
-import { CONSTANTS } from './protocol'
+import { CONSTANTS, DELTA_MIN_FILE_BYTES } from './protocol'
 import { computeTotalChunks } from './format'
 import { hashFile } from './checksum'
-import { hashFileWorker } from './hash-worker-client'
+// v5-a4: pooled hashing — one file per free worker, round-robin over the pool.
+import { hashFilesPool, hashFileWorker } from './hash-worker-client'
 import { randomUUID } from './random'
+// v5-a3w: delta candidacy is gated by the user's pref (read at manifest time).
+import { usePrefsStore } from './prefs'
 
 export interface ManifestProgress {
   current: number
@@ -17,8 +20,10 @@ export interface ManifestProgress {
 
 /**
  * Build a transfer manifest from a list of files.
- * Hashes each file with SHA-256 and yields to the event loop between files
- * to keep the UI responsive. Accepts an optional progress callback.
+ * Hashes every file with SHA-256 (v5-a4: through the worker POOL — several
+ * files hash in parallel, one per free worker, with double-buffered reads
+ * inside each worker) and reports progress in the same ManifestProgress
+ * shape the hashing UI consumes.
  * `wireCompression` stamps the manifest with 'gzip' (v1.1) so the receiver
  * knows to gunzip every incoming CHUNK_DATA_GZ frame; checksums remain over
  * the ORIGINAL bytes either way.
@@ -28,61 +33,105 @@ export async function buildManifest(
   onProgress?: (progress: ManifestProgress) => void,
   wireCompression?: 'gzip'
 ): Promise<TransferManifest> {
-  const entries: FileManifestEntry[] = []
-  let totalSize = 0
   const totalBytes = files.reduce((s, f) => s + f.size, 0)
-  let bytesProcessed = 0
 
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i]
+  // v5-a4: pooled hashing — hashFilesPool schedules one file per free worker
+  // (round-robin) so multi-file sends hash in parallel instead of one-by-one.
+  // `current` = files completed + 1 ("now hashing the next one"), and
+  // bytesProcessed/totalBytes are now a consistent aggregate pair.
+  let filesDone = 0
+  let overallBytes = 0
+  let activeName = files.length > 0 ? files[files.length - 1].name : ''
+  const emit = (): void => {
     onProgress?.({
-      current: i + 1,
+      current: Math.min(filesDone + 1, files.length),
       total: files.length,
-      fileName: file.name,
-      bytesProcessed,
+      fileName: activeName,
+      bytesProcessed: overallBytes,
       totalBytes,
     })
-
-    // Use worker-based hashing for ALL files (off-main-thread, true incremental SHA-256)
-    // that matches sha256sum for ALL file sizes. Falls back to main-thread hashFile()
-    // if the worker fails — hashing must never break a send.
-    let checksum: string
-    try {
-      checksum = await hashFileWorker(file, (p) => {
-        onProgress?.({
-          current: i + 1,
-          total: files.length,
-          fileName: file.name,
-          bytesProcessed: p.bytesProcessed,
-          totalBytes,
-        })
-      })
-    } catch (workerErr) {
-      console.warn('[FluxDrop] Worker hashing failed, falling back to main thread:', (workerErr instanceof Error ? workerErr.message : String(workerErr)))
-      checksum = await hashFile(file)
-    }
-    entries.push({
-      name: file.name,
-      size: file.size,
-      type: file.type || 'application/octet-stream',
-      lastModified: file.lastModified,
-      checksum,
-      relativePath: (file as any).webkitRelativePath || file.name,
-    })
-    totalSize += file.size
-    bytesProcessed += file.size
-
-    // Yield to the event loop between files so the UI can update.
-    await new Promise((resolve) => setTimeout(resolve, 0))
   }
+  emit() // leading-edge report, matching the old loop's first update
+
+  let digests: string[]
+  try {
+    digests = await hashFilesPool(files, {
+      onFileStart: (_i, f) => {
+        activeName = f.name
+        emit()
+      },
+      onFileDone: () => {
+        filesDone++
+        emit()
+      },
+      onOverallProgress: (bytes) => {
+        overallBytes = bytes
+        emit()
+      },
+    })
+  } catch (poolErr) {
+    // Hashing must never break a send — fall back to the pre-pool sequential
+    // loop (one file at a time; worker first, then main thread per file).
+    console.warn(
+      '[FluxDrop] Pooled hashing failed, falling back to sequential:',
+      poolErr instanceof Error ? poolErr.message : String(poolErr)
+    )
+    digests = new Array<string>(files.length)
+    let bytesProcessed = 0
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i]
+      let checksum: string
+      try {
+        checksum = await hashFileWorker(file, (p) => {
+          onProgress?.({
+            current: i + 1,
+            total: files.length,
+            fileName: file.name,
+            bytesProcessed: p.bytesProcessed,
+            totalBytes,
+          })
+        })
+      } catch {
+        checksum = await hashFile(file)
+      }
+      digests[i] = checksum
+      bytesProcessed += file.size
+      onProgress?.({ current: i + 1, total: files.length, fileName: file.name, bytesProcessed, totalBytes })
+      // Yield to the event loop between files so the UI can update.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+  }
+
+  // v5-a3w: delta candidacy — set ONLY when the pref is on, the transfer is
+  // exactly one file, and its size clears the 4-block threshold. It is a
+  // negotiation HINT only: the receiver still needs a readable same-name
+  // prior in its vault, and the sender may yet decline (patch over guard /
+  // build failure). Digest + size stay the ORIGINAL file's in every case.
+  const deltaEligible =
+    usePrefsStore.getState().deltaSync &&
+    files.length === 1 &&
+    (files[0]?.size ?? 0) >= DELTA_MIN_FILE_BYTES
+
+  const entries: FileManifestEntry[] = files.map((file, i) => ({
+    name: file.name,
+    size: file.size,
+    type: file.type || 'application/octet-stream',
+    lastModified: file.lastModified,
+    checksum: digests[i],
+    // v5-a4: narrowed the old `as any` while touching this line.
+    relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name,
+    // v5-a3w: candidacy rides only on entry 0 (single-file transfers by
+    // construction here — the spread keeps older manifests byte-compatible).
+    ...(i === 0 && deltaEligible ? { deltaCandidate: true } : {}),
+  }))
 
   const now = Date.now()
   return {
     transferId: randomUUID(),
     version: 1,
     files: entries,
-    totalSize,
-    totalChunks: computeTotalChunks(totalSize, CONSTANTS.CHUNK_SIZE),
+    totalSize: totalBytes,
+    totalChunks: computeTotalChunks(totalBytes, CONSTANTS.CHUNK_SIZE),
     chunkSize: CONSTANTS.CHUNK_SIZE,
     createdAt: now,
     expiresAt: now + CONSTANTS.RESUME_RECORD_TTL_MS,
