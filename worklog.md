@@ -1995,3 +1995,33 @@ Work Log:
   - 8-file manifest, desktop 1280px: list clipped to 3 rows and scrolls (338/530px), hit-test on Reject/Accept → "NOTHING (clickable)", card fits viewport (16..561 @577vh), Accept → both sides "Transfer complete · SHA-256 ✓".
   - 8-file manifest, mobile 390×844: card 110..735 fits, list cleanly clipped mid-row, footer buttons on-screen, hit-test passes, Accept → complete SHA-256 ✓ both sides.
 - History ScrollArea confirmed overflow:hidden after the primitive fix. bun run lint clean, dev.log clean.
+
+---
+
+Task ID: perf-resume-1
+Agent: main
+Task: Field report — "Speed is slow, connection got closed on long transfers, no auto resumes" (receiver debug bundle: rtcState=failed, ice=disconnected, DC closed, transfer stuck in CONNECTING at 26 MB/2.4 GB, speedHistory all zeros).
+
+Work Log:
+- Diagnosis (from bundle + code audit):
+  1. No ICE restart existed — the only recovery was a full PC teardown (attemptResume re-offer); the receiver (ICE answerer) had NO way to trigger recovery at all, and the sender's disconnected-grace only fired while state was exactly TRANSFERRING.
+  2. Sender loop pushed ONE 64 KB chunk per peer per round with the file read awaited inside the critical path → disk latency serialized the wire.
+  3. Receiver speed metrics: resetProgress() nulled the sampler baselines → tickSpeed() disarmed forever after any reconnect/re-manifest (all-zero speed graph); debug bundle's averageSpeed was a stub duplicating currentSpeed.
+- Fixes (all marked perf/resume-1):
+  - webrtc.ts: `createIceRestartOffer()` (in-place ICE restart preserving SCTP/DC; pc.restartIce() + createOffer({iceRestart})), `supportsInPlaceAnswer()`, `remoteSessionOrigin` + exported `sdpOrigin()` (same-PC renegotiation discriminator), restart-flag lifecycle on connectionstate.
+  - use-fluxdrop.ts recovery ladder: sender ICE disconnected/failed → performIceRestart() (3 attempts, 6 s rate-limit, budget reset on connect); 8 s disconnected grace extended to TRANSFERRING/PAUSED/MANIFEST_EXCHANGE/RESUMING, ICE-restart-first then attemptResume fallback; handleConnectionFailure retry timer now skips peers an ICE restart already revived; receiver onConnectionStateChange failed → poke sender via signaling resume-request before the retry machine; receiver stall watchdog (5 s poll): transfer active + DC dead 15 s → pokes sender (10 s rate-limit, 12 cap → FAILED + Retry); sender onResumeRequest is now a wake-up call (transport down → ICE restart → attemptResume fallback; stale-ICE DC → in-place restart); receiver answers same-PC (origin-matching) offers IN PLACE preserving the DC, full teardown only for new-PC offers; connected → RESUMING→TRANSFERRING restore for in-place legs; dev-only `window.__fluxdropIce` hook for E2E.
+  - E2E re-pair race fix: onPairingRequest now `resetE2ESession(peer)` before a fresh SPAKE2 handshake — a reloaded receiver page has no in-memory key, so the old "stale session = skip handshake" path sent MANIFEST_ENC the fresh page couldn't decrypt ("key exchange did not complete").
+  - Stale peer-pause watchdog: a peer that PAUSEd us and died mid-pause never sends RESUME_STREAM — transfer stayed PAUSED forever. Now unfreezes when the pausing peer's DC is closed or after 30 s.
+  - Bitmap re-query: DC-open resume leg arms resumeSkipPendingRef + 5 s fallback so the RESUME_QUERY (which can precede the manifest on a fresh page and was silently dropped) is re-asked after MANIFEST_ACK.
+  - Burst sender: readChunk now caches PROMISES (pipelined reads overlap disk latency with wire); per-peer burst up to SENDER_BURST_CHUNKS=64 (window-gated by canSend) per scheduler round, prefetch depth 2, per-round UI yield.
+  - Metrics: resetProgress keeps the sampler armed when startedAt is set; seedProgress re-arms the clock; tickSpeed only feeds speedHistory/speedBps while streaming (no zero-pollution after stalls); debug bundle averageSpeed = bytes/elapsed (real average).
+- Browser verification (2 isolated sessions via gateway :81, 48 MB + 200 MB urandom files):
+  - Speed: burst pipeline peaks 8.8 MB/s LAN (was ~1 MB/s pattern); receiver speeds visibly non-zero throughout.
+  - In-place ICE restart mid-transfer (dev hook, sender): offer sent, receiver answered IN PLACE (same PC, DC preserved, no teardown) → transfer continued 8%→47%→100%, SHA-256 ✓ both sides.
+  - 20 s receiver process freeze: blip self-healed, no restart needed, transfer completed.
+  - 35 s receiver freeze (renderer wedged/tab replaced): sender entered RESUMING "Reconnecting to resume from last chunk" (ladder active).
+  - Receiver page RELOAD mid-transfer (worst case) ×2: fresh E2E handshake on re-pair (new SAS each leg, manifest decrypts OK), auto-accept-resume, stale peer-pause watchdog unwound the dying-page PAUSE at 30 s ("Peer pause is stale — unfreezing"), transfer streamed 221→3200/3200 → "Transfer complete · Files verified · SHA-256 ✓" on both sides.
+  - Earlier round also validated bitmap resume: sender resumed at 88% (2821/3200) after re-pair without resending stored chunks.
+- bun run lint clean; tsc --noEmit clean; dev server restarted once (unrelated crash during testing — OOM from multiple headless Chromes); dev.log clean of app errors.
+
+Files touched: src/lib/fluxdrop/webrtc.ts, src/lib/fluxdrop/protocol.ts, src/lib/fluxdrop/debug-bundle.ts, src/stores/transfer-store.ts, src/hooks/fluxdrop/use-fluxdrop.ts.

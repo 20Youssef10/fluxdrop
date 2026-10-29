@@ -206,15 +206,19 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
     return true
   },
   resetProgress: (totalChunks, totalBytes) =>
-    set({
+    set((st) => ({
       chunksAcked: 0,
       totalChunks,
       totalBytes,
       bytesTransferred: 0,
       elapsedMs: 0,
       speedBps: 0,
-      _lastSpeedSampleAt: null,
-      _lastSpeedSampleBytes: null,
+      // perf/resume-1: keep the speed sampler ARMED when a timer is already
+      // running (resume legs / re-delivered manifests). The old code nulled
+      // the baselines, which disarmed tickSpeed forever — receiver speed
+      // froze at 0 after ANY reconnect until the next explicit startTimer.
+      _lastSpeedSampleAt: st.startedAt ? Date.now() : null,
+      _lastSpeedSampleBytes: 0,
       speedHistory: [],
       _pausedAt: null,
       _pausedTotalMs: 0,
@@ -225,7 +229,7 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
       _ackedSet: new Set<number>(),
       ackedSet: new Set<number>(),
       skippedIndices: new Set<number>(),
-    }),
+    })),
 
   // NOTE: resetProgress deliberately leaves skippedChunks/skippedBytes alone —
   // it runs when a manifest arrives, BEFORE the RESUME_QUERY handshake reports
@@ -236,8 +240,10 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
       chunksAcked: chunks,
       bytesTransferred: bytes,
       // Sync speed-sampling baselines so the seeded progress doesn't show up
-      // as a giant instantaneous speed spike.
+      // as a giant instantaneous speed spike. perf/resume-1: also (re-)arm
+      // the sampler clock — a null sample time left tickSpeed dead.
       _lastSpeedSampleBytes: bytes,
+      _lastSpeedSampleAt: st._lastSpeedSampleAt ?? Date.now(),
       _pendingChunks: 0,
       _pendingBytes: 0,
     })),
@@ -268,15 +274,20 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
     if (dt < 500) return // sample at most every 500ms
     const dBytes = s.bytesTransferred - (s._lastSpeedSampleBytes ?? 0)
     const speed = (dBytes / dt) * 1000
-    const history = [...s.speedHistory, speed].slice(-40) // keep last 40 samples
     // Elapsed excludes time spent paused (live pause window included).
     const pausedMs = s._pausedTotalMs + (s._pausedAt != null ? now - s._pausedAt : 0)
+    // perf/resume-1: only feed the sparkline/history while the stream is live
+    // (or data actually moved). Paused / resuming / dead-air periods used to
+    // bury the history in zero samples — the "all-zero speed graph" bug from
+    // the field report.
+    const streaming = s.transferState === 'TRANSFERRING'
+    const counts = streaming || dBytes > 0
     set({
-      speedBps: speed,
+      speedBps: counts ? speed : 0,
       elapsedMs: Math.max(0, now - s.startedAt - pausedMs),
       _lastSpeedSampleAt: now,
       _lastSpeedSampleBytes: s.bytesTransferred,
-      speedHistory: history,
+      speedHistory: counts ? [...s.speedHistory, speed].slice(-40) : s.speedHistory,
     })
   },
   _lastSpeedSampleAt: null,

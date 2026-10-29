@@ -324,6 +324,7 @@ export function useFluxDrop() {
   // (same TDZ-avoidance pattern as beginSendingRef).
   const performIceRestartRef = useRef<(peerId: string) => Promise<boolean>>(async () => false)
   const attemptResumeRef = useRef<() => Promise<void>>(async () => {})
+  const kickSenderLoopRef = useRef<() => void>(() => {})
   // Receiver stall watchdog: poke-the-sender bookkeeping. The receiver is the
   // ICE ANSWERER — it cannot restart the transport itself, so when its stream
   // stalls with a dead channel it asks the sender over signaling to recover.
@@ -942,6 +943,15 @@ export function useFluxDrop() {
         // initiate a DEDICATED WebRTC connection for this peer (v1.3 groups:
         // one offer per receiver; several can pair into the same room).
         if (!peerDeviceIdRef.current) peerDeviceIdRef.current = payload.from
+        // perf/resume-1: a pairing-request means the receiver just (RE-)joined
+        // the room — a reloaded page has NO in-memory E2E session, so any
+        // stale session we still hold for this peer is a trap: the manifest
+        // would be encrypted with a key the receiver no longer has ("Encrypted
+        // manifest arrived but the key exchange did not complete"). Reset the
+        // per-peer session so a FRESH handshake runs. Same-page resumes never
+        // send pairing-request (rejoin-room only rebinds the socket), so their
+        // surviving sessions stay untouched.
+        resetE2ESession(payload.from)
         // v1.2: kick off the per-peer E2E (PAKE) handshake as soon as pairing
         // starts — it runs over the signaling relay in parallel with ICE
         // negotiation, so the session key is usually ready before the
@@ -1391,6 +1401,29 @@ export function useFluxDrop() {
     performIceRestartRef.current = performIceRestart
   }, [performIceRestart])
 
+  // perf/resume-1: dev-only diagnostics hook — lets the E2E test harness (and
+  // power users in the dev console) force an ICE restart mid-transfer to prove
+  // the recovery ladder works. Compiled out of production builds.
+  useEffect(() => {
+    if (process.env.NODE_ENV !== 'development') return
+    ;(window as any).__fluxdropIce = {
+      restart: (peerId?: string) => {
+        const targets = peerId ? [peerId] : [...peerRtcsRef.current.keys()]
+        return Promise.all(targets.map((t) => performIceRestartRef.current(t)))
+      },
+      peers: () =>
+        [...peerRtcsRef.current.entries()].map(([id, r]) => ({
+          id,
+          isOpen: r.isOpen,
+          conn: r.connectionState,
+          ice: r.iceConnectionState,
+        })),
+    }
+    return () => {
+      delete (window as any).__fluxdropIce
+    }
+  }, [])
+
   // ---- Helper: get effective ICE servers ----
   // v1.1: async + TURN merge. User-configured custom servers win entirely;
   // otherwise short-lived auto-minted TURN credentials are appended as a
@@ -1436,6 +1469,18 @@ export function useFluxDrop() {
         },
         onIceConnectionStateChange: (state) => {
           sessionRef.current.setIceConnectionState(state)
+          if (state === 'connected') {
+            // perf/resume-1: transport revived — reset the restart budget.
+            iceRestartAttemptsRef.current.set(peerId, 0)
+            return
+          }
+          // perf/resume-1 rung 1: an in-place ICE restart usually revives a
+          // dropped transport WITHOUT tearing down the connection — the
+          // DataChannel/SCTP state survives. attemptResume (fresh PC per
+          // peer) stays as the heavy fallback for a dead channel.
+          if (state === 'disconnected' || state === 'failed') {
+            void performIceRestart(peerId)
+          }
         },
         onConnectionStateChange: (state) => {
           sessionRef.current.setRtcState(state)
@@ -1450,14 +1495,21 @@ export function useFluxDrop() {
             if (disconnectGraceRef.current) clearTimeout(disconnectGraceRef.current)
             disconnectGraceRef.current = setTimeout(() => {
               const rtcNow = peerRtcsRef.current.get(peerId)
-              if (
-                rtcNow &&
-                rtcNow.connectionState !== 'connected' &&
-                transferRef.current.transferState === 'TRANSFERRING'
-              ) {
-                console.warn('[FluxDrop] Still disconnected after grace period — resuming')
-                transferRef.current.setTransferState('RESUMING')
-                void attemptResume()
+              const stNow = transferRef.current.transferState
+              // perf/resume-1: a stalled-but-live transfer in ANY active state
+              // deserves recovery (the old check ignored PAUSED/RESUMING and
+              // left those transfers frozen forever).
+              const transferLive = ['TRANSFERRING', 'PAUSED', 'MANIFEST_EXCHANGE', 'RESUMING'].includes(stNow)
+              if (rtcNow && rtcNow.connectionState !== 'connected' && transferLive) {
+                console.warn('[FluxDrop] Still disconnected after grace period — trying ICE restart')
+                void performIceRestart(peerId).then((ok) => {
+                  if (!ok) {
+                    // Restart impossible (budget exhausted / channel dead) —
+                    // hand over to the teardown+re-offer path.
+                    transferRef.current.setTransferState('RESUMING')
+                    void attemptResume()
+                  }
+                })
               }
             }, 8000)
           } else if (state === 'failed') {
@@ -1536,6 +1588,20 @@ export function useFluxDrop() {
             peer.skipQueryPending = true
             transferRef.current.setTransferState('TRANSFERRING')
             rtcOpen?.sendResumeQuery(m.transferId)
+            // perf/resume-1: on a FRESH receiver page (reloaded tab) this
+            // query can arrive BEFORE the manifest — manifestRef is still
+            // null there and the query is dropped silently. Arm the global
+            // resume-skip flag so the MANIFEST_ACK handler re-asks once the
+            // receiver can actually answer, with the same 5s fallback the
+            // other resume paths use.
+            resumeSkipPendingRef.current = true
+            if (resumeQueryTimerRef.current) clearTimeout(resumeQueryTimerRef.current)
+            resumeQueryTimerRef.current = setTimeout(() => {
+              if (!resumeSkipPendingRef.current) return
+              resumeSkipPendingRef.current = false
+              console.log('[FluxDrop] No resume-skip answer within 5s — sending from position 0')
+              void beginSendingRef.current?.()
+            }, 5000)
           }
           // Send the manifest to THIS peer (after its E2E handshake settles).
           void (async () => {
@@ -1639,6 +1705,15 @@ export function useFluxDrop() {
 
   // ---- Receiver: handle incoming offer ----
   const handleOfferAsReceiver = useCallback(async (sdp: RTCSessionDescriptionInit) => {
+    const senderId = peerDeviceIdRef.current
+    const oldRtc = senderId ? peerRtcsRef.current.get(senderId) : null
+    // perf/resume-1: an offer whose SDP origin matches our CURRENT remote
+    // description is a renegotiation of the SAME PC (an ICE restart or a
+    // similar renegotiation) — never a reason to tear down a live connection.
+    // Offers from a brand-new PC carry a different origin.
+    const incomingOrigin = sdpOrigin(sdp.sdp ?? '')
+    const isSamePcRenegotiation =
+      !!oldRtc && !!incomingOrigin && oldRtc.remoteSessionOrigin === incomingOrigin
     // Ignore a redundant re-offer while a transfer is live on an OPEN
     // DataChannel — renegotiating would clobber the running state machine
     // (UI falls back to "Waiting for sender" while chunks keep flowing on
@@ -1649,12 +1724,36 @@ export function useFluxDrop() {
       st === 'PAUSED' ||
       st === 'VERIFYING' ||
       st === 'MANIFEST_EXCHANGE'
-    if (transferLive && sessionRef.current.dataChannelOpen) {
+    if (transferLive && sessionRef.current.dataChannelOpen && !isSamePcRenegotiation) {
       console.warn('[FluxDrop] Ignoring redundant offer — transfer already streaming on an open DataChannel')
       return
     }
-    const senderId = peerDeviceIdRef.current
-    const oldRtc = senderId ? peerRtcsRef.current.get(senderId) : null
+    // perf/resume-1 rung 0: answer a same-PC renegotiation IN PLACE. The SCTP
+    // association, the DataChannel object and all handlers survive — turning
+    // the sender's ICE restart into a full reconnect here would waste seconds
+    // and drop in-flight stream state.
+    if (senderId && oldRtc && isSamePcRenegotiation && oldRtc.supportsInPlaceAnswer()) {
+      try {
+        const answer = await oldRtc.createAnswer(sdp)
+        signalingRef.current?.sendAnswer({
+          roomId: sessionRef.current.roomId!,
+          from: sessionRef.current.deviceId,
+          to: senderId,
+          sdp: answer,
+        })
+        console.log('[FluxDrop] Answered re-offer IN PLACE — transport renegotiated, DataChannel preserved')
+        sessionRef.current.setDataChannelOpen(true)
+        if (manifestRef.current) {
+          const stIp = transferRef.current.transferState
+          if (stIp === 'CONNECTING' || stIp === 'RESUMING') {
+            transferRef.current.setTransferState('TRANSFERRING')
+          }
+        }
+        return
+      } catch (errIp: any) {
+        console.warn('[FluxDrop] In-place answer failed — falling back to a fresh connection:', errIp?.message)
+      }
+    }
     if (oldRtc) {
       try { oldRtc.close() } catch { /* ignore */ }
       if (senderId) peerRtcsRef.current.delete(senderId)
@@ -1682,14 +1781,37 @@ export function useFluxDrop() {
             toast.success('Peer connection established')
             playConnect()
             startDiagnosticsPolling()
+            // perf/resume-1: an in-place ICE restart keeps the DataChannel
+            // open (its onopen never refires), so the resume-state restore
+            // that normally runs in onDataChannelOpen must happen here too.
+            if (manifestRef.current && transferRef.current.transferState === 'RESUMING') {
+              transferRef.current.setTransferState('TRANSFERRING')
+              receiverStallTicksRef.current = 0
+              receiverPokeCountRef.current = 0
+            }
           }
           if (state === 'failed') {
+            // perf/resume-1: before the retry machine, ask the sender to
+            // recover via signaling — the receiver cannot restart ICE itself.
+            // The receiver stall watchdog keeps poking on a 5s cadence after
+            // this.
+            const m = manifestRef.current
+            const stNow = transferRef.current.transferState
+            const transferLive = ['TRANSFERRING', 'PAUSED', 'MANIFEST_EXCHANGE', 'CONNECTING', 'RESUMING'].includes(stNow)
+            if (m && peerDeviceIdRef.current && transferLive && transferRef.current.chunksAcked < m.totalChunks) {
+              transferRef.current.setTransferState('RESUMING')
+              pokeSenderForResume('connection failed')
+              return
+            }
             handleConnectionFailure('receiver')
           }
         },
         onDataChannelOpen: () => {
           sessionRef.current.setDataChannelOpen(true)
           sessionRef.current.setRetryCount(0)
+          // perf/resume-1: transport restored — reset the watchdog budget.
+          receiverStallTicksRef.current = 0
+          receiverPokeCountRef.current = 0
           // v1.2: freeze the wire-encryption expectation from the E2E session
           // (survives DC drops within the page; fresh pages get a new session).
           e2eWireRef.current = isE2EActive(peerDeviceIdRef.current)
@@ -1742,7 +1864,7 @@ export function useFluxDrop() {
     } catch (err: any) {
       toast.error('Failed to create answer', { description: err.message })
     }
-  }, [])
+  }, [pokeSenderForResume])
 
   // ---- DataChannel message router ----
   // v1.3 (6.1): `fromPeerId` identifies which peer connection the frame came
@@ -3190,6 +3312,97 @@ export function useFluxDrop() {
     return () => clearInterval(id)
   }, [finishReceiverTransfer])
 
+  // ---- perf/resume-1: receiver stall watchdog (auto-resume pokes) ----
+  // Mobile networks drop ICE silently, and a backgrounded sender's timers
+  // freeze — the sender may NEVER notice a dead transport, and the receiver
+  // (as the ICE answerer) historically had no way to trigger recovery: the
+  // transfer sat in CONNECTING/RESUMING forever (the reported "no auto
+  // resumes" bug). This poll watches for "transfer active + no live
+  // DataChannel + progress below 100%" and pokes the sender over signaling
+  // until the stream comes back.
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (verificationPromiseRef.current) return
+      if (filesRef.current.length > 0) return // sender — has its own watchdogs
+      const m = manifestRef.current
+      if (!m) return
+      const st = transferRef.current.transferState
+      const live = ['CONNECTING', 'TRANSFERRING', 'PAUSED', 'RESUMING', 'MANIFEST_EXCHANGE']
+      if (!live.includes(st)) {
+        receiverStallTicksRef.current = 0
+        return
+      }
+      if (transferRef.current.chunksAcked >= m.totalChunks) return
+      const rtc = peerRtcsRef.current.get(peerDeviceIdRef.current ?? '')
+      if (rtc?.isOpen && rtc.connectionState === 'connected') {
+        // Healthy — a recovery succeeded; reset the budgets.
+        receiverStallTicksRef.current = 0
+        receiverPokeCountRef.current = 0
+        return
+      }
+      receiverStallTicksRef.current++
+      if (receiverStallTicksRef.current < 3) return // ~15s of dead air first
+      receiverStallTicksRef.current = 0
+      if (receiverPokeCountRef.current >= 12) {
+        // ~2 min of unanswered pokes — stop hammering, surface a manual retry.
+        if (st !== 'FAILED') {
+          transferRef.current.setTransferState('FAILED')
+          transferRef.current.setError('Connection lost — the sender is unreachable')
+          playError()
+          void persistTransferRecord('receiver', 'FAILED')
+          toast.error('Sender unreachable', {
+            description: 'Your progress is saved. The transfer resumes automatically once the sender comes back — or press Retry.',
+            duration: 15000,
+            action: {
+              label: 'Retry',
+              onClick: () => {
+                receiverPokeCountRef.current = 0
+                receiverLastPokeAtRef.current = 0
+                transferRef.current.setTransferState('RESUMING')
+                pokeSenderForResume('manual retry')
+              },
+            },
+          })
+        }
+        return
+      }
+      if (st !== 'RESUMING') transferRef.current.setTransferState('RESUMING')
+      pokeSenderForResume(`DataChannel closed while ${st}`)
+    }, 5000)
+    return () => clearInterval(id)
+  }, [pokeSenderForResume, persistTransferRecord])
+
+  // ---- perf/resume-1: stale peer-pause watchdog ----
+  // A peer that paused us and then died (tab closed mid-pause — the mobile
+  // background auto-pause sends PAUSE right before its page vanishes) never
+  // sends RESUME_STREAM, and the transfer used to stay PAUSED forever with
+  // the receiver showing "Transferring" at zero flow. If the pausing peer's
+  // channel is gone, or the peer pause has lasted > 30s, unfreeze.
+  useEffect(() => {
+    let ticks = 0
+    const id = setInterval(() => {
+      if (transferRef.current.transferState !== 'PAUSED' || !pausePeerRef.current) {
+        ticks = 0
+        return
+      }
+      ticks++
+      const rtc = getRtc(peerDeviceIdRef.current)
+      const peerDead = !rtc || !rtc.isOpen
+      if (peerDead || ticks >= 6) {
+        console.warn(`[FluxDrop] Peer pause is stale (${peerDead ? 'channel closed' : '30s without resume'}) — unfreezing`)
+        pausePeerRef.current = false
+        ticks = 0
+        if (transferRef.current.transferState === 'PAUSED' && !pauseLocalRef.current) {
+          transferRef.current.setTransferState('TRANSFERRING')
+          transferRef.current.resumeTimer()
+        }
+        kickSenderLoopRef.current()
+        toast.info('Peer pause timed out — resuming transfer')
+      }
+    }, 5000)
+    return () => clearInterval(id)
+  }, [])
+
   // ---- Sender: fan-out wave scheduler (v1.3 group rooms) ----
   // One cooperative loop drives ALL connected receivers. Each peer keeps its
   // own position in the deterministic send order (a late acceptor starts at 0
@@ -3231,14 +3444,15 @@ export function useFluxDrop() {
 
     try {
       /**
-       * Read and compose a chunk from potentially multiple file segments,
-       * with a small shared cache — group peers often move in lockstep, so
-       * one read serves several sends. Cap bounds memory (~64 × 256 KB).
+       * Read and compose a chunk from potentially multiple file segments.
+       * perf/resume-1: the cache now stores PROMISES, not buffers — pipelined
+       * reads overlap disk latency with wire sends instead of serializing
+       * them (the old await-per-chunk read capped throughput at a few MB/s
+       * on slow mobile storage). Group peers moving in lockstep still share
+       * the same in-flight read. Cap bounds memory (~64 × 256 KB).
        */
-      const readCache = new Map<number, ArrayBuffer>()
-      const readChunk = async (chunkIndex: number): Promise<ArrayBuffer | null> => {
-        const cached = readCache.get(chunkIndex)
-        if (cached) return cached
+      const readCache = new Map<number, Promise<ArrayBuffer | null>>()
+      const composeChunk = async (chunkIndex: number): Promise<ArrayBuffer | null> => {
         const resolved = resolveChunk(plan, chunkIndex, m.chunkSize)
         if (!resolved || resolved.segments.length === 0) return null
         let out: ArrayBuffer
@@ -3262,12 +3476,21 @@ export function useFluxDrop() {
           }
           out = combined.buffer
         }
+        return out
+      }
+      const readChunk = (chunkIndex: number): Promise<ArrayBuffer | null> => {
+        const cached = readCache.get(chunkIndex)
+        if (cached) return cached
+        const p = composeChunk(chunkIndex)
+        // A prefetched read that nobody awaits must never surface as an
+        // unhandled rejection; real consumers still observe the result.
+        p.catch(() => {})
+        readCache.set(chunkIndex, p)
         if (readCache.size >= CONSTANTS.FANOUT_READ_CACHE) {
           const oldest = readCache.keys().next().value
           if (oldest !== undefined) readCache.delete(oldest)
         }
-        readCache.set(chunkIndex, out)
-        return out
+        return p
       }
 
       // Per-chunk gzip cache: same manifest → identical gzip bytes for every
@@ -3309,69 +3532,86 @@ export function useFluxDrop() {
             minPos = Math.min(minPos, peer.nextPos)
             continue
           }
-          const i = order[peer.nextPos]
           minPos = Math.min(minPos, peer.nextPos)
-          // Chunk already stored by THIS receiver (resume bitmap) — skip.
-          if (peer.skip.has(i)) {
-            peer.nextPos++
-            progressed = true
-            continue
-          }
-          // Backpressure: wait for THIS peer's buffer to drain (bounded by
-          // waitForDrain's own 10s timeout), then move on to other peers.
-          if (!pRtc.canSend()) {
-            await pRtc.waitForDrain()
+          // ---- perf/resume-1: burst send — keep the pipe FULL ----
+          // The old loop pushed ONE 64 KB chunk per peer per round with the
+          // file read awaited inside the critical path: disk latency
+          // serialized the wire (~few MB/s ceiling). Each round now pushes a
+          // whole window-gated burst, and reads are pipelined ahead of the
+          // sends via the promise cache.
+          let burst = 0
+          while (burst < CONSTANTS.SENDER_BURST_CHUNKS && peer.nextPos < order.length) {
             if (sendLoopGenRef.current !== myGen) return
-            if (!pRtc.isOpen) continue
-            continue
-          }
-          const buf = await readChunk(i)
-          if (!buf) {
-            peer.nextPos++
-            progressed = true
-            continue
-          }
-          // v1.1: compress once per chunk (shared across peers).
-          let gzipped: Uint8Array | null = null
-          if (useGzip) {
-            if (!gzCache.has(i)) {
+            const i = order[peer.nextPos]
+            // Chunk already stored by THIS receiver (resume bitmap) — skip.
+            if (peer.skip.has(i)) {
+              peer.nextPos++
+              progressed = true
+              burst++
+              continue
+            }
+            if (!pRtc.canSend()) break // window full → bounded drain below
+            const bufPromise = readChunk(i)
+            // Pipeline: kick off the next reads while this chunk is being
+            // compressed/encrypted/sent.
+            for (let k = 1; k <= 2; k++) {
+              const jIdx = peer.nextPos + k
+              if (jIdx >= order.length) break
+              const j = order[jIdx]
+              if (!peer.skip.has(j)) void readChunk(j)
+            }
+            const buf = await bufPromise
+            if (!buf) {
+              peer.nextPos++
+              progressed = true
+              burst++
+              continue
+            }
+            // v1.1: compress once per chunk (shared across peers).
+            let gzipped: Uint8Array | null = null
+            if (useGzip) {
+              if (!gzCache.has(i)) {
+                try {
+                  gzCache.set(i, await gzipCompress(new Uint8Array(buf)))
+                } catch (gzErr: any) {
+                  console.warn(`[FluxDrop] gzip failed for chunk ${i}, sending uncompressed:`, gzErr?.message)
+                  gzCache.set(i, null)
+                }
+              }
+              gzipped = gzCache.get(i) ?? null
+            }
+            let wireBuf: ArrayBuffer | Uint8Array = gzipped ?? buf
+            // v1.2: encrypt PER PEER (every receiver has its own session key).
+            // Fail CLOSED on encryption errors — never downgrade to plaintext.
+            if (peer.enc) {
               try {
-                gzCache.set(i, await gzipCompress(new Uint8Array(buf)))
-              } catch (gzErr: any) {
-                console.warn(`[FluxDrop] gzip failed for chunk ${i}, sending uncompressed:`, gzErr?.message)
-                gzCache.set(i, null)
+                wireBuf = await encryptWirePayload(wireBuf, 'chunk', peer.id)
+              } catch (encErr: any) {
+                console.error(`[FluxDrop] Chunk ${i} encryption failed for peer ${peer.id.slice(0, 8)}:`, encErr?.message)
+                transferRef.current.setTransferState('ERROR')
+                transferRef.current.setError('Encryption failed — transfer aborted')
+                playError()
+                await persistTransferRecord('sender', 'ERROR')
+                return
               }
             }
-            gzipped = gzCache.get(i) ?? null
-          }
-          let wireBuf: ArrayBuffer | Uint8Array = gzipped ?? buf
-          // v1.2: encrypt PER PEER (every receiver has its own session key).
-          // Fail CLOSED on encryption errors — never downgrade to plaintext.
-          if (peer.enc) {
-            try {
-              wireBuf = await encryptWirePayload(wireBuf, 'chunk', peer.id)
-            } catch (encErr: any) {
-              console.error(`[FluxDrop] Chunk ${i} encryption failed for peer ${peer.id.slice(0, 8)}:`, encErr?.message)
-              transferRef.current.setTransferState('ERROR')
-              transferRef.current.setError('Encryption failed — transfer aborted')
-              playError()
-              await persistTransferRecord('sender', 'ERROR')
-              return
+            const wireOpts = { gzip: useGzip && gzipped != null, enc: peer.enc }
+            const sent = pRtc.sendChunkData(m.transferId, i, wireBuf, wireOpts)
+            if (sent) {
+              peer.nextPos++
+              progressed = true
+              burst++
+            } else {
+              break // transient queue pressure — bounded drain below
             }
           }
-          const wireOpts = { gzip: useGzip && gzipped != null, enc: peer.enc }
-          const sent = pRtc.sendChunkData(m.transferId, i, wireBuf, wireOpts)
-          if (sent) {
-            peer.nextPos++
-            progressed = true
-          } else {
-            // Transient failure (queue pressure) — drain and retry next round.
+          if (burst === 0 && peer.nextPos < order.length) {
+            // Window full or a transient failure on the first chunk of the
+            // burst — wait for THIS peer's buffer to drain (bounded by
+            // waitForDrain's own 10s timeout), then let the next round retry
+            // while other peers advance.
             await pRtc.waitForDrain()
             if (sendLoopGenRef.current !== myGen) return
-          }
-          // Yield periodically so the UI can update.
-          if (i % 128 === 0) {
-            await new Promise((r) => setTimeout(r, 0))
           }
         }
         senderNextIndexRef.current = minPos
@@ -3399,6 +3639,9 @@ export function useFluxDrop() {
           running = false
           break
         }
+        // Yield to the UI once per round — bursts deliver up to
+        // SENDER_BURST_CHUNKS × peers chunks per round now.
+        await new Promise((r) => setTimeout(r, 0))
         if (!progressed) {
           await new Promise((r) => setTimeout(r, 25))
         }
@@ -3515,6 +3758,9 @@ export function useFluxDrop() {
       void beginSending()
     }
   }, [beginSending])
+  useEffect(() => {
+    kickSenderLoopRef.current = kickSenderLoop
+  }, [kickSenderLoop])
 
   // ---- Public API: start a send session ----
   // `resumeManifest` (optional) re-uses an earlier transfer's manifest so

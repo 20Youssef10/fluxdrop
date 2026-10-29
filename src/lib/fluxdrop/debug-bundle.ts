@@ -52,8 +52,14 @@ export async function collectDebugBundle(opts: DebugBundleOptions = {}): Promise
           chunksAcked: transfer.chunksAcked,
           skippedChunks: transfer.skippedChunks,
           elapsedMs: transfer.elapsedMs,
-          averageSpeed: transfer.speedBps,
-          currentSpeed: transfer.speedBps,
+          // perf/resume-1: a REAL average (total bytes over pause-aware
+          // elapsed time) — the old field just duplicated currentSpeed, which
+          // made every stalled transfer read as "0 B/s average".
+          averageSpeed:
+            transfer.elapsedMs > 0
+              ? Math.round((transfer.bytesTransferred / transfer.elapsedMs) * 1000)
+              : 0,
+          currentSpeed: Math.round(transfer.speedBps),
           speedHistory: transfer.speedHistory?.slice(-24) ?? [],
           ...(opts.includeFileNames
             ? { files: transfer.manifest.files.map((f) => `${f.name} (${f.size}B)`) }
