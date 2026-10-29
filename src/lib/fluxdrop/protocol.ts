@@ -155,6 +155,12 @@ export const CONSTANTS = {
   // v1.3 (6.1): per-chunk read cache shared across fan-out peers (wave
   // scheduler). Chunks up to 256 KB — the cap bounds it to ~16 MB.
   FANOUT_READ_CACHE: 64,
+  // perf: max chunks pushed per peer per scheduler round. The wave loop used
+  // to send ONE 64 KB chunk per round with the file read awaited inside the
+  // critical path — disk latency serialized the wire (few MB/s ceiling on
+  // mobile). Bursts keep the SCTP pipe full; the flow window (canSend)
+  // remains the real throttle.
+  SENDER_BURST_CHUNKS: 64,
   PAIRING_TIMEOUT_MS: 60_000,
   CONNECT_RETRY_MAX: 3,
   CONNECT_RETRY_BASE_MS: 1_000,

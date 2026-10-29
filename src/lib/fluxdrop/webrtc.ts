@@ -42,6 +42,19 @@ const DEFAULT_ICE: RTCIceServer[] = [
   { urls: 'stun:stun.cloudflare.com:3478' },
 ]
 
+/**
+ * Extract the o= (origin) line from an SDP. Stable across ICE restarts on the
+ * same RTCPeerConnection (only ice-ufrag/pwd change); different for offers
+ * produced by a brand-new PC. The receiver uses this to decide whether an
+ * incoming offer should be answered in place (transport kept) or treated as a
+ * full reconnect (fresh PC).
+ */
+export function sdpOrigin(sdp: string): string | null {
+  if (!sdp) return null
+  const line = sdp.split(/\r?\n/).find((l) => l.startsWith('o='))
+  return line ?? null
+}
+
 export class FluxDropWebRTC {
   private pc: RTCPeerConnection
   private channel: RTCDataChannel | null = null
@@ -53,6 +66,9 @@ export class FluxDropWebRTC {
   private pendingCandidates: RTCIceCandidateInit[] = []
   private remoteDescriptionSet = false
   private negotiatedChunkSize: number = CONSTANTS.CHUNK_SIZE
+  // True while an ICE-restart offer is being prepared (guards re-entry and
+  // lets callers skip recovery paths that would collide with the restart).
+  private iceRestartInFlight: boolean = false
 
   // --- v1.1 adaptive flow window (AIMD) ---
   // The in-flight byte budget on the SEND path. Grows while sends are clean,
@@ -225,7 +241,13 @@ export class FluxDropWebRTC {
     }
 
     this.pc.onconnectionstatechange = () => {
-      this.config.onConnectionStateChange(this.pc.connectionState)
+      // A settled restart (success or definitive failure) frees the guard so
+      // the next recovery rung may run.
+      const st = this.pc.connectionState
+      if (st === 'connected' || st === 'failed' || st === 'closed') {
+        this.iceRestartInFlight = false
+      }
+      this.config.onConnectionStateChange(st)
     }
 
     // ICE candidate errors are almost always benign — STUN servers may be
@@ -442,6 +464,62 @@ export class FluxDropWebRTC {
     await this.pc.setRemoteDescription(answer)
     this.remoteDescriptionSet = true
     await this.flushPendingCandidates()
+  }
+
+  /** True while an ICE-restart offer/answer cycle is in flight. */
+  get isRestartingIce(): boolean {
+    return this.iceRestartInFlight
+  }
+
+  /**
+   * In-place ICE restart: re-gathers candidates and rebuilds the transport on
+   * the SAME RTCPeerConnection — the SCTP association and DataChannel object
+   * survive (onopen does NOT refire, onclose does NOT fire on success). Far
+   * cheaper and more reliable than the old teardown path, which lost all
+   * channel state and forced the receiver onto a brand-new connection.
+   *
+   * Returns the restart offer to relay via signaling, or null when a restart
+   * is impossible (PC closed, one already in flight, or the DataChannel has
+   * already died — a closed DC cannot be revived in place, use a fresh PC).
+   */
+  async createIceRestartOffer(): Promise<RTCSessionDescriptionInit | null> {
+    if (this.iceRestartInFlight) return null
+    if (this.pc.connectionState === 'closed' || this.pc.signalingState === 'closed') return null
+    if (!this.isOpen) return null
+    this.iceRestartInFlight = true
+    try {
+      // Hint the browser (no-op where unsupported); the explicit offer below
+      // is what actually restarts ICE.
+      try { (this.pc as any).restartIce?.() } catch { /* older browsers */ }
+      const offer = await this.pc.createOffer({ iceRestart: true })
+      await this.pc.setLocalDescription(offer)
+      console.log('[FluxDrop] ICE restart offer created — re-negotiating in place')
+      return offer
+    } catch (err: any) {
+      console.warn('[FluxDrop] ICE restart offer failed:', err?.message)
+      this.iceRestartInFlight = false
+      return null
+    }
+  }
+
+  /**
+   * Whether THIS connection can take an incoming (possibly ICE-restart) offer
+   * and answer it IN PLACE — same PC, renegotiated transport, DataChannel
+   * preserved. Only possible while signaling is stable and our channel object
+   * is still alive; a dead channel needs the fresh-PC fallback.
+   */
+  supportsInPlaceAnswer(): boolean {
+    if (this.pc.connectionState === 'closed' || this.pc.signalingState !== 'stable') return false
+    return !!this.channel && this.channel.readyState === 'open'
+  }
+
+  /** The o= (origin) line of the current remote description. Stable across
+   * ICE restarts on the same PC; different for offers from a brand-new PC —
+   * the discriminator between "renegotiate in place" and "full reconnect". */
+  get remoteSessionOrigin(): string | null {
+    const sdp = this.pc.remoteDescription?.sdp
+    if (!sdp) return null
+    return sdpOrigin(sdp)
   }
 
   /** Apply any ICE candidates that were queued before setRemoteDescription. */
@@ -794,6 +872,7 @@ export class FluxDropWebRTC {
   }
 
   close(): void {
+    this.iceRestartInFlight = false
     // Close primary channel.
     if (this.channel) {
       this.channel.onopen = null

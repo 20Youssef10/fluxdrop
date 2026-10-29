@@ -12,7 +12,7 @@ import { useCallback, useEffect, useRef } from 'react'
 import { useSessionStore } from '@/stores/session-store'
 import { useTransferStore } from '@/stores/transfer-store'
 import { FluxDropSignaling } from '@/lib/fluxdrop/signaling'
-import { FluxDropWebRTC } from '@/lib/fluxdrop/webrtc'
+import { FluxDropWebRTC, sdpOrigin } from '@/lib/fluxdrop/webrtc'
 import { buildManifest, buildSlicePlan, resolveChunk } from '@/lib/fluxdrop/manifest'
 import { verifyChecksum, hashBlobRange } from '@/lib/fluxdrop/checksum'
 import { destroyHashWorker } from '@/lib/fluxdrop/hash-worker-client'
@@ -316,6 +316,20 @@ export function useFluxDrop() {
   const RESUME_ATTEMPT_MAX = 3
   // --- v1.1: ICE 'disconnected' grace timer (often self-heals) ---
   const disconnectGraceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // --- perf/resume-1: in-place ICE restart bookkeeping (per peer) ---
+  const iceRestartAttemptsRef = useRef<Map<string, number>>(new Map())
+  const iceRestartLastAtRef = useRef<Map<string, number>>(new Map())
+  // Late-bound recovery helpers: connect() is defined BEFORE attemptResume/
+  // performIceRestart in this file, so those closures reach them via refs
+  // (same TDZ-avoidance pattern as beginSendingRef).
+  const performIceRestartRef = useRef<(peerId: string) => Promise<boolean>>(async () => false)
+  const attemptResumeRef = useRef<() => Promise<void>>(async () => {})
+  // Receiver stall watchdog: poke-the-sender bookkeeping. The receiver is the
+  // ICE ANSWERER — it cannot restart the transport itself, so when its stream
+  // stalls with a dead channel it asks the sender over signaling to recover.
+  const receiverStallTicksRef = useRef<number>(0)
+  const receiverPokeCountRef = useRef<number>(0)
+  const receiverLastPokeAtRef = useRef<number>(0)
   // --- v1.1: file-interleaved send order (pipelining) ---
   // Deterministic per manifest: same manifest → same order, so resume
   // positions (order indices) stay stable across reconnection.
@@ -1062,6 +1076,30 @@ export function useFluxDrop() {
         toast.error('Transfer cancelled', { description: payload.reason })
       },
       onResumeRequest: (payload) => {
+        // perf/resume-1: the receiver is the ICE ANSWERER — it cannot rebuild
+        // the transport itself. A resume-request over signaling is its only
+        // way to wake the sender up, so treat it as a recovery trigger, not
+        // just a bitmap handshake.
+        const rtcWake = getRtc(payload.from)
+        if (!rtcWake || !rtcWake.isOpen) {
+          // Our DataChannel to this receiver is gone — revive the transport.
+          // The in-place ICE restart keeps everything else alive; the heavy
+          // teardown+re-offer path (attemptResume) is the fallback.
+          console.log(`[FluxDrop] Resume request from ${payload.from.slice(0, 8)} — transport down, recovering`)
+          toast.info('Receiver asks to resume — reconnecting…', { duration: 4000 })
+          void performIceRestartRef.current(payload.from).then((ok) => {
+            if (!ok) {
+              transferRef.current.setTransferState('RESUMING')
+              void attemptResumeRef.current()
+            }
+          })
+          return
+        }
+        if (rtcWake.iceConnectionState !== 'connected') {
+          // Channel object alive but the transport dropped — restart ICE in
+          // place; queued control frames complete once it revives.
+          void performIceRestartRef.current(payload.from)
+        }
         toast.info('Receiver reconnected — negotiating resume…')
         // v1.1: use the same bitmap handshake as the DataChannel path. A raw
         // "last chunk index" is meaningless as a send-order position, and only
@@ -1163,9 +1201,26 @@ export function useFluxDrop() {
     })
     setTimeout(() => {
       if (role === 'sender') {
-        // v1.3: retry re-offers to every known receiver.
         const targets = new Set<string>(requiredPeersRef.current)
         if (peerDeviceIdRef.current) targets.add(peerDeviceIdRef.current)
+        // perf/resume-1: an in-place ICE restart may have revived a peer
+        // during the backoff window — re-offering now would tear down a LIVE
+        // connection. Skip recovered peers and restart the stream instead.
+        const liveTargets = [...targets].filter((t) => {
+          const r = peerRtcsRef.current.get(t)
+          return !!r && r.isOpen && r.connectionState === 'connected'
+        })
+        if (
+          liveTargets.length > 0 &&
+          transferRef.current.transferState !== 'FAILED' &&
+          manifestRef.current
+        ) {
+          console.log('[FluxDrop] Connection recovered during backoff — skipping re-offer')
+          transferRef.current.setTransferState('TRANSFERRING')
+          void beginSendingRef.current?.()
+          return
+        }
+        // v1.3: retry re-offers to every known receiver.
         if (targets.size > 0) {
           for (const t of targets) void initiateWebRTCAsSender(t)
         } else {
@@ -1178,6 +1233,30 @@ export function useFluxDrop() {
         transferRef.current.setTransferState('CONNECTING')
       }
     }, delay)
+  }, [])
+
+  // ---- perf/resume-1: receiver → sender resume poke over signaling ----
+  // The receiver cannot re-offer (it is the ICE answerer). When its stream
+  // stalls with a dead channel, this is the ONLY lever it has: ask the sender
+  // to recover. Rate-limited (10s) and capped (12 pokes ≈ 2 min) so an
+  // unreachable sender is surfaced as FAILED instead of poked forever.
+  const pokeSenderForResume = useCallback((why: string) => {
+    const senderId = peerDeviceIdRef.current
+    const m = manifestRef.current
+    if (!senderId || !m || !sessionRef.current.roomId) return
+    const now = Date.now()
+    if (now - receiverLastPokeAtRef.current < 10_000) return
+    if (receiverPokeCountRef.current >= 12) return
+    receiverPokeCountRef.current++
+    receiverLastPokeAtRef.current = now
+    console.log(`[FluxDrop] Receiver poke ${receiverPokeCountRef.current}/12 (${why}) — asking sender to resume`)
+    signalingRef.current?.sendResumeRequest({
+      roomId: sessionRef.current.roomId,
+      from: sessionRef.current.deviceId,
+      to: senderId,
+      transferId: m.transferId,
+      lastChunkIndex: Math.max(0, transferRef.current.chunksAcked - 1),
+    })
   }, [])
 
   // ---- Real resume: attempt to reconnect after DataChannel loss ----
@@ -1271,6 +1350,46 @@ export function useFluxDrop() {
       toast.error('Cannot resume — no room or peer available')
     }
   }, [connect, persistTransferRecord, flushReceiverBuffers])
+
+  // Late-bound ref for attemptResume — connect()'s handlers (defined above)
+  // reach it through this to avoid the temporal-dead-zone.
+  useEffect(() => {
+    attemptResumeRef.current = attemptResume
+  }, [attemptResume])
+
+  // ---- perf/resume-1: rung 1 of the recovery ladder — in-place ICE restart ----
+  // An ICE restart rebuilds the transport on the SAME RTCPeerConnection: the
+  // DataChannel/SCTP state survives and the receiver answers on its existing
+  // PC (no teardown, no re-pair, no fresh manifest). attemptResume (full
+  // teardown + re-offer) remains the heavy fallback for a dead DataChannel.
+  const ICE_RESTART_MAX = 3
+  const performIceRestart = useCallback(async (peerId: string): Promise<boolean> => {
+    const rtc = peerRtcsRef.current.get(peerId)
+    if (!rtc) return false
+    const attempts = iceRestartAttemptsRef.current.get(peerId) ?? 0
+    if (attempts >= ICE_RESTART_MAX) return false
+    const last = iceRestartLastAtRef.current.get(peerId) ?? 0
+    if (Date.now() - last < 6000) return false // one attempt per 6s max
+    const offer = await rtc.createIceRestartOffer()
+    if (!offer) return false
+    iceRestartAttemptsRef.current.set(peerId, attempts + 1)
+    iceRestartLastAtRef.current.set(peerId, Date.now())
+    try {
+      signalingRef.current?.sendOffer({
+        roomId: sessionRef.current.roomId!,
+        from: sessionRef.current.deviceId,
+        to: peerId,
+        sdp: offer,
+      })
+      console.log(`[FluxDrop] ICE restart offer sent to ${peerId.slice(0, 8)} (attempt ${attempts + 1}/${ICE_RESTART_MAX})`)
+      return true
+    } catch {
+      return false
+    }
+  }, [])
+  useEffect(() => {
+    performIceRestartRef.current = performIceRestart
+  }, [performIceRestart])
 
   // ---- Helper: get effective ICE servers ----
   // v1.1: async + TURN merge. User-configured custom servers win entirely;
