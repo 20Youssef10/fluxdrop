@@ -6,6 +6,7 @@ import { X, ArrowRight, Check } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useSessionStore } from '@/stores/session-store'
 import { useTransferStore } from '@/stores/transfer-store'
+import { usePrefsStore } from '@/lib/fluxdrop/prefs'
 
 const STORAGE_KEY = 'fluxdrop:onboarding-completed'
 
@@ -65,6 +66,11 @@ export function OnboardingTour() {
       seen = !!localStorage.getItem(STORAGE_KEY)
     } catch { /* ignore */ }
     if (seen) return
+    // The speedrun demo REPLACES this tour for first visits — never compete
+    // with it. (Two stacked first-run modals used to freeze the page: the
+    // Radix modal set body{pointer-events:none} and this overlay's buttons
+    // became unclickable.) The speedrun marks this flag when it closes.
+    if (!usePrefsStore.getState().speedrunDone) return
     // Deep-link join: the user came here to receive a specific transfer.
     // Defer the tour so it never blocks the incoming-transfer consent dialog.
     if (window.location.hash.includes('join=')) {
@@ -95,6 +101,9 @@ export function OnboardingTour() {
     if (view !== 'landing') return
     if (pendingManifest) return
     if (BUSY_STATES.has(transferState)) return
+    // Same first-run rule as the mount effect: the tour never auto-opens
+    // while the speedrun demo hasn't been dealt with.
+    if (!usePrefsStore.getState().speedrunDone) return
     let seen = false
     try {
       seen = !!localStorage.getItem(STORAGE_KEY)
@@ -162,7 +171,7 @@ export function OnboardingTour() {
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 z-[90] flex items-center justify-center p-4"
+          className="pointer-events-auto fixed inset-0 z-[90] flex items-center justify-center p-4"
         >
           {/* Backdrop */}
           <div

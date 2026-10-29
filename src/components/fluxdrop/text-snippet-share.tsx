@@ -111,7 +111,7 @@ export function TextSnippetShare({ onShare, disabled }: TextSnippetShareProps) {
 
       {open && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm"
+          className="pointer-events-auto fixed inset-0 z-[65] flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm"
           onClick={(e) => { if (e.target === e.currentTarget) setOpen(false) }}
           role="dialog"
           aria-modal="true"

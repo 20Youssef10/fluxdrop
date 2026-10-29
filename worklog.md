@@ -1956,3 +1956,26 @@ Results (two isolated agent-browser sessions through the Caddy gateway :81):
 - v4 surfaces exercised in-browser: first-run speedrun dialog (shown + skipped), ⌘K command palette (opened, action list verified), Settings → Tuning tab (all sections: QoS slider, Merkle switch, 5 accents, 6 locales, low-vision/reduce-motion/high-contrast, chime packs, haptics, quiet hours, clipboard sync, auto-open, background resilience, nearby visibility, demo re-run), Nearby Devices landing panel (visibility switch on), share-link launcher button in the picker.
 - Known-ephemeral: the transparency panel + debug-bundle button live inside DiagnosticsPanel, which mounts while a room is live pre-transfer — on localhost the window is sub-second so it was verified by code path + component render rather than a stable mid-flight screenshot.
 - End state: dev :3000 GET / 200 (no errors in dev.log), signaling healthz ok (region local, v2.0.0).
+
+---
+
+Task ID: ui-fix-1
+Agent: main
+Task: Fix reported UI breakage — unclickable buttons/lists/popups, broken incoming-transfer alert, settings overflowing the screen.
+
+Work Log:
+- Root cause A (first-run modal collision): SpeedrunDialog (Radix modal) and OnboardingTour auto-opened together on first visit. Radix modal sets body{pointer-events:none}; the in-tree tour inherits it → every tour button (and the page behind) dead. Reproduced in-browser: tour visible but unclickable; hit-testing fell through to the hidden speedrun dialog underneath.
+- Root cause B (settings overflow): SettingsDialog had no max-height — Privacy tab measured 1598px in a 577px viewport, fixed-centered → 510px clipped off the top AND bottom, overflow:visible, no scrolling; tab row itself unreachable (Escape the only exit).
+- Fixes:
+  1. ui/dialog.tsx DialogContent: global `max-h-[calc(100dvh-2rem)] overflow-y-auto`.
+  2. SettingsDialog restructured to flex column (p-0): pinned header, pinned TabsList, scrollable tab body (flux-scroll), pinned footer — tall tabs scroll inside the dialog.
+  3. SpeedrunDialog: never auto-opens over a deep-link join (#join=) or pending consent; on close it marks the onboarding tour seen (speedrun replaces the tour, per its own design note).
+  4. OnboardingTour: auto-open gated on speedrunDone; overlay + deferred path guarded; overlay gets pointer-events-auto.
+  5. In-tree overlays (ConsentDialog, SnippetPreviewDialog, SaveConflictDialog, TextSnippetShare) hardened to z-[65] + pointer-events-auto so an open Radix modal can never freeze or cover the incoming-transfer alert.
+- Dev-server ops: found Next dev :3000 DEAD (only signaling :3003 + Caddy :81 alive — the "App died" report); restarted `bun run dev`.
+- Browser verification (agent-browser, localhost:81 gateway):
+  - Fresh first run: only the speedrun opens; Skip clickable; body PE restored; "Receive files" click works.
+  - Settings: fits viewport (top 16 / bottom 561 @ 577px vh); body scrolls 1422px content; tabs+footer pinned; Tuning tab fully reachable (slider/switches/accents/locales); Vault "budget" Select popup opens in-viewport with all 4 options, option click applies ("8 GB").
+  - E2E transfer (two isolated sessions): sender WU4XWR/544967 → receiver consent dialog visible+onTop+interactive → Accept → both sides "Transfer complete · SHA-256 ✓" (191 B, ~2s).
+  - History list renders the received transfer; reload after speedrun skip → no tour, no dialog, body PE normal.
+- `bun run lint` clean; dev.log free of errors; GET / 200.

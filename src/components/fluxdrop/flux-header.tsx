@@ -334,14 +334,20 @@ export function SettingsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
+      {/* Flex column: header + tab bar stay put, tab body scrolls, footer pinned.
+          Without this the tall tabs (Privacy/Vault/Tuning) overflow the viewport
+          and every control below the fold becomes unreachable. */}
+      <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">
+        <div className="shrink-0 px-6 pt-6">
         <DialogHeader>
           <DialogTitle>Settings</DialogTitle>
           <DialogDescription>
             Configure your device identity and network preferences.
           </DialogDescription>
         </DialogHeader>
-        <Tabs defaultValue="device" className="w-full">
+        </div>
+        <Tabs defaultValue="device" className="flex min-h-0 w-full flex-1 flex-col">
+          <div className="shrink-0 px-6 pb-3 pt-4">
           <TabsList className="grid w-full grid-cols-6">
             <TabsTrigger value="device" className="text-xs">
               <User className="mr-1.5 h-3.5 w-3.5" />
@@ -369,6 +375,10 @@ export function SettingsDialog({
               Tuning
             </TabsTrigger>
           </TabsList>
+          </div>
+
+          {/* Scrollable tab body */}
+          <div className="flux-scroll min-h-0 flex-1 overflow-y-auto px-6 py-4">
 
           {/* Device tab */}
           <TabsContent value="device" className="space-y-4 mt-4">
@@ -1069,8 +1079,9 @@ export function SettingsDialog({
               </button>
             </section>
           </TabsContent>
+          </div>
         </Tabs>
-        <DialogFooter>
+        <DialogFooter className="shrink-0 border-t border-border/60 px-6 py-3">
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>

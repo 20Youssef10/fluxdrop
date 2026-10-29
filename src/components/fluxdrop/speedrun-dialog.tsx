@@ -14,6 +14,7 @@ import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import { CheckCircle2, FileCheck2, Loader2, PlayCircle, Radio, SkipForward, Zap } from 'lucide-react'
 import { usePrefsStore } from '@/lib/fluxdrop/prefs'
+import { useSessionStore } from '@/stores/session-store'
 import { useT } from '@/lib/fluxdrop/i18n'
 
 type Stage = 'idle' | 'hashing' | 'pairing' | 'transferring' | 'done'
@@ -39,8 +40,16 @@ export function SpeedrunDialog() {
   }, [])
 
   // First visit: show after a short beat (let the landing paint first).
+  // NEVER auto-opens when a real task is in flight — a deep-link join (#join=)
+  // or an incoming transfer consent must never be covered by this demo modal
+  // (a Radix modal puts pointer-events:none on <body>, which freezes every
+  // non-Radix overlay behind it, including the consent dialog).
   useEffect(() => {
     if (speedrunDone) return
+    if (typeof window !== 'undefined') {
+      if (window.location.hash.includes('join=')) return
+      if (useSessionStore.getState().pendingManifest) return
+    }
     const id = setTimeout(() => setOpen(true), 900)
     return () => clearTimeout(id)
   }, [speedrunDone])
@@ -116,6 +125,11 @@ export function SpeedrunDialog() {
       clearTimers()
       setOpen(false)
       if (completed || !speedrunDone) setSpeedrunDone()
+      // The speedrun REPLACES the first-run tour (its own design note) — mark
+      // the tour as seen so the two first-run modals never stack. Stacking
+      // them used to freeze the tour: the Radix modal sets
+      // body{pointer-events:none} and the tour's buttons stopped responding.
+      try { localStorage.setItem('fluxdrop:onboarding-completed', '1') } catch { /* ignore */ }
       setTimeout(reset, 350)
     },
     [clearTimers, reset, setSpeedrunDone, speedrunDone]

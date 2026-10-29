@@ -124,7 +124,7 @@ function SaveConflictDialogView({ conflicts }: { conflicts: SaveConflictItem[] }
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm"
+      className="pointer-events-auto fixed inset-0 z-[65] flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
       aria-label="Resolve file name conflicts"

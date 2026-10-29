@@ -94,7 +94,7 @@ export function ConsentDialog({ manifest, peerAlias, peerDeviceId, onAccept, onR
   const hasErrors = errors.length > 0
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm">
+    <div className="pointer-events-auto fixed inset-0 z-[65] flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm">
       <motion.div
         initial={{ scale: 0.92, opacity: 0, y: 12 }}
         animate={{ scale: 1, opacity: 1, y: 0 }}

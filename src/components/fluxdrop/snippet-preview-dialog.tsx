@@ -81,7 +81,7 @@ export function SnippetPreviewDialog() {
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.18 }}
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm"
+          className="pointer-events-auto fixed inset-0 z-[65] flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm"
           onClick={(e) => { if (e.target === e.currentTarget) close() }}
           role="dialog"
           aria-modal="true"
