@@ -23,6 +23,7 @@ import {
   Gauge,
   Keyboard,
   MessageSquare,
+  Monitor,
   Moon,
   PlayCircle,
   Receipt,
@@ -72,8 +73,14 @@ export function CommandPalette() {
             <Download className="mr-2 h-4 w-4" />
             {t('palette.receive', 'Go to receive mode')}
           </CommandItem>
+          {/* v5-c7: kiosk receive station (fullscreen QR + auto-accept). */}
+          <CommandItem onSelect={() => run(() => window.dispatchEvent(new CustomEvent('fluxdrop:open-kiosk')))}>
+            <Monitor className="mr-2 h-4 w-4" />
+            {t('kiosk.open', 'Kiosk mode')}
+            <span className="ml-auto text-[10px] text-muted-foreground">{t('kiosk.desc', 'Fullscreen receive station')}</span>
+          </CommandItem>
           <CommandItem onSelect={() => run(() => setView('landing'))}>
-            <ArrowLeft className="mr-2 h-4 w-4" />
+            <ArrowLeft className="flux-flip-rtl me-2 h-4 w-4" />
             {t('palette.home', 'Back to home')}
           </CommandItem>
         </CommandGroup>

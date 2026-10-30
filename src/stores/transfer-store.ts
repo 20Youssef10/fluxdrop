@@ -103,6 +103,13 @@ interface TransferStoreState {
   /** Drop every preview (revokes all blob URLs). Called on new manifest/cleanup. */
   clearFilePreviews: () => void
 
+  // v5-c6: pull-mode library previews — same shape as the consent previews
+  // but keyed by LIBRARY file index (the receiver has no manifest yet).
+  // Cleared together with the pending library.
+  libraryPreviews: Record<number, FilePreview>
+  setLibraryPreview: (index: number, preview: FilePreview) => void
+  clearLibraryPreviews: () => void
+
   // v1.3 (6.1): per-receiver live progress (sender-side group fan-out).
   peerProgress: Record<string, PeerTransferProgress>
   setPeerProgress: (p: PeerTransferProgress) => void
@@ -326,6 +333,24 @@ export const useTransferStore = create<TransferStoreState>((set, get) => ({
       }
     }
     set({ filePreviews: {} })
+  },
+
+  // v5-c6: pull-mode library previews (keyed by library file index).
+  libraryPreviews: {},
+  setLibraryPreview: (index, preview) => {
+    const prev = get().libraryPreviews[index]
+    if (prev?.blobUrl && prev.blobUrl !== preview.blobUrl) {
+      try { URL.revokeObjectURL(prev.blobUrl) } catch { /* noop */ }
+    }
+    set((s) => ({ libraryPreviews: { ...s.libraryPreviews, [index]: preview } }))
+  },
+  clearLibraryPreviews: () => {
+    for (const p of Object.values(get().libraryPreviews)) {
+      if (p.blobUrl) {
+        try { URL.revokeObjectURL(p.blobUrl) } catch { /* noop */ }
+      }
+    }
+    set({ libraryPreviews: {} })
   },
 
   peerProgress: {},

@@ -19,6 +19,7 @@ import { OnboardingTour } from '@/components/fluxdrop/onboarding-tour'
 import { ConnectionRipple } from '@/components/fluxdrop/connection-ripple'
 import { TipsBanner } from '@/components/fluxdrop/tips-banner'
 import { ConsentDialog } from '@/components/fluxdrop/consent-dialog'
+import { KioskMode } from '@/components/fluxdrop/kiosk-mode'
 import { SnippetPreviewDialog } from '@/components/fluxdrop/snippet-preview-dialog'
 import { SaveConflictDialogHost } from '@/components/fluxdrop/save-conflict-dialog'
 import { ChatPanel } from '@/components/fluxdrop/chat-panel'
@@ -36,6 +37,7 @@ import { useFluxDrop } from '@/hooks/fluxdrop/use-fluxdrop'
 import { useKeyboardShortcuts } from '@/hooks/fluxdrop/use-keyboard-shortcuts'
 import { useSessionStore } from '@/stores/session-store'
 import { useTransferStore } from '@/stores/transfer-store'
+import { useKioskStore } from '@/stores/kiosk-store'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import { getSenderFiles, type StoredTransfer } from '@/lib/fluxdrop/resume'
@@ -46,6 +48,9 @@ export default function Home() {
   const flux = useFluxDrop()
   const [files, setFiles] = useState<File[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // v5-c7: a pre-created room claim from a kiosk QR (#claim= deep link) —
+  // consumed by the next "Create transfer room" press.
+  const [pendingClaim, setPendingClaim] = useState<{ roomCode: string; pin: string } | null>(null)
   const [helpOpen, setHelpOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [resumeManifest, setResumeManifest] = useState<TransferManifest | null>(null)
@@ -54,7 +59,9 @@ export default function Home() {
   const transferState = useTransferStore((s) => s.transferState)
   const { theme, setTheme } = useTheme()
 
-  // Deep-link parsing: if URL has #join=ROOM&pin=PIN, auto-switch to receiver mode.
+  // Deep-link parsing: #join=ROOM&pin=PIN auto-switches to receiver mode;
+  // v5-c7: #claim=ROOM&pin=PIN (kiosk QRs) switches to SENDER mode and arms
+  // the pre-created room claim — pick files and the room is claimed.
   // Handles BOTH a full page load and hash-only navigation (hashchange), and
   // each distinct link is handled exactly once. startReceive waits for the
   // signaling socket internally, so no fixed delay is needed here.
@@ -64,6 +71,19 @@ export default function Home() {
       if (typeof window === 'undefined') return
       const hash = window.location.hash
       if (!hash) return
+      const claimMatch = hash.match(/claim=([A-Za-z0-9]+)&pin=(\d+)/)
+      if (claimMatch) {
+        if (deepLinkHandled.current === hash) return
+        deepLinkHandled.current = hash
+        const [, roomCode, pin] = claimMatch
+        window.history.replaceState(null, '', window.location.pathname + window.location.search)
+        setView('sender')
+        setPendingClaim({ roomCode, pin })
+        toast.info('Kiosk room linked', {
+          description: `Pick files and press Send — they land on the kiosk (room ${roomCode}).`,
+        })
+        return
+      }
       const match = hash.match(/join=([A-Za-z0-9]+)&pin=(\d+)/)
       if (!match) return
       if (deepLinkHandled.current === hash) return
@@ -202,15 +222,24 @@ export default function Home() {
     const openSettings = () => setSettingsOpen(true)
     const openHelp = () => setHelpOpen(true)
     const openShortcuts = () => setShortcutsOpen(true)
+    // v5-c7: kiosk receive station (command palette / receiver panel).
+    const openKiosk = () => useKioskStore.getState().open()
+    // v5-c6: pull mode — the LibraryBrowser asks for thumbs through the page
+    // bridge (components stay dumb; the hook owns the DataChannel).
+    const requestLibraryPreviews = () => flux.requestLibraryPreviews()
     window.addEventListener('fluxdrop:open-settings', openSettings)
     window.addEventListener('fluxdrop:open-help', openHelp)
     window.addEventListener('fluxdrop:open-shortcuts', openShortcuts)
+    window.addEventListener('fluxdrop:open-kiosk', openKiosk)
+    window.addEventListener('fluxdrop:request-library-previews', requestLibraryPreviews)
     return () => {
       window.removeEventListener('fluxdrop:open-settings', openSettings)
       window.removeEventListener('fluxdrop:open-help', openHelp)
       window.removeEventListener('fluxdrop:open-shortcuts', openShortcuts)
+      window.removeEventListener('fluxdrop:open-kiosk', openKiosk)
+      window.removeEventListener('fluxdrop:request-library-previews', requestLibraryPreviews)
     }
-  }, [])
+  }, [flux])
 
   // v4 (4.6): incoming clipboard sync — surfaces a one-tap Copy toast (direct
   // clipboard writes need a user gesture on most browsers).
@@ -406,10 +435,14 @@ export default function Home() {
                   files={files}
                   setFiles={setFiles}
                   isResuming={!!resumeManifest}
-                  onStartSend={(fs, rm, claim) => {
+                  pendingClaim={pendingClaim}
+                  onClearClaim={() => setPendingClaim(null)}
+                  onStartSend={(fs, rm, claim, opts) => {
                     const rmv = rm ?? resumeManifest
+                    const claimFinal = claim ?? pendingClaim
+                    setPendingClaim(null)
                     setResumeManifest(null)
-                    void flux.startSend(fs, rmv ?? undefined, claim)
+                    void flux.startSend(fs, rmv ?? undefined, claimFinal ?? undefined, opts)
                   }}
                   onCancel={() => flux.cancelTransfer('Sender cancelled')}
                   onDone={goHome}
@@ -440,6 +473,7 @@ export default function Home() {
                 onBack={goHome}
                 onPause={flux.pauseTransfer}
                 onResume={flux.resumeTransfer}
+                onRequestLibraryFiles={(indices) => void flux.requestLibraryFiles(indices)}
               />
               <div className="mt-6 flex justify-center">
                 <ShortcutsHint view={view} onOpenShortcuts={() => setShortcutsOpen(true)} />
@@ -494,6 +528,9 @@ export default function Home() {
 
       {/* v4 (5.6): first-run speedrun / demo */}
       <SpeedrunDialog />
+
+      {/* v5-c7: kiosk receive station — fullscreen overlay, self-hides. */}
+      <KioskMode onJoinRoom={flux.startReceive} onReset={flux.cleanup} />
       </div>
     </I18nProvider>
   )

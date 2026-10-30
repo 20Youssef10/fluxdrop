@@ -36,6 +36,58 @@ export function formatEta(remainingBytes: number, bytesPerSec: number): string {
   return formatDuration((remainingBytes / bytesPerSec) * 1000)
 }
 
+// --- v5-c11: ETA confidence band ---
+// A single "remaining / currentSpeed" ETA swings wildly on jittery links (the
+// speed sample IS a rolling average, but a naive point estimate still hides
+// the uncertainty). computeEtaBand() turns the real speed history into a
+// forecast RANGE: the point estimate uses the MEDIAN of the recent samples
+// (robust to one stalled tick), and the band uses the 25th/75th percentiles —
+// wider when the link is unstable, tight when it is steady. null when there
+// isn't enough history yet (the caller then falls back to formatEta).
+export interface EtaBand {
+  /** Point estimate in ms (median-rate ETA). */
+  pointMs: number
+  /** Optimistic bound in ms (fast-rate ETA, p75 speed). */
+  lowMs: number
+  /** Pessimistic bound in ms (slow-rate ETA, p25 speed). */
+  highMs: number
+  /** 0..1 — fraction of the median rate's window covered by the band. */
+  confidence: number
+}
+
+const ETA_MIN_SAMPLES = 5
+const ETA_WINDOW = 20
+
+function percentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0
+  const idx = (sorted.length - 1) * p
+  const lo = Math.floor(idx)
+  const hi = Math.ceil(idx)
+  if (lo === hi) return sorted[lo]
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo)
+}
+
+export function computeEtaBand(remainingBytes: number, speedHistory: number[]): EtaBand | null {
+  if (remainingBytes <= 0) return null
+  const recent = speedHistory.slice(-ETA_WINDOW).filter((v) => v > 0)
+  if (recent.length < ETA_MIN_SAMPLES) return null
+  const sorted = [...recent].sort((a, b) => a - b)
+  const p25 = percentile(sorted, 0.25)
+  const p75 = percentile(sorted, 0.75)
+  const median = percentile(sorted, 0.5)
+  if (median <= 0) return null
+  // Clamp the spread so a single fast burst doesn't promise a 2-second ETA
+  // for a gigabyte (band = at most 2.5x around the median on either side).
+  const lo = Math.max(p75, median / 2.5)
+  const hi = Math.min(p25 > 0 ? p25 : median / 2.5, median * 2.5)
+  return {
+    pointMs: (remainingBytes / median) * 1000,
+    lowMs: (remainingBytes / lo) * 1000,
+    highMs: (remainingBytes / Math.max(hi, 1)) * 1000,
+    confidence: recent.length / ETA_WINDOW,
+  }
+}
+
 // --- Percentage ---
 export function formatPercent(value: number, total: number, decimals = 0): string {
   if (!total) return '0%'

@@ -1,5 +1,7 @@
 // v4 (10.1): lightweight i18n — EN source of truth + 5 launch locales
-// (ES, FR, DE, PT-BR, JA). A tiny context + useT() hook instead of next-intl
+// (ES, FR, DE, PT-BR, JA). v5-c9 adds AR — the first RTL locale; the RTL
+// pass lives in prefs.applyLocaleDirection (html[dir]) + .flux-flip-rtl.
+// A tiny context + useT() hook instead of next-intl
 // routing: the app is single-route by design, locale is a client-side pref,
 // and every component keeps its English string as the inline fallback so a
 // missing key can never blank the UI.
@@ -12,7 +14,7 @@
 'use client'
 
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
-import { usePrefsStore, type LocaleId } from './prefs'
+import { usePrefsStore, applyLocaleDirection, type LocaleId } from './prefs'
 
 type Dict = Record<string, string>
 
@@ -468,6 +470,86 @@ const ja: Dict = {
   'history.title': '最近の転送',
 }
 
+const ar: Dict = {
+  // v5-c9: Arabic — first RTL locale (html[dir=rtl] via prefs).
+  'hero.title': 'أرسل الملفات. تجاوز السحابة.',
+  'hero.subtitle': 'نقل ملفات مباشر من جهازك إلى جهازهم — مشفّر وسريع وبدون وسيط.',
+  'hero.send': 'إرسال ملفات',
+  'hero.receive': 'استقبال ملفات',
+  'hero.help': 'كيف يعمل؟',
+  'common.back': 'العودة للرئيسية',
+  'common.cancel': 'إلغاء',
+  'common.done': 'تم',
+  'common.close': 'إغلاق',
+  'common.copy': 'نسخ',
+  'common.copied': 'تم النسخ إلى الحافظة',
+  'view.sender': 'وضع الإرسال',
+  'view.receiver': 'وضع الاستقبال',
+  'sender.queue': 'الملفات في قائمة الانتظار',
+  'sender.next': 'ما يحدث بعد ذلك',
+  'sender.cancelRoom': 'إلغاء وإغلاق الغرفة',
+  'sender.sendNow': 'إرسال الآن',
+  'sender.shareLink': 'إنشاء رابط مؤقت',
+  'receiver.join': 'الانضمام إلى الغرفة',
+  'receiver.waiting': 'في انتظار المرسل…',
+  'state.transferring': 'جارٍ النقل',
+  'state.paused': 'متوقف مؤقتًا',
+  'state.verifying': 'جارٍ التحقق من السلامة',
+  'state.complete': 'اكتمل النقل',
+  'state.failed': 'فشل النقل',
+  'state.cancelled': 'ملغى',
+  'nearby.title': 'الأجهزة القريبة',
+  'nearby.empty': 'لا توجد أجهزة FluxDrop على هذه الشبكة بعد.',
+  'nearby.visible': 'أنت مرئي للأجهزة القريبة',
+  'nearby.hidden': 'أنت مخفي عن الأجهزة القريبة',
+  'nearby.hint': 'تظهر الأجهزة على نفس الشبكة هنا. أنشئ غرفة للاقتران.',
+  'palette.open': 'لوحة الأوامر',
+  'palette.placeholder': 'اكتب أمرًا أو ابحث…',
+  'palette.navigate': 'تنقّل',
+  'palette.transfer': 'النقل',
+  'palette.appearance': 'المظهر',
+  'palette.tools': 'أدوات',
+  'palette.send': 'الانتقال إلى وضع الإرسال',
+  'palette.receive': 'الانتقال إلى وضع الاستقبال',
+  'palette.home': 'العودة للرئيسية',
+  'palette.theme': 'تبديل الوضع الداكن',
+  'palette.diagnostics': 'تبديل لوحة التشخيص',
+  'palette.settings': 'فتح الإعدادات',
+  'palette.shortcuts': 'اختصارات لوحة المفاتيح',
+  'palette.debug': 'نسخ حزمة التصحيح',
+  'palette.speedrun': 'تجربة العرض التجريبي (10 ثوانٍ)',
+  'link.title': 'رابط مشاركة مؤقت',
+  'link.desc': 'أنشئ الغرفة مسبقًا على الخادم وأرسل رابطًا بدلًا من قراءة الرموز بصوتٍ عالٍ.',
+  'link.ttl': 'تنتهي صلاحية الرابط بعد',
+  'link.oneJoin': 'استخدام واحد (تُغلق الغرفة بعد أول اقتران)',
+  'link.create': 'إنشاء الرابط والبدء',
+  'link.created': 'رابط المشاركة جاهز',
+  'speedrun.title': 'جرّب FluxDrop في 10 ثوانٍ',
+  'speedrun.desc': 'شاهد نقلًا محاكى — الحقيقي يعمل تمامًا هكذا.',
+  'speedrun.start': 'بدء العرض',
+  'speedrun.skip': 'تخطي',
+  'speedrun.again': 'إعادة العرض',
+  'transparency.title': 'ما غادر جهازك في هذه الجلسة',
+  'transparency.empty': 'لا شيء بعد — ستظهر أحداث الإشارة هنا.',
+  'transparency.events': 'أحداث الإشارة',
+  'transparency.bytes': 'بايتات قناة البيانات',
+  'transparency.ice': 'مرشحات ICE المرصودة',
+  'settings.performance': 'الأداء',
+  'settings.appearance': 'المظهر وإمكانية الوصول',
+  'settings.sounds': 'الأصوات واللمس',
+  'settings.sync': 'المزامنة والأتمتة',
+  'settings.language': 'اللغة',
+  'settings.accent': 'لون التمييز',
+  'vault.title': 'خزنة الملفات',
+  'stats.title': 'إحصاءات النقل',
+  'history.title': 'النقلات الأخيرة',
+  // v5-c: new section C surfaces
+  'kiosk.open': 'وضع الكشك',
+  'kiosk.desc': 'محطة استقبال بملء الشاشة — اعرض رمز QR واستقبل تلقائيًا.',
+  'pull.toggle': 'وضع السحب — دع المستقبِل يتصفح الملفات ويختار ما يريده',
+  'templates.title': 'قوالب جاهزة',
+}
+
 export const LOCALES: Array<{ id: LocaleId; label: string; native: string }> = [
   { id: 'en', label: 'English', native: 'English' },
   { id: 'es', label: 'Spanish', native: 'Español' },
@@ -475,9 +557,10 @@ export const LOCALES: Array<{ id: LocaleId; label: string; native: string }> = [
   { id: 'de', label: 'German', native: 'Deutsch' },
   { id: 'pt', label: 'Portuguese (BR)', native: 'Português (BR)' },
   { id: 'ja', label: 'Japanese', native: '日本語' },
+  { id: 'ar', label: 'Arabic', native: 'العربية' },
 ]
 
-const DICTS: Record<LocaleId, Dict> = { en, es, fr, de, pt, ja }
+const DICTS: Record<LocaleId, Dict> = { en, es, fr, de, pt, ja, ar }
 
 const I18nContext = createContext<LocaleId>('en')
 
@@ -509,5 +592,11 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     window.addEventListener('fluxdrop:locale-changed', onChange)
     return () => window.removeEventListener('fluxdrop:locale-changed', onChange)
   }, [])
+  // v5-c9: belt-and-braces — keep <html dir/lang> in sync with the locale
+  // (prefs.applyLocaleDirection already does this at set-time; this covers
+  // hydration-time and any out-of-band locale change).
+  useEffect(() => {
+    applyLocaleDirection(locale)
+  }, [locale])
   return <I18nContext.Provider value={locale}>{children}</I18nContext.Provider>
 }

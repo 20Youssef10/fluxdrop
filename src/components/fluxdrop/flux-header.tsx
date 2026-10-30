@@ -1121,14 +1121,52 @@ export function SettingsDialog({
                     >
                       <span
                         className="h-2.5 w-2.5 rounded-full"
-                        style={{ background: `oklch(0.62 ${ACCENTS[id].chroma} ${ACCENTS[id].hue})` }}
+                        style={{
+                          background:
+                            id === 'custom'
+                              ? `oklch(0.62 0.14 ${prefs.customAccentHue})`
+                              : `oklch(0.62 ${ACCENTS[id].chroma} ${ACCENTS[id].hue})`,
+                        }}
                         aria-hidden
                       />
-                      {ACCENTS[id].label}
+                      {id === 'custom' ? `${ACCENTS[id].label} · ${prefs.customAccentHue}°` : ACCENTS[id].label}
                     </button>
                   ))}
                 </div>
+                {/* v5-c10: custom accent hue — live-preview slider (oklch). */}
+                {prefs.accent === 'custom' && (
+                  <div className="mt-3 rounded-md border border-border/50 bg-card/40 p-2.5">
+                    <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
+                      <span>Hue</span>
+                      <span className="font-semibold tabular-nums text-flux-600 dark:text-flux-400">{prefs.customAccentHue}°</span>
+                    </div>
+                    {/* The track itself is the oklch hue wheel — the thumb
+                        position IS the color it applies. */}
+                    <input
+                      type="range"
+                      min={0}
+                      max={360}
+                      step={1}
+                      value={prefs.customAccentHue}
+                      onChange={(e) => prefs.setCustomAccentHue(Number(e.target.value))}
+                      aria-label="Custom accent hue"
+                      className="mt-2 h-3 w-full cursor-pointer appearance-none rounded-full [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-background [&::-webkit-slider-thumb]:shadow"
+                      style={{
+                        background:
+                          'linear-gradient(to right, oklch(0.62 0.14 0), oklch(0.62 0.14 60), oklch(0.62 0.14 120), oklch(0.62 0.14 180), oklch(0.62 0.14 240), oklch(0.62 0.14 300), oklch(0.62 0.14 360))',
+                      }}
+                    />
+                  </div>
+                )}
               </div>
+              {/* v5-c10: OLED black — true-black dark surfaces. */}
+              <PrefRow
+                icon={<Moon className="h-4.5 w-4.5" />}
+                title="OLED black"
+                desc="True-black backgrounds in dark mode — easier on OLED panels and battery. Applies to the dark theme only."
+                checked={prefs.oledBlack}
+                onCheckedChange={prefs.setOledBlack}
+              />
               <div className="rounded-lg border border-border/60 p-3">
                 <p className="flex items-center gap-1.5 text-sm font-medium">
                   <Languages className="h-3.5 w-3.5" aria-hidden />

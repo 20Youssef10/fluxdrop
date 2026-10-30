@@ -42,7 +42,7 @@ export function JoinForm({ onJoin, onBack }: JoinFormProps) {
     <Card className="flux-glass">
       <div className="p-6 sm:p-8">
         <Button variant="ghost" size="sm" onClick={onBack} className="mb-4 -ml-2 text-muted-foreground">
-          <ArrowLeft className="mr-1.5 h-4 w-4" />
+          <ArrowLeft className="flux-flip-rtl me-1.5 h-4 w-4" />
           Back
         </Button>
 

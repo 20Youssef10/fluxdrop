@@ -359,6 +359,50 @@ export const DEFAULT_SESSION_GRANTS: SessionGrants = {
 // === v5-b1: disappearing-transfer TTL choices (minutes → ms) ===
 export const DISAPPEAR_TTL_CHOICES = [0, 1, 10, 60, 1440] as const // 0 = off
 
+// === v5-c6: pull mode ("browse & request") ===
+// The sender shares a LIBRARY (file metadata, no bytes); the receiver browses
+// it in a picker UI and requests a subset; the sender then builds a manifest
+// from exactly the requested files and streams it through the NORMAL
+// transfer path. Negotiation rides the same OPAQUE e2e-relay envelope as the
+// delta control messages (sealed enc1.<hex> AES-GCM bodies under the PAKE
+// session key — zero server changes), while thumbnails reuse the existing
+// PREVIEW_REQ/PREVIEW_DATA DataChannel frames with the libraryId as the
+// routing id. A v5 pull offer to an older receiver simply never gets a
+// request back — the receiver waits for a manifest that never comes (the
+// sender UI shows the pull hint); feature negotiation is implicit in the
+// receiver answering.
+export const PULL_MSG = {
+  /** sender → receiver: the browsable library listing (sealed). */
+  OFFER: 'pull-offer',
+  /** receiver → sender: the selected file indices (sealed). */
+  REQUEST: 'pull-request',
+} as const
+
+/** v5-c6: one browsable library entry (metadata only — NO content hash). */
+export interface PullFileEntry {
+  i: number
+  name: string
+  relativePath: string
+  size: number
+  type: string
+  lastModified: number
+}
+
+/** v5-c6: sealed body of PULL_MSG.OFFER (sender → receiver). */
+export interface PullOfferBody {
+  libraryId: string
+  files: PullFileEntry[]
+}
+
+/** v5-c6: sealed body of PULL_MSG.REQUEST (receiver → sender). */
+export interface PullRequestBody {
+  libraryId: string
+  indices: number[]
+}
+
+/** Cap on library size shared in one offer (the browse UI paginates). */
+export const PULL_MAX_FILES = 500
+
 // === v1.1: per-connection transport hint ===
 // Populated from the selected ICE candidate pair once the DataChannel opens;
 // drives the initial adaptive flow window (see webrtc.ts AIMD).

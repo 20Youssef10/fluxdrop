@@ -124,6 +124,37 @@
   --sidebar-ring: oklch(0.70 0.15 170);
 }
 
+/* === v5-c10: OLED black — true-black surfaces for OLED panels === */
+/* Applied as html.flux-oled on top of .dark (the toggle is a no-op in light
+   theme by construction: every override below is scoped to .dark.flux-oled).
+   Cards/popovers keep a *hint* of elevation (oklch 0.05-0.07) so borders and
+   glass surfaces still read; the page itself goes to pure #000. */
+.dark.flux-oled {
+  --background: oklch(0 0 0);
+  --card: oklch(0.055 0.012 176);
+  --popover: oklch(0.055 0.012 176);
+  --secondary: oklch(0.13 0.018 176);
+  --muted: oklch(0.10 0.015 176);
+  --accent: oklch(0.16 0.03 174);
+  --sidebar: oklch(0.03 0.008 176);
+}
+.dark.flux-oled .flux-glass {
+  background: oklch(0.03 0 0 / 0.72);
+  border-color: oklch(1 0 0 / 7%);
+}
+.dark.flux-oled .flux-mesh-bg::before {
+  /* Dim the mesh glow — on true black even 0.2 alpha reads bright. */
+  opacity: 0.55;
+}
+
+/* === v5-c9: RTL helpers === */
+/* Directional glyphs (back arrows, send, chevrons) flip horizontally in RTL.
+   Charts/sparklines intentionally stay LTR (time axes read left→right even
+   in RTL locales). */
+[dir="rtl"] .flux-flip-rtl {
+  transform: scaleX(-1);
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

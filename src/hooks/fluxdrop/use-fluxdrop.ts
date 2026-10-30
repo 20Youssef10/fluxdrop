@@ -44,7 +44,7 @@ import { useChatStore } from '@/stores/chat-store'
 import { addRecentRoom } from '@/lib/fluxdrop/recent-rooms'
 import { isTrustedPeer, addTrustedPeer } from '@/lib/fluxdrop/trusted-peers'
 import { playSuccess, playError, playConnect, playPause, playResume } from '@/lib/fluxdrop/sound'
-import { MessageType, CONSTANTS, FAST_LANE_MAX, FAST_LANE_MIN_BYTES, DELTA_MSG, DELTA_MAX_PATCH_BYTES, DELTA_SOURCE_MAX, DELTA_PLAN_WAIT_MS, type TransferManifest, type TransferSummary, type TransferState, type DeltaHashesBody, type DeltaPlanBody, type DeltaDeclinedBody, type SessionGrants } from '@/lib/fluxdrop/protocol'
+import { MessageType, CONSTANTS, FAST_LANE_MAX, FAST_LANE_MIN_BYTES, DELTA_MSG, DELTA_MAX_PATCH_BYTES, DELTA_SOURCE_MAX, DELTA_PLAN_WAIT_MS, PULL_MSG, PULL_MAX_FILES, type TransferManifest, type TransferSummary, type TransferState, type DeltaHashesBody, type DeltaPlanBody, type DeltaDeclinedBody, type SessionGrants, type PullOfferBody, type PullRequestBody, type PullFileEntry } from '@/lib/fluxdrop/protocol'
 import { gzipCompress, gzipDecompress, shouldCompressTransfer, isCompressionSupported } from '@/lib/fluxdrop/compress'
 import { fetchTurnCredentials, mergeTurnIntoIceServers } from '@/lib/fluxdrop/turn'
 import {
@@ -84,6 +84,8 @@ import { grantAllows, grantedToUse, recordIncomingGrants, recordOutgoingGrants, 
 import { computeTransferMerkle } from '@/lib/fluxdrop/merkle'
 import { isValidClipboardFrame, deliverClipboardSync, attachClipboardSender, CLIPBOARD_MAX_LEN } from '@/lib/fluxdrop/clipboard-sync'
 import { usePrefsStore } from '@/lib/fluxdrop/prefs'
+// v5-c7: kiosk receive station (auto-accept + wall state).
+import { useKioskStore } from '@/stores/kiosk-store'
 // v5-a1: inline-fallback translations for the (muted) lane-drop toast.
 import { t } from '@/lib/fluxdrop/i18n'
 
@@ -490,6 +492,19 @@ export function useFluxDrop() {
   const deltaPriorBlobRef = useRef<Blob | null>(null)
   // RECEIVER: the pending pre-accept DELTA_PLAN wait (negotiation flow).
   const deltaPlanWaitRef = useRef<{ transferId: string; resolve: (b: DeltaPlanBody | null) => void } | null>(null)
+
+  // ================= v5-c6: pull mode ("browse & request") =================
+  // SENDER: the shared library (files + id). Armed by startSend({pullMode});
+  // the offer goes out per-peer after the E2E handshake settles, and the
+  // first REQUEST builds the real manifest from exactly the picked files.
+  const pullLibraryRef = useRef<{ id: string; files: File[] } | null>(null)
+  // RECEIVER: "name:size" keys of the files we requested — the arrival
+  // manifest must be a SUBSET of this set to qualify for consent-free
+  // auto-accept (a substituted manifest falls back to the normal dialog).
+  const pullExpectRef = useRef<Set<string> | null>(null)
+  // RECEIVER: the 4s window gating inbound library PREVIEW_DATA frames.
+  const libraryPreviewsWaitingRef = useRef<boolean>(false)
+  const libraryPreviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // --- v1.2 (4.4): consent-dialog rich previews (receiver side) ---
   // One PREVIEW_REQ per manifest; PREVIEW_DATA frames resolve per-file entries
@@ -983,6 +998,27 @@ export function useFluxDrop() {
     }
   }, [])
 
+  // v5-c6: pull control messages ride the SAME sealed envelope (seal/unseal
+  // are body-agnostic; the delta naming is historical). Never a plaintext
+  // fallback — pull without E2E simply doesn't engage.
+  const sendPullControl = useCallback(async (to: string, type: string, body: unknown): Promise<boolean> => {
+    const roomId = sessionRef.current.roomId
+    if (!roomId) return false
+    const sealed = await sealDeltaMessage(body, to)
+    if (!sealed) return false
+    try {
+      signalingRef.current?.sendE2ERelay({
+        roomId,
+        from: sessionRef.current.deviceId,
+        to,
+        data: { type, v: 1, sealed },
+      })
+      return true
+    } catch {
+      return false
+    }
+  }, [])
+
   /**
    * Find the NEWEST readable vault copy of `name` (disk-backed OPFS Blob —
    * no RAM copy). Newest-first so a re-send of v3 after v2 patches against
@@ -1283,6 +1319,193 @@ export function useFluxDrop() {
       }
     }
   }, [onDeltaHashes, onDeltaPlan])
+
+  // ================= v5-c6: pull mode handlers =================
+
+  /**
+   * RECEIVER: a sealed library offer arrived. Validated + stored in the
+   * session store — the receiver panel swaps "Waiting for sender" for the
+   * browse UI. A second offer (sender re-offer after reconnect) supersedes.
+   */
+  const onLibraryOffer = useCallback(async (from: string, body: PullOfferBody): Promise<void> => {
+    try {
+      if (!body || typeof body.libraryId !== 'string' || !Array.isArray(body.files)) return
+      if (body.files.length === 0 || body.files.length > PULL_MAX_FILES) return
+      const files: PullFileEntry[] = []
+      for (const f of body.files) {
+        if (!f || typeof f.name !== 'string' || !Number.isInteger(f.i)) continue
+        files.push({
+          i: f.i,
+          name: f.name.slice(0, 255),
+          relativePath: typeof f.relativePath === 'string' ? f.relativePath.slice(0, 512) : f.name,
+          size: Number.isFinite(f.size) ? f.size : 0,
+          type: typeof f.type === 'string' ? f.type : 'application/octet-stream',
+          lastModified: Number.isFinite(f.lastModified) ? f.lastModified : 0,
+        })
+      }
+      if (files.length === 0) return
+      useSessionStore.getState().setPendingLibrary({ libraryId: body.libraryId, files, fromDeviceId: from })
+      transferRef.current.clearLibraryPreviews()
+      console.log(`[FluxDrop] v5-c6: library offer received — ${files.length} files browsable from ${from.slice(0, 8)}`)
+      toast.success('Shared library available', {
+        description: `${files.length} file${files.length !== 1 ? 's' : ''} — browse and pick what you want.`,
+      })
+    } catch (err: any) {
+      console.warn('[FluxDrop] v5-c6: library offer rejected:', err?.message ?? err)
+    }
+  }, [])
+
+  /**
+   * SENDER: the receiver picked files. Builds the REAL manifest from exactly
+   * the requested subset (hashing only what was picked) and pushes it over
+   * the open DataChannel — from here the NORMAL transfer flow takes over
+   * (consent on older receivers, pull-expect auto-accept on v5 ones).
+   * First request wins; the room stays single-request by design (v5).
+   */
+  const onLibraryRequest = useCallback(async (from: string, body: PullRequestBody): Promise<void> => {
+    const lib = pullLibraryRef.current
+    if (!lib) return
+    if (!body || body.libraryId !== lib.id || !Array.isArray(body.indices)) return
+    if (manifestRef.current) {
+      console.log('[FluxDrop] v5-c6: pull request ignored — a transfer is already active (single-request rooms in v5)')
+      return
+    }
+    const peer = senderPeersRef.current.get(from)
+    const rtc = peerRtcsRef.current.get(from)
+    if (!peer || !rtc?.isOpen) {
+      console.warn('[FluxDrop] v5-c6: pull request from a peer with no open channel — ignored')
+      return
+    }
+    // Dedupe + bounds-check the indices against the library.
+    const picked = [...new Set(body.indices)]
+      .map((i) => Number(i))
+      .filter((i) => Number.isInteger(i) && i >= 0 && i < lib.files.length)
+      .map((i) => lib.files[i])
+    if (picked.length === 0) return
+    try {
+      toast.info('Receiver picked files — hashing…', {
+        description: `${picked.length} file${picked.length !== 1 ? 's' : ''} · ${formatBytes(picked.reduce((s, f) => s + f.size, 0))}`,
+      })
+      // VALIDATING renders the sender's HashingProgress card while the
+      // picked subset is fingerprinted (same UI as a normal fresh send).
+      transferRef.current.setTransferState('VALIDATING')
+      const compress = shouldCompressTransfer(picked, sessionRef.current.compressionEnabled)
+      const m = await buildManifest(picked, (progress) => {
+        transferRef.current.setHashingProgress({
+          current: progress.current,
+          total: progress.total,
+          fileName: progress.fileName,
+        })
+      }, compress ? 'gzip' : undefined)
+      transferRef.current.setHashingProgress(null)
+      wireCompressionRef.current = compress ? 'gzip' : undefined
+      // CRITICAL: the send loop reads bytes from filesRef (via the slice
+      // plan's fileIndex) — it MUST be rebound to the picked subset or the
+      // manifest's indices would address the WRONG library files (found in
+      // E2E: c-a.txt's bytes went out under c-b.txt's checksum).
+      filesRef.current = picked
+      manifestRef.current = m
+      slicePlanRef.current = buildSlicePlan(m)
+      transferRef.current.setManifest(m)
+      transferRef.current.resetProgress(m.totalChunks, m.totalSize)
+      transferRef.current.setTransferState('MANIFEST_EXCHANGE')
+      // Resume support from here on, like any fresh send.
+      void saveSenderFiles(m.transferId, picked)
+      skipIndicesRef.current = new Set()
+      resumeSkipUsedRef.current = false
+      resumeAttemptsRef.current = 0
+      // Send the manifest to the requester (E2E-sealed like the DC-open path).
+      peer.enc = isE2EActive(from)
+      if (peer.enc) {
+        const encBody = await encryptWirePayload(new TextEncoder().encode(JSON.stringify(m)), 'manifest', from)
+        if (rtc.isOpen) rtc.sendManifestEncrypted(m.transferId, encBody)
+        console.log(`[FluxDrop] v5-c6: pulled manifest sent ENCRYPTED to ${from.slice(0, 8)} (${picked.length} files)`)
+      } else if (rtc.isOpen) {
+        rtc.sendManifest(m.transferId, m)
+      }
+    } catch (err: any) {
+      console.error('[FluxDrop] v5-c6: pull request failed:', err?.message ?? err)
+      transferRef.current.setHashingProgress(null)
+      transferRef.current.setTransferState('ERROR')
+      transferRef.current.setError(`Pull request failed: ${err?.message ?? err}`)
+      playError()
+    }
+  }, [])
+
+  /** Router for pull frames arriving over the opaque e2e-relay envelope. */
+  const handlePullSignaling = useCallback(async (payload: { from: string; data: unknown }): Promise<void> => {
+    const envelope = payload?.data as { type?: unknown; sealed?: unknown } | null | undefined
+    if (!envelope || typeof envelope.sealed !== 'string') return
+    const from = payload.from
+    if (envelope.type === PULL_MSG.OFFER) {
+      const body = await unsealDeltaMessage<PullOfferBody>(envelope.sealed, from)
+      if (body) await onLibraryOffer(from, body)
+    } else if (envelope.type === PULL_MSG.REQUEST) {
+      const body = await unsealDeltaMessage<PullRequestBody>(envelope.sealed, from)
+      if (body) await onLibraryRequest(from, body)
+    }
+  }, [onLibraryOffer, onLibraryRequest])
+
+  /**
+   * RECEIVER public API: send the picked library indices to the sender.
+   * Arms pullExpectRef — the arriving manifest must match the selection
+   * name+size-wise to be auto-accepted (a substituted manifest falls back
+   * to the normal consent dialog).
+   */
+  const requestLibraryFiles = useCallback(async (indices: number[]): Promise<boolean> => {
+    const lib = useSessionStore.getState().pendingLibrary
+    const senderId = lib?.fromDeviceId ?? peerDeviceIdRef.current
+    if (!lib || !senderId || indices.length === 0) return false
+    const valid = indices.filter((i) => Number.isInteger(i) && i >= 0 && i < lib.files.length)
+    if (valid.length === 0) return false
+    pullExpectRef.current = new Set(valid.map((i) => `${lib.files[i].name}:${lib.files[i].size}`))
+    const sent = await sendPullControl(senderId, PULL_MSG.REQUEST, {
+      libraryId: lib.libraryId,
+      indices: valid,
+    } satisfies PullRequestBody)
+    if (!sent) {
+      pullExpectRef.current = null
+      toast.error('Could not send the request', { description: 'The encrypted control channel is unavailable.' })
+      return false
+    }
+    // The browse UI goes away; the (auto-accepted) manifest is imminent.
+    useSessionStore.getState().setPendingLibrary(null)
+    transferRef.current.clearLibraryPreviews()
+    transferRef.current.setTransferState('MANIFEST_EXCHANGE')
+    const totalBytes = valid.reduce((s, i) => s + lib.files[i].size, 0)
+    toast.success('Request sent', {
+      description: `${valid.length} file${valid.length !== 1 ? 's' : ''} · ${formatBytes(totalBytes)} — the sender is preparing them.`,
+    })
+    console.log(`[FluxDrop] v5-c6: pull request sent — ${valid.length} files (${formatBytes(totalBytes)})`)
+    return true
+  }, [sendPullControl])
+
+  /**
+   * RECEIVER public API: ask the sender for image thumbs of the first
+   * PREVIEW_MAX_FILES image entries (libraryId doubles as the routing id).
+   */
+  const requestLibraryPreviews = useCallback((): void => {
+    const lib = useSessionStore.getState().pendingLibrary
+    const rtc = getRtc()
+    if (!lib || !rtc?.isOpen) return
+    const wanted = lib.files
+      .map((f, i) => ({ f, i }))
+      .filter(({ f }) => (f.type || '').toLowerCase().startsWith('image/'))
+      .slice(0, PREVIEW_MAX_FILES)
+    if (wanted.length === 0) return
+    const body = JSON.stringify({
+      v: 1,
+      files: wanted.map(({ i }) => ({ i, bytes: PREVIEW_HEAD_BYTES })),
+    })
+    const sent = rtc.sendRawFrame(MessageType.PREVIEW_REQ, lib.libraryId, 0, new TextEncoder().encode(body))
+    if (!sent) return
+    libraryPreviewsWaitingRef.current = true
+    if (libraryPreviewTimerRef.current) clearTimeout(libraryPreviewTimerRef.current)
+    libraryPreviewTimerRef.current = setTimeout(() => {
+      libraryPreviewsWaitingRef.current = false
+      libraryPreviewTimerRef.current = null
+    }, PREVIEW_WAIT_MS)
+  }, [])
 
   // ================= v1.3 (6.1): fan-out aggregate helpers =================
 
@@ -1717,6 +1940,33 @@ export function useFluxDrop() {
         if (payload.device.role === 'sender' || filesRef.current.length > 0) {
           peerDeviceIdRef.current = payload.device.id
         }
+        // v5-c7: kiosk ordering — a RECEIVER that joined an EMPTY room (the
+        // kiosk mints + joins before any sender claims it) must pair when
+        // the sender ARRIVES, not only at join time. onRoomJoined only fires
+        // the pairing request when the sender was already present; this is
+        // the late-arrival mirror (same capability advertisement, guarded so
+        // a sender never pairs to itself and an already-paired leg stays put).
+        if (
+          payload.device.role === 'sender' &&
+          filesRef.current.length === 0 &&
+          !!sessionRef.current.roomId &&
+          !peerRtcsRef.current.has(payload.device.id)
+        ) {
+          peerDeviceIdRef.current = payload.device.id
+          const pairingReqLate: {
+            roomId: string
+            from: string
+            to: string
+            capabilities: { fastLanes: boolean; relay: boolean }
+          } = {
+            roomId: sessionRef.current.roomId!,
+            from: sessionRef.current.deviceId,
+            to: payload.device.id,
+            capabilities: { fastLanes: true, relay: true }, // v5 build marker
+          }
+          sig.sendPairingRequest(pairingReqLate)
+          console.log(`[FluxDrop] v5-c7: sender arrived after join — pairing request sent to ${payload.device.id.slice(0, 8)}`)
+        }
         toast.info(`${payload.device.alias} joined the room`)
       },
       onDeviceLeft: (payload) => {
@@ -2016,6 +2266,7 @@ export function useFluxDrop() {
         // PAKE frames stay plaintext-by-design (the handshake derives the
         // sealing key); delta frames are sealed enc1.<hex> bodies, split out
         // by their data.type so the PAKE switch above stays untouched.
+        // v5-c6: pull-mode control messages use the same sealed envelope.
         const dtype = (payload as { data?: { type?: unknown } } | null | undefined)?.data as
           | { type?: unknown }
           | undefined
@@ -2024,6 +2275,13 @@ export function useFluxDrop() {
           (dtype.type === DELTA_MSG.HASHES || dtype.type === DELTA_MSG.PLAN || dtype.type === DELTA_MSG.DECLINED)
         ) {
           void handleDeltaSignaling(payload)
+          return
+        }
+        if (
+          typeof dtype?.type === 'string' &&
+          (dtype.type === PULL_MSG.OFFER || dtype.type === PULL_MSG.REQUEST)
+        ) {
+          void handlePullSignaling(payload)
           return
         }
         void handleE2ERelayPayload(payload)
@@ -2909,19 +3167,22 @@ export function useFluxDrop() {
             peer.completed = false
           }
           const m = manifestRef.current
-          if (!m) return
+          // v5-c6: pull mode has NO manifest yet — the shared library takes
+          // its place (offered after the E2E wait below). Everything between
+          // here and the offer that needs a manifest is guarded.
+          if (!m && !pullLibraryRef.current) return
           // A late connection with a live transfer keeps the global state.
-          if (isNewLeg) {
+          if (isNewLeg && m) {
             // Fresh aggregate for the redelivery leg (files card, progress).
             transferRef.current.resetProgress(m.totalChunks, m.totalSize)
             transferRef.current.initFiles(m.files)
             transferRef.current.setTransferState('MANIFEST_EXCHANGE')
-          } else if (stOpen !== 'TRANSFERRING' && stOpen !== 'PAUSED') {
+          } else if (m && stOpen !== 'TRANSFERRING' && stOpen !== 'PAUSED') {
             transferRef.current.setTransferState('MANIFEST_EXCHANGE')
           }
           // Resume leg for this peer: query its stored-chunk bitmap instead
           // of re-sending everything (v1.1 bitmap handshake, per peer now).
-          if (wasResuming && filesRef.current.length > 0) {
+          if (m && wasResuming && filesRef.current.length > 0) {
             console.log(`[FluxDrop] Sender resume: querying receiver ${peerId.slice(0, 8)} stored-chunk bitmap`)
             peer.skipQueryPending = true
             transferRef.current.setTransferState('TRANSFERRING')
@@ -2957,7 +3218,30 @@ export function useFluxDrop() {
             const peerNow = senderPeersRef.current.get(peerId)
             const mEnc = manifestRef.current
             const rtcNow = peerRtcsRef.current.get(peerId)
-            if (!peerNow || !mEnc || !rtcNow?.isOpen) return
+            if (!peerNow || !rtcNow?.isOpen) return
+            // v5-c6: pull mode — instead of a manifest, offer the browsable
+            // library (sealed over the e2e-relay envelope). The receiver's
+            // REQUEST will build + push the real manifest later.
+            const lib = pullLibraryRef.current
+            if (!mEnc && lib) {
+              peerNow.enc = isE2EActive(peerId)
+              const offered = await sendPullControl(peerId, PULL_MSG.OFFER, {
+                libraryId: lib.id,
+                files: lib.files.slice(0, PULL_MAX_FILES).map((f, i) => ({
+                  i,
+                  name: f.name,
+                  relativePath: (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name,
+                  size: f.size,
+                  type: f.type || 'application/octet-stream',
+                  lastModified: f.lastModified,
+                })),
+              } satisfies PullOfferBody)
+              if (offered) {
+                console.log(`[FluxDrop] v5-c6: library offered to peer ${peerId.slice(0, 8)} — ${lib.files.length} files browsable`)
+              }
+              return
+            }
+            if (!mEnc) return
             peerNow.enc = isE2EActive(peerId)
             if (peerNow.enc) {
               try {
@@ -3394,7 +3678,10 @@ export function useFluxDrop() {
         // head-bytes previews of the queued files. Fire-and-forget — a preview
         // failure must NEVER disturb the transfer, so the whole responder is
         // wrapped and every per-file error is swallowed.
-        if (!m || filesRef.current.length === 0) break
+        // v5-c6: in pull mode there is no manifest yet — the LIBRARY id is
+        // the routing id (requestLibraryPreviews sends it as transferId).
+        const pullLib = pullLibraryRef.current
+        if ((!m && !pullLib) || filesRef.current.length === 0) break
         try {
           const req = JSON.parse(new TextDecoder().decode(msg.payload)) as {
             v?: number
@@ -3403,6 +3690,7 @@ export function useFluxDrop() {
           if (req?.v !== 1 || !Array.isArray(req.files)) break
           const rtcPreview = rtcFrom
           if (!rtcPreview?.isOpen) break
+          const wireId = m?.transferId ?? pullLib!.id
           const wanted: { i: number; bytes: number }[] = req.files
           void (async () => {
             for (const item of wanted) {
@@ -3414,7 +3702,7 @@ export function useFluxDrop() {
                 const want = Math.max(0, Math.min(Number(item?.bytes) || 0, file.size))
                 const head = await file.slice(0, want).arrayBuffer()
                 const body = isE2EActive(peerId) ? await encryptWirePayload(head, 'preview', peerId) : head
-                rtcPreview.sendRawFrame(MessageType.PREVIEW_DATA, m.transferId, idx, body)
+                rtcPreview.sendRawFrame(MessageType.PREVIEW_DATA, wireId, idx, body)
               } catch { /* skip this file's preview silently */ }
             }
           })()
@@ -3427,7 +3715,35 @@ export function useFluxDrop() {
         // decryption/decoding problems skip the preview silently — previews
         // must never break the transfer. Frames are ignored once the transfer
         // is accepted (state left MANIFEST_EXCHANGE) or the 4s window closed.
-        if (!m) break
+        // v5-c6: library thumbs — when there is no manifest but a pending
+        // library + open preview window, resolve into libraryPreviews instead.
+        if (!m) {
+          const lib = useSessionStore.getState().pendingLibrary
+          if (lib && libraryPreviewsWaitingRef.current) {
+            const libIdx = msg.chunkIndex
+            const libEntry = lib.files[libIdx]
+            if (!libEntry) break
+            void (async () => {
+              try {
+                let plain: ArrayBuffer = msg.payload as ArrayBuffer
+                if (isE2EActive(peerId)) {
+                  plain = await decryptWirePayload(msg.payload, 'preview', peerId)
+                }
+                const mime = (libEntry.type || '').toLowerCase()
+                const preview: FilePreview = {
+                  mime: libEntry.type || 'application/octet-stream',
+                  name: libEntry.name,
+                  size: libEntry.size,
+                }
+                if (plain.byteLength > 0 && mime.startsWith('image/')) {
+                  preview.blobUrl = URL.createObjectURL(new Blob([plain], { type: mime }))
+                }
+                transferRef.current.setLibraryPreview(libIdx, preview)
+              } catch { /* preview problems are invisible by design */ }
+            })()
+          }
+          break
+        }
         if (!previewsWaitingRef.current) break
         {
           const stPv = transferRef.current.transferState
@@ -4042,6 +4358,50 @@ export function useFluxDrop() {
     // DELTA_PLAN_WAIT_MS; on decline/timeout the normal full-send flow simply
     // proceeds (delta mode is armed inside onDeltaPlan on success).
     await negotiateDelta(m)
+    // v5-c6: a manifest arriving while a pull library is pending means the
+    // browse flow resolved — the library (and its thumbs) go away.
+    if (useSessionStore.getState().pendingLibrary) {
+      useSessionStore.getState().setPendingLibrary(null)
+      transferRef.current.clearLibraryPreviews()
+    }
+    // v5-c6: pull-expect auto-accept — WE requested these exact files, so
+    // the request IS consent. Safety: the manifest must be a subset of the
+    // requested selection (name+size); anything else falls through to the
+    // normal consent dialog (a substituted manifest can never sneak in).
+    if (pullExpectRef.current && pullExpectRef.current.size > 0) {
+      const expected = pullExpectRef.current
+      pullExpectRef.current = null
+      const matchesSelection =
+        m.files.length > 0 && m.files.every((f) => expected.has(`${f.name}:${f.size}`))
+      if (matchesSelection) {
+        await doAcceptTransfer(m, { files: true, chat: true, clipboard: false })
+        toast.success('Receiving your selection', {
+          description: `${m.files.length} file${m.files.length !== 1 ? 's' : ''} · ${formatBytes(m.totalSize)} — pulled from the sender's library.`,
+        })
+        return
+      }
+      console.warn('[FluxDrop] v5-c6: pull manifest does not match the request — showing the consent dialog instead')
+    }
+    // v5-c7: kiosk auto-accept — the station has no user to click Accept.
+    // Whitelist: trusted devices (default) or everyone (open kiosk). Anything
+    // else falls through to the normal consent dialog (visible if someone
+    // is watching the screen).
+    {
+      const kiosk = useKioskStore.getState()
+      const senderId = peerDeviceIdRef.current
+      if (kiosk.active && senderId) {
+        const allowed = kiosk.acceptMode === 'all' || isTrustedPeer(senderId, 'files')
+        if (allowed) {
+          // A TV has no pickers — straight into the Files vault.
+          transferRef.current.setAutoSaveToVault(true)
+          await doAcceptTransfer(m, { files: true, chat: false, clipboard: false })
+          toast.success('Kiosk receiving', {
+            description: `${m.files.length} file${m.files.length !== 1 ? 's' : ''} · ${formatBytes(m.totalSize)} — auto-accepted, saving to the vault.`,
+          })
+          return
+        }
+      }
+    }
     // Trusted auto-accept (only when the user opted in AND explicitly
     // trusted this device previously).
     // v1.3 (6.4): trust is SCOPED. A drop made entirely of small
@@ -5578,7 +5938,11 @@ export function useFluxDrop() {
   // history-resume keeps the same transferId, checksums, and record. When
   // provided, files must exactly match the manifest (name + size) and hashing
   // is skipped — checksums are already baked into the manifest.
-  const startSend = useCallback(async (files: File[], resumeManifest?: TransferManifest, claim?: { roomCode: string; pin: string }) => {
+  // v5-c6: `opts.pullMode` shares the queue as a BROWSABLE library instead
+  // of pushing a manifest — no hashing up front; the receiver picks a subset
+  // and the real manifest is built (and only the picked files hashed) when
+  // the request arrives.
+  const startSend = useCallback(async (files: File[], resumeManifest?: TransferManifest, claim?: { roomCode: string; pin: string }, opts?: { pullMode?: boolean }) => {
     try {
       // v5-b2: panic mode — the duress PIN typed into a share-link claim is
       // the other place a user enters a PIN. Same silent-refusal contract as
@@ -5605,6 +5969,36 @@ export function useFluxDrop() {
       wireCompressionRef.current = compress ? 'gzip' : undefined
       // Ensure device identity is ready BEFORE anything else.
       await ensureDeviceReady()
+      // v5-c6: pull mode — share a browsable library instead of pushing a
+      // manifest. No hashing up front (only the picked files get hashed on
+      // request); the offer goes out per-peer after the E2E handshake.
+      if (opts?.pullMode && !resumeManifest && !claim) {
+        pullLibraryRef.current = { id: randomUUID(), files }
+        transferRef.current.setTransferState('PAIRING')
+        connect()
+        await signalingRef.current?.waitUntilConnected(8000)
+        {
+          const alias = sessionRef.current.alias
+          const deviceId = sessionRef.current.deviceId
+          if (!alias || !deviceId) {
+            toast.error('Device not initialized', { description: 'Please refresh the page and try again.' })
+            transferRef.current.setTransferState('FAILED')
+            return
+          }
+          signalingRef.current?.createRoom({
+            alias,
+            deviceId,
+            role: 'sender',
+            withPin: true,
+          })
+        }
+        toast.success('Library room created', {
+          description: 'The receiver will browse your files and pick what they want — nothing is hashed or sent until they choose.',
+        })
+        return
+      }
+      // A normal (non-pull) send supersedes any stale pull library.
+      pullLibraryRef.current = null
       let m: TransferManifest
       if (resumeManifest) {
         // Validate the re-attached files still match the stored manifest.
@@ -5963,6 +6357,18 @@ export function useFluxDrop() {
     stopDiagnosticsPolling()
     // v5-b4: session grants die with the session — a new pairing re-consents.
     clearGrants()
+    // v5-c6: pull state dies with the session too (a stale library must
+    // never shadow the next room, and a stale pull-expect must never
+    // auto-accept a future manifest).
+    pullLibraryRef.current = null
+    pullExpectRef.current = null
+    libraryPreviewsWaitingRef.current = false
+    if (libraryPreviewTimerRef.current) {
+      clearTimeout(libraryPreviewTimerRef.current)
+      libraryPreviewTimerRef.current = null
+    }
+    useSessionStore.getState().setPendingLibrary(null)
+    transferRef.current.clearLibraryPreviews()
     // v1.3: close EVERY peer connection (group fan-out).
     for (const rtc of peerRtcsRef.current.values()) {
       try { rtc.close() } catch { /* ignore */ }
@@ -6199,6 +6605,10 @@ export function useFluxDrop() {
     sendChat,
     sendClipboardSync,
     requestRemoteWipe,
+    /** v5-c6: pull mode — send the picked library indices to the sender. */
+    requestLibraryFiles,
+    /** v5-c6: pull mode — request image thumbs for the pending library. */
+    requestLibraryPreviews,
     /** v4 (6.2): verified received files of a completed transfer (for onward sending). */
     getReceivedFiles: (transferId: string): File[] | null => {
       const cached = receivedFilesCache.get(transferId)

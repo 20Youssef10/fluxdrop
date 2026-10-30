@@ -22,7 +22,13 @@ grounded in what exists, nothing here duplicates shipped features.
 | B3 | Post-quantum hybrid PAKE (ML-KEM-768) | ✅ E2E verified |
 | B4 | Scoped session grants | ✅ E2E verified |
 | B5 | Relay abuse quotas | ✅ shipped (code-verified) |
-| C–F | Everything below section B | ⬜ |
+| C6 | Pull mode (browse & request) | ✅ E2E verified |
+| C7 | Kiosk / broadcast receive | ✅ E2E verified |
+| C8 | Transfer templates | ✅ E2E verified |
+| C9 | Arabic + RTL locale | ✅ E2E verified |
+| C10 | OLED black + custom accent picker | ✅ E2E verified |
+| C11 | ETA confidence bands | ✅ shipped (unit-verified) |
+| D–F | Everything below section C | ⬜ |
 
 **E2E evidence (two browser sessions via gateway, 2026-10-29):**
 - A1: fastLanes=2 + 20 MB fresh file → lane 1 connected mid-transfer and
@@ -73,6 +79,39 @@ grounded in what exists, nothing here duplicates shipped features.
   guarded (503 without ADMIN_TOKEN), admin dashboard gained relay-bytes
   card + policy chips + per-room Block relay buttons. Client treats
   room-cap/blocked relay-errors as fatal (no infinite retransmit).
+
+**Section C evidence (two browser sessions via gateway, 2026-10-30):**
+- C6: sender queued 3 files + pull toggle → room created ("Pull mode is
+  live"); receiver joined → **SHARED LIBRARY** browser with all 3 files
+  (folder groups, search, select-all); selected ONLY c-b.txt → "1 selected ·
+  5.1 KB" → Request → sender hashed the pick (VALIDATING card) → sealed
+  manifest → receiver auto-accepted the exact selection — **c-b.txt received,
+  c-a/c-c never travelled, SHA-256 ✓**. Two real bugs found+fixed in E2E:
+  the DC-open manifest early-return swallowed the pull offer, and filesRef
+  wasn't rebound to the picked subset (c-a's bytes went out under c-b's
+  checksum).
+- C7: receiver "Kiosk mode" → fullscreen station (big QR, room+PIN,
+  "Trusted devices only" → toggled to "Everyone"); sender opened the QR's
+  **#claim=** deep link → "Sending to kiosk ROOM" banner → picked a file →
+  Send — no consent dialog (auto-accept), transfer completed, wall shows
+  "1 received · 5.1 KB" with c-a.txt "in vault", Merkle verified, and the
+  station **rotated to a fresh room** for the next sender. Two real bugs
+  found+fixed in E2E: receivers that join before the sender claims never
+  re-initiated pairing (now onDeviceDiscovered mirrors the join-time pairing
+  request for senders), and a pre-open completed transfer triggered an
+  instant bogus rotation (stale-manifest guard added).
+- C8: all 5 preset chips render in the sender flow; "Quiet hours" tap →
+  prefs { qos 25 Mbit/s, soundPack silent } + honest toast "cap 25 Mbit/s ·
+  sounds off"; "Quick drop" restores defaults.
+- C9: العربية locale → `<html dir="rtl" lang="ar">`, hero/buttons in
+  Arabic (أرسل الملفات / إرسال ملفات), back-arrows carry the flux-flip-rtl
+  mirror class; English restores dir=ltr.
+- C10: dark + OLED toggle → `html.flux-oled`, body background **lab(0 0 0)**
+  (true black), glass cards near-black; Custom accent chip + hue slider →
+  live re-skin (`--color-flux-500: oklch(0.62 0.14 360)`, persisted).
+- C11: computeEtaBand unit-verified — steady link (20 samples ≈1 MB/s) →
+  9.86–9.97 s band around a 9.90 s point for 10 MB; jittery link → 5.9–33 s
+  band; <5 samples or 0 remaining → null (classic point ETA fallback).
 
 > Note on A4: BLAKE3/WASM was evaluated and **dropped** — `blake3` fails to
 > resolve its `blake3-wasm` dep on the current registry, and SHA-256 digests
@@ -279,21 +318,41 @@ active session; schedule fires a toast on an idle session.
    relay-bytes totals, policy chips, abuse counters and per-room Block
    relay buttons. All env-tunable; metadata-only (opaque base64 lengths).
 
-# C. UX & Interaction — ⬜
+# C. UX & Interaction — v5 shipped
 
-6. **Pull mode ("browse & request")** — receiver browses a sender-shared
-   library (thumbs/folders) and pulls selections with scoped grants. The
-   flagship missing interaction. (Large.)
-7. **Kiosk / broadcast receive** — fullscreen QR receive + auto-accept
-   whitelist + progress wall (classrooms/events/TVs). (Small.)
-8. **Transfer templates** — one-tap presets combining prefs + trust levels
-   ("To Phone: images only, zip on, quiet"). (Small.)
-9. **Arabic + RTL locale** — first RTL locale; real RTL pass (dir, icons,
-   sparklines) hardening i18n for every future locale. High value-per-effort
-   for the region. (Medium.)
-10. **OLED black + custom accent picker** — delight on the accent system. (Small.)
-11. **ETA confidence bands** — forecast ranges from the (now real) speed
-    history instead of naive averages. (Small.)
+6. **Pull mode ("browse & request")** — ✅ shipped. The sender's "Pull mode"
+   toggle swaps the pushed manifest for a shared LIBRARY (metadata only,
+   sealed over the e2e-relay envelope like delta control). The receiver gets
+   a folder-grouped browser with search, image thumbs (PREVIEW frames keyed
+   by libraryId), multi-select and a running total; Request sends the picked
+   indices, the sender hashes ONLY the picks and pushes the sealed manifest,
+   and the receiver auto-accepts when the manifest matches the selection
+   name+size (a substituted manifest falls back to the consent dialog).
+   Single-request rooms in v5 (first picker wins).
+7. **Kiosk / broadcast receive** — ✅ shipped. A fullscreen receive station
+   (receiver panel button / command palette): mints pre-created share-link
+   rooms, shows a huge QR + PIN, auto-accepts (trusted-only default, everyone
+   via the open-kiosk toggle) straight into the Files vault — no pickers on a
+   TV — and renders a progress wall (live transfer + history). A fresh room
+   rotates in after every transfer so many senders can use the station
+   sequentially. The QR is a new `#claim=ROOM&pin=PIN` deep link that arms
+   the sender side ("Sending to kiosk ROOM" banner — pick files, press Send).
+8. **Transfer templates** — ✅ shipped. Five one-tap presets in the sender
+   flow (Quick drop / Photo burst / Quiet hours / Ephemeral / Careful) that
+   apply the transfer-affecting prefs; the toast lists exactly what changed.
+   Safety knobs (trust, duress PIN, paranoid mode) are never templated.
+9. **Arabic + RTL locale** — ✅ shipped. العربية joins the six launch
+   locales; `<html dir=rtl lang=ar>` via prefs + provider effect, directional
+   glyphs mirror via .flux-flip-rtl, logical margins (me-/ms-) on the flipped
+   rows, and every future locale inherits the RTL plumbing.
+10. **OLED black + custom accent picker** — ✅ shipped. `flux-oled` (scoped
+    to .dark) takes the page to true black with near-black cards/glass and a
+    dimmed mesh; a Custom accent preset with an oklch hue-wheel slider
+    re-skins live and persists.
+11. **ETA confidence bands** — ✅ shipped. computeEtaBand() turns the real
+    speed history into a forecast range (median point, p25/p75 bounds,
+    2.5× clamp) shown as "≈ 1m 12s (1m 05s–1m 30s)" once ≥5 samples exist;
+    the classic point ETA covers the warm-up.
 
 # D. Platform & Distribution — ⬜
 

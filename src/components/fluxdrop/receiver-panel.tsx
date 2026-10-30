@@ -1,6 +1,6 @@
 'use client'
 
-import { ArrowLeft, Download } from 'lucide-react'
+import { ArrowLeft, Download, Monitor } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { JoinForm } from './join-form'
@@ -8,6 +8,7 @@ import { DeviceList } from './device-list'
 import { ConnectionStatus } from './connection-status'
 import { TransferProgress } from './transfer-progress'
 import { DiagnosticsPanel } from './diagnostics-panel'
+import { LibraryBrowser } from './library-browser'
 import { Card } from '@/components/ui/card'
 import { useSessionStore } from '@/stores/session-store'
 import { useTransferStore } from '@/stores/transfer-store'
@@ -19,9 +20,11 @@ interface ReceiverPanelProps {
   onBack: () => void
   onPause?: () => void
   onResume?: () => void
+  /** v5-c6: pull mode — request the picked library files from the sender. */
+  onRequestLibraryFiles?: (indices: number[]) => void
 }
 
-export function ReceiverPanel({ onJoin, onCancel, onDone, onBack, onPause, onResume }: ReceiverPanelProps) {
+export function ReceiverPanel({ onJoin, onCancel, onDone, onBack, onPause, onResume, onRequestLibraryFiles }: ReceiverPanelProps) {
   const session = useSessionStore()
   const transfer = useTransferStore()
 
@@ -41,13 +44,25 @@ export function ReceiverPanel({ onJoin, onCancel, onDone, onBack, onPause, onRes
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <Button variant="ghost" size="sm" onClick={onBack} className="text-muted-foreground">
-          <ArrowLeft className="mr-1.5 h-4 w-4" />
+          <ArrowLeft className="flux-flip-rtl me-1.5 h-4 w-4" />
           Back to home
         </Button>
-        <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400">
-          <Download className="mr-1.5 h-3 w-3" />
-          Receiver mode
-        </Badge>
+        <div className="flex items-center gap-2">
+          {/* v5-c7: kiosk receive station (fullscreen QR + auto-accept + wall). */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => window.dispatchEvent(new CustomEvent('fluxdrop:open-kiosk'))}
+            title="Fullscreen receive station — big QR, auto-accept, progress wall (classrooms/events/TVs)"
+          >
+            <Monitor className="me-1.5 h-3.5 w-3.5" />
+            Kiosk mode
+          </Button>
+          <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400">
+            <Download className="mr-1.5 h-3 w-3" />
+            Receiver mode
+          </Badge>
+        </div>
       </div>
 
       {!hasRoom && !isTransferring && !isDone && (
@@ -77,18 +92,24 @@ export function ReceiverPanel({ onJoin, onCancel, onDone, onBack, onPause, onRes
       {hasRoom && !isTransferring && !isDone && (
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
           <div className="lg:col-span-3 space-y-4">
-            <Card className="flux-glass p-6">
-              <div className="flex flex-col items-center text-center">
-                <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400">
-                  <Download className="h-7 w-7 animate-pulse" />
+            {/* v5-c6: pull mode — the sender shared a library: browse + pick
+                instead of waiting for a pushed manifest. */}
+            {session.pendingLibrary && onRequestLibraryFiles ? (
+              <LibraryBrowser onRequest={onRequestLibraryFiles} />
+            ) : (
+              <Card className="flux-glass p-6">
+                <div className="flex flex-col items-center text-center">
+                  <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400">
+                    <Download className="h-7 w-7 animate-pulse" />
+                  </div>
+                  <h3 className="text-lg font-semibold">Waiting for sender</h3>
+                  <p className="mt-1 text-sm text-muted-foreground max-w-sm">
+                    You're in room <code className="font-mono font-semibold text-foreground">{session.roomId}</code>.
+                    The sender will push a file manifest once the WebRTC tunnel opens.
+                  </p>
                 </div>
-                <h3 className="text-lg font-semibold">Waiting for sender</h3>
-                <p className="mt-1 text-sm text-muted-foreground max-w-sm">
-                  You're in room <code className="font-mono font-semibold text-foreground">{session.roomId}</code>.
-                  The sender will push a file manifest once the WebRTC tunnel opens.
-                </p>
-              </div>
-            </Card>
+              </Card>
+            )}
             <ConnectionStatus transferState={transfer.transferState} />
             <DiagnosticsPanel />
           </div>

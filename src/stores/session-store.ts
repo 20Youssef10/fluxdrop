@@ -3,7 +3,7 @@
 'use client'
 
 import { create } from 'zustand'
-import type { DeviceRole, TransferManifest } from '@/lib/fluxdrop/protocol'
+import type { DeviceRole, TransferManifest, PullFileEntry } from '@/lib/fluxdrop/protocol'
 import { generateDeviceAlias } from '@/lib/fluxdrop/format'
 import { randomUUID } from '@/lib/fluxdrop/random'
 import { getDevicePreferences, saveDevicePreferences, type DevicePreferences } from '@/lib/fluxdrop/resume'
@@ -122,6 +122,12 @@ interface SessionState {
   // Pending manifest for receiver consent (set before user accepts)
   pendingManifest: TransferManifest | null
   setPendingManifest: (m: TransferManifest | null) => void
+
+  // v5-c6: pull mode — the sender's browsable library arrived (receiver
+  // side). Replaces the "Waiting for sender" card with the picker UI until a
+  // request is sent or the library is superseded.
+  pendingLibrary: { libraryId: string; files: PullFileEntry[]; fromDeviceId: string } | null
+  setPendingLibrary: (l: { libraryId: string; files: PullFileEntry[]; fromDeviceId: string } | null) => void
 
   // WebRTC diagnostics
   iceGatheringState: string
@@ -357,6 +363,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   pendingManifest: null,
   setPendingManifest: (m) => set({ pendingManifest: m }),
+
+  // v5-c6: pull mode — pending shared library (receiver side).
+  pendingLibrary: null,
+  setPendingLibrary: (l) => set({ pendingLibrary: l }),
 
   iceGatheringState: 'new',
   setIceGatheringState: (s) => set({ iceGatheringState: s }),

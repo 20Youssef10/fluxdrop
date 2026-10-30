@@ -10,9 +10,9 @@ import { create } from 'zustand'
 // v5-a1: clamps the fast-lane count (shared protocol constant).
 import { FAST_LANE_MAX } from './protocol'
 
-export type AccentId = 'emerald' | 'fern' | 'amber' | 'rose' | 'violet'
+export type AccentId = 'emerald' | 'fern' | 'amber' | 'rose' | 'violet' | 'custom'
 export type SoundPack = 'calm' | 'lively' | 'silent'
-export type LocaleId = 'en' | 'es' | 'fr' | 'de' | 'pt' | 'ja'
+export type LocaleId = 'en' | 'es' | 'fr' | 'de' | 'pt' | 'ja' | 'ar'
 
 export interface QuietHours {
   enabled: boolean
@@ -31,6 +31,15 @@ interface PrefsState {
   // 10.1 i18n
   locale: LocaleId
   setLocale: (l: LocaleId) => void
+
+  // v5-c10: OLED black — pure-black surfaces under dark mode (only applies
+  // while the dark theme is active; harmless no-op in light).
+  oledBlack: boolean
+  setOledBlack: (v: boolean) => void
+
+  // v5-c10: custom accent — user-chosen hue for the 'custom' accent preset.
+  customAccentHue: number
+  setCustomAccentHue: (h: number) => void
 
   // 10.3 low-vision transfer mode (large type + extra contrast + SAS readout)
   lowVision: boolean
@@ -163,8 +172,30 @@ export const usePrefsStore = create<PrefsState>((set) => ({
   setLocale: (locale) => {
     set({ locale })
     persist({ locale })
+    applyLocaleDirection(locale)
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('fluxdrop:locale-changed', { detail: { locale } }))
+    }
+  },
+
+  // v5-c10: OLED black (scoped to dark mode via CSS — the class is harmless
+  // in light theme because every override lives under `.dark.flux-oled`).
+  oledBlack: false,
+  setOledBlack: (v) => {
+    set({ oledBlack: v })
+    persist({ oledBlack: v })
+    applyBodyClass('flux-oled', v)
+  },
+
+  // v5-c10: custom accent hue (0–360, oklch chroma follows the family default).
+  customAccentHue: 174,
+  setCustomAccentHue: (h) => {
+    const v = Math.max(0, Math.min(360, Math.round(h) || 0))
+    set({ customAccentHue: v })
+    persist({ customAccentHue: v })
+    // Live preview: re-apply the accent when 'custom' is the active preset.
+    if (usePrefsStore.getState().accent === 'custom') {
+      applyAccent('custom', v)
     }
   },
 
@@ -314,12 +345,14 @@ export const usePrefsStore = create<PrefsState>((set) => ({
 // them on <html> re-skins the whole app without touching any component.
 // Hue values keep the brand's "green family" first; others are warm/cool
 // accents that avoid the indigo/blue lane.
+// v5-c10: 'custom' resolves its hue from the prefs store at apply time.
 export const ACCENTS: Record<AccentId, { label: string; hue: number; chroma: number }> = {
   emerald: { label: 'Emerald', hue: 172, chroma: 0.15 },
   fern: { label: 'Fern', hue: 148, chroma: 0.14 },
   amber: { label: 'Amber', hue: 75, chroma: 0.13 },
   rose: { label: 'Rose', hue: 18, chroma: 0.14 },
   violet: { label: 'Violet', hue: 305, chroma: 0.13 },
+  custom: { label: 'Custom', hue: 174, chroma: 0.14 },
 }
 
 function fluxScale(hue: number, chroma: number): Record<string, string> {
@@ -335,16 +368,30 @@ function fluxScale(hue: number, chroma: number): Record<string, string> {
   return out
 }
 
-export function applyAccent(accent: AccentId): void {
+export function applyAccent(accent: AccentId, customHue?: number): void {
   if (typeof document === 'undefined') return
   const preset = ACCENTS[accent] ?? ACCENTS.emerald
-  const vars = fluxScale(preset.hue, preset.chroma)
+  // v5-c10: the custom preset takes its hue from the prefs store (live slider).
+  const hue = accent === 'custom' ? (customHue ?? usePrefsStore.getState().customAccentHue) : preset.hue
+  const chroma = preset.chroma
+  const vars = fluxScale(hue, chroma)
   const root = document.documentElement
   for (const [k, v] of Object.entries(vars)) root.style.setProperty(k, v)
   // Keep primary/ring/chart-1 in the same family so shadcn surfaces match.
-  root.style.setProperty('--primary', `oklch(0.54 ${Math.max(0.12, preset.chroma - 0.01)} ${preset.hue})`)
-  root.style.setProperty('--ring', `oklch(0.62 ${preset.chroma} ${preset.hue})`)
-  root.style.setProperty('--chart-1', `oklch(0.62 ${preset.chroma} ${preset.hue})`)
+  root.style.setProperty('--primary', `oklch(0.54 ${Math.max(0.12, chroma - 0.01)} ${hue})`)
+  root.style.setProperty('--ring', `oklch(0.62 ${chroma} ${hue})`)
+  root.style.setProperty('--chart-1', `oklch(0.62 ${chroma} ${hue})`)
+}
+
+/**
+ * v5-c9: RTL pass — set <html dir> (+ lang) for the locale. Arabic is the
+ * first RTL locale; every logical-property layout follows the attribute.
+ */
+export function applyLocaleDirection(locale: LocaleId): void {
+  if (typeof document === 'undefined') return
+  const rtl = locale === 'ar'
+  document.documentElement.dir = rtl ? 'rtl' : 'ltr'
+  document.documentElement.lang = locale
 }
 
 function applyBodyClass(cls: string, on: boolean): void {
@@ -359,4 +406,7 @@ export function applyPersistedPrefs(): void {
   applyBodyClass('flux-highcontrast', s.highContrast)
   applyBodyClass('flux-lowvision', s.lowVision)
   applyBodyClass('flux-reduce-motion', s.reduceMotion)
+  // v5-c10 / v5-c9: OLED black + locale direction.
+  applyBodyClass('flux-oled', s.oledBlack)
+  applyLocaleDirection(s.locale)
 }

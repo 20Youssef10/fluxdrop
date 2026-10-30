@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { ArrowDown, ArrowLeft, ArrowUp, RotateCcw, Send, X } from 'lucide-react'
+import { ArrowDown, ArrowLeft, ArrowUp, Hand, Image as ImageIcon, Library, Monitor, Moon, RotateCcw, Send, Shield, Timer, X, Zap } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { FilePicker } from './file-picker'
@@ -22,11 +22,33 @@ import { FilePreview } from './file-preview'
 import { HashingProgress } from './hashing-progress'
 import { WatchFolderPanel } from './watch-folder-panel'
 import { useT } from '@/lib/fluxdrop/i18n'
+// v5-c8: one-tap transfer presets.
+import { TEMPLATES, applyTemplate, type TemplateIcon, type TransferTemplate } from '@/lib/fluxdrop/templates'
+import { toast } from 'sonner'
+
+/** v5-c8: honest template feedback — the toast lists what actually changed. */
+function toastTemplate(tpl: TransferTemplate, changed: string[]): void {
+  if (changed.length === 0) {
+    toast.info(`${tpl.label} — already set`, { description: tpl.description })
+    return
+  }
+  toast.success(`${tpl.label} applied`, {
+    description: changed.slice(0, 6).join(' · ') + (changed.length > 6 ? ` +${changed.length - 6} more` : ''),
+  })
+}
+
+const TEMPLATE_ICONS: Record<TemplateIcon, typeof Zap> = {
+  zap: Zap,
+  image: ImageIcon,
+  moon: Moon,
+  timer: Timer,
+  shield: Shield,
+}
 
 interface SenderPanelProps {
   files: File[]
   setFiles: (f: File[]) => void
-  onStartSend: (files: File[], resumeManifest?: never, claim?: { roomCode: string; pin: string }) => void
+  onStartSend: (files: File[], resumeManifest?: never, claim?: { roomCode: string; pin: string }, opts?: { pullMode?: boolean }) => void
   onCancel: () => void
   onDone: () => void
   onBack: () => void
@@ -34,15 +56,24 @@ interface SenderPanelProps {
   onResume?: () => void
   /** True when the queue was restored from transfer history (resume). */
   isResuming?: boolean
+  /** v5-c7: an armed kiosk-room claim (from a #claim= deep link). */
+  pendingClaim?: { roomCode: string; pin: string } | null
+  /** v5-c7: dismiss the armed claim (banner X). */
+  onClearClaim?: () => void
 }
 
-export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, onBack, onPause, onResume, isResuming }: SenderPanelProps) {
+export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, onBack, onPause, onResume, isResuming, pendingClaim, onClearClaim }: SenderPanelProps) {
   const session = useSessionStore()
   const transfer = useTransferStore()
   // v5-a3w: delta sync pref (toggle lives in the pre-room card below).
   const prefs = usePrefsStore()
   const [showFiles, setShowFiles] = useState(false)
   const [dirtyQueue, setDirtyQueue] = useState(false)
+  // v5-c6: pull mode — share the queue as a browsable library; the receiver
+  // picks a subset and only that gets hashed + sent.
+  const [pullMode, setPullMode] = useState(false)
+  // v5-c8: last-applied template id (transient highlight).
+  const [appliedTemplate, setAppliedTemplate] = useState<string | null>(null)
   const t = useT()
 
   const hasRoom = !!session.roomId
@@ -63,7 +94,7 @@ export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, on
       {/* Header strip */}
       <div className="flex items-center justify-between">
         <Button variant="ghost" size="sm" onClick={onBack} className="text-muted-foreground">
-          <ArrowLeft className="mr-1.5 h-4 w-4" />
+          <ArrowLeft className="flux-flip-rtl me-1.5 h-4 w-4" />
           Back to home
         </Button>
         <Badge variant="outline" className="border-flux-500/40 bg-flux-500/10 text-flux-700 dark:text-flux-300">
@@ -98,6 +129,33 @@ export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, on
         </div>
       )}
 
+      {/* v5-c7: kiosk claim banner — a kiosk QR armed this send; the next
+          "Create transfer room" claims the pre-created room. */}
+      {pendingClaim && !hasRoom && !isTransferring && !isDone && (
+        <div className="flex items-center gap-2.5 rounded-lg border border-flux-500/30 bg-flux-500/10 px-3.5 py-2.5">
+          <Monitor className="h-4 w-4 shrink-0 text-flux-600 dark:text-flux-400" aria-hidden />
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium text-flux-700 dark:text-flux-300">
+              Sending to kiosk <span className="font-mono">{pendingClaim.roomCode}</span>
+            </p>
+            <p className="text-[11px] text-muted-foreground">
+              Pick your files and press Send — the room is pre-linked, no code to type.
+            </p>
+          </div>
+          {onClearClaim && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
+              onClick={onClearClaim}
+              aria-label="Unlink kiosk room"
+            >
+              <X className="h-3.5 w-3.5" />
+            </Button>
+          )}
+        </div>
+      )}
+
       {/* Pre-room: file picker */}
       {!hasRoom && !isValidating && !isTransferring && !isDone && (
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
@@ -105,7 +163,7 @@ export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, on
             <FilePicker
               files={files}
               onFilesChange={setFiles}
-              onSend={() => onStartSend(files)}
+              onSend={() => onStartSend(files, undefined, undefined, { pullMode })}
               onSendWithClaim={(fs, rm, claim) => onStartSend(fs, rm, claim)}
             />
           </div>
@@ -142,6 +200,59 @@ export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, on
                   className="mt-0.5 shrink-0"
                 />
               </div>
+              {/* v5-c6: pull mode — the receiver browses the queue and picks a
+                  subset; nothing is hashed or sent until they choose. */}
+              <div className="mt-3 flex items-start justify-between gap-3 rounded-lg border border-border/60 bg-card/40 p-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-foreground">
+                    {t('pull.toggle', 'Pull mode — let the receiver browse the queue and pick what they want')}
+                  </p>
+                  <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">
+                    Instead of pushing everything, the receiver sees a browsable list (with image thumbnails) and
+                    requests a subset — only the picked files get hashed and sent. Needs a v5 receiver.
+                  </p>
+                </div>
+                <Switch
+                  checked={pullMode}
+                  onCheckedChange={setPullMode}
+                  aria-label="Toggle pull mode"
+                  className="mt-0.5 shrink-0"
+                />
+              </div>
+              {/* v5-c8: one-tap transfer presets (applies the prefs for the
+                  NEXT send — chips describe exactly what they change). */}
+              <div className="mt-3 rounded-lg border border-border/60 bg-card/40 p-3">
+                <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                  {t('templates.title', 'Presets')}
+                </p>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {TEMPLATES.map((tpl) => {
+                    const Icon = TEMPLATE_ICONS[tpl.icon]
+                    return (
+                      <button
+                        key={tpl.id}
+                        onClick={() => {
+                          const changed = applyTemplate(tpl)
+                          setAppliedTemplate(tpl.id)
+                          toastTemplate(tpl, changed)
+                        }}
+                        title={tpl.description}
+                        className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                          appliedTemplate === tpl.id
+                            ? 'border-flux-500/60 bg-flux-500/10 font-medium'
+                            : 'border-border/60 hover:bg-card/60'
+                        }`}
+                      >
+                        <Icon className="h-3 w-3" aria-hidden />
+                        {tpl.label}
+                      </button>
+                    )
+                  })}
+                </div>
+                <p className="mt-1.5 text-[10px] text-muted-foreground">
+                  One tap sets the knobs for the next send — hover a chip to see exactly what it changes.
+                </p>
+              </div>
             </Card>
           </div>
         </div>
@@ -152,6 +263,19 @@ export function SenderPanel({ files, setFiles, onStartSend, onCancel, onDone, on
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
           <div className="lg:col-span-3">
             <QRDisplay />
+            {/* v5-c6: pull mode hint — the room is live in library mode. */}
+            {pullMode && (
+              <div className="mt-4 flex items-center gap-2.5 rounded-lg border border-flux-500/30 bg-flux-500/5 px-3.5 py-2.5">
+                <Library className="h-4 w-4 shrink-0 text-flux-600 dark:text-flux-400" aria-hidden />
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-medium text-flux-700 dark:text-flux-300">Pull mode is live</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    The receiver will browse this queue and pick a subset — only their picks get hashed and sent.
+                  </p>
+                </div>
+                <Hand className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+              </div>
+            )}
           </div>
           <div className="lg:col-span-2 space-y-4">
             <ConnectionStatus transferState={transfer.transferState} />

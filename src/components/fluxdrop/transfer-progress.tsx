@@ -7,7 +7,7 @@ import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useTransferStore } from '@/stores/transfer-store'
-import { formatBytes, formatSpeed, formatEta, formatDuration } from '@/lib/fluxdrop/format'
+import { formatBytes, formatSpeed, formatEta, formatDuration, computeEtaBand } from '@/lib/fluxdrop/format'
 import { computeFileSkips } from '@/lib/fluxdrop/manifest'
 import { FileIcon, getFileCategoryColors } from './file-icon'
 import { AnimatedNumber } from './animated-number'
@@ -33,6 +33,10 @@ export function TransferProgress({ onCancel, onDone, onPause, onResume }: Transf
   const isError = t.transferState === 'FAILED' || t.transferState === 'ERROR'
   const isCancelled = t.transferState === 'CANCELLED'
   const isTransferring = t.transferState === 'TRANSFERRING'
+  // v5-c11: ETA confidence band — the forecast range from the REAL speed
+  // history (median point estimate + p25/p75 bounds). Falls back to the
+  // classic point ETA until enough samples accumulate.
+  const etaBand = isTransferring ? computeEtaBand(remaining, t.speedHistory) : null
   const isPaused = t.transferState === 'PAUSED'
 
   // Trigger celebration exactly once when transfer completes
@@ -205,7 +209,20 @@ export function TransferProgress({ onCancel, onDone, onPause, onResume }: Transf
           <StatCard
             icon={<Timer className="h-4 w-4" />}
             label="ETA"
-            value={formatEta(remaining, t.speedBps)}
+            value={
+              etaBand ? (
+                <span
+                  title={`Forecast from the last ${Math.min(20, t.speedHistory.length)} speed samples · ${formatDuration(etaBand.lowMs)}–${formatDuration(etaBand.highMs)} at current variance`}
+                >
+                  <span className="tabular-nums">≈ {formatDuration(etaBand.pointMs)}</span>
+                  <span className="ml-1.5 hidden text-[10px] font-normal text-muted-foreground tabular-nums sm:inline">
+                    ({formatDuration(etaBand.lowMs)}–{formatDuration(etaBand.highMs)})
+                  </span>
+                </span>
+              ) : (
+                formatEta(remaining, t.speedBps)
+              )
+            }
           />
           <StatCard
             icon={<Hash className="h-4 w-4" />}

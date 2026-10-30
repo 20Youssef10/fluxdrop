@@ -2090,3 +2090,52 @@ Task: Implement FEATURES-v5.md section B — B1 disappearing transfers, B2 panic
 
 ## Commit
 About to commit as feat v5-b; push to origin/main as 20Youssef10 (ShinZero) <youssef2010.mahmoud@gmail.com>.
+
+---
+Task ID: feat-v5-c
+Agent: Z.ai Code (Section C: UX & Interaction)
+Task: Implement FEATURES-v5.md section C — C6 pull mode, C7 kiosk receive, C8 templates, C9 Arabic+RTL, C10 OLED+custom accent, C11 ETA bands.
+
+## What shipped
+
+### C6 — Pull mode ("browse & request") — the flagship
+- Protocol: `PULL_MSG.OFFER/REQUEST` + `PullOfferBody/PullRequestBody/PullFileEntry` — sealed enc1 bodies over the SAME opaque e2e-relay envelope as delta control (zero server changes). `PULL_MAX_FILES = 500`.
+- Sender: "Pull mode" toggle in the pre-room card; `startSend(files, …, { pullMode })` skips hashing and arms `pullLibraryRef`; the DC-open path offers the library after the E2E wait (metadata only: names/sizes/types/paths); `onLibraryRequest` hashes ONLY the picked subset (VALIDATING card), rebinds `filesRef` to the picks, and pushes the sealed manifest. Single-request rooms in v5.
+- Receiver: `onLibraryOffer` → `pendingLibrary` (session store) → LibraryBrowser (folder groups, search, select-all, running total, image thumbs via PREVIEW frames keyed by libraryId). Request → `pullExpectRef` (name:size keys) → the arriving manifest must be a SUBSET of the selection to auto-accept; anything else falls back to the consent dialog (substituted manifests can't sneak in).
+- E2E: 3-file library, picked only c-b.txt → c-b received, c-a/c-c never travelled, SHA-256 ✓.
+
+### C7 — Kiosk / broadcast receive
+- `kiosk-store.ts` + `kiosk-mode.tsx` fullscreen station: mints pre-created share-link rooms (POST /link), joins as receiver, huge QR + PIN, accept whitelist (trusted-only default / everyone toggle), auto-accept straight into the Files vault (no pickers on a TV), progress wall (live + history), and FRESH-ROOM ROTATION after every transfer (sequential senders).
+- New `#claim=ROOM&pin=PIN` deep link (senders opening the kiosk QR land in sender mode with a "Sending to kiosk ROOM" banner — `#join` would wrongly route them to receive mode). Page-level `pendingClaim` state + dismissible banner.
+- Entry points: receiver panel button + command palette ("Kiosk mode").
+- E2E: claim link → banner → send → auto-accept (no consent) → wall "1 received · 5.1 KB" + "in vault" → rotated to a fresh room.
+
+### C8 — Transfer templates
+- `templates.ts`: Quick drop / Photo burst / Quiet hours / Ephemeral / Careful — one-tap pref appliers with honest toasts ("cap 25 Mbit/s · sounds off"); safety knobs never templated. Chips in the sender flow.
+
+### C9 — Arabic + RTL
+- `ar` dictionary (~80 keys), `LocaleId += 'ar'`, LOCALES entry; `applyLocaleDirection` sets `<html dir/lang>` (prefs set-time + I18nProvider effect + applyPersistedPrefs boot).
+- RTL pass: `.flux-flip-rtl` mirror class on back arrows (sender/receiver/join-form/palette), `me-`/`ms-` logical margins on flipped rows.
+
+### C10 — OLED black + custom accent
+- `flux-oled` class (scoped to `.dark`): true-black background (lab(0 0 0)), near-black cards/popovers/glass, dimmed mesh. Toggle in Settings → Tuning.
+- `custom` accent preset: oklch hue-wheel slider (0–360) with live re-skin (`applyAccent('custom', hue)`); persisted `customAccentHue`.
+
+### C11 — ETA confidence bands
+- `computeEtaBand()` in format.ts: median point estimate + p25/p75 bounds (2.5× clamp) from the last 20 speed samples; null under 5 samples (classic ETA fallback). StatCard shows "≈ point (low–high)" with a variance tooltip.
+
+## Real bugs found & fixed during E2E
+1. **Pull offer never sent**: onDataChannelOpen's `if (!m) return` (no manifest yet) bailed BEFORE the pull-offer branch → guard now allows `pullLibraryRef` through (manifest-dependent steps individually guarded).
+2. **Wrong bytes in pulled transfers**: the send loop reads from `filesRef` via the manifest's slice plan — onLibraryRequest didn't rebind it to the picked subset, so c-a.txt's bytes went out under c-b.txt's checksum (equal sizes, hash mismatch). `filesRef.current = picked` now.
+3. **Kiosk pairing dead-end**: a receiver that joins an EMPTY room (kiosk mints first) never re-initiated pairing when the sender claimed later — onRoomJoined only fires pairing-request when the sender is already present. onDeviceDiscovered now mirrors it for late-arriving senders (guarded: role sender + we hold no files + not already paired).
+4. **Bogus kiosk rotation on open**: a terminal state for a manifest that predates the kiosk session (the just-finished transfer) wall'd + rotated instantly. Stale-manifest guard (`manifestAtOpenRef`).
+
+## E2E verification (agent-browser, two sessions via :81 gateway)
+Pull: library browser rendered all 3 files; single-file request; sender console "library offered"/"pulled manifest sent ENCRYPTED (1 files)"; receiver "c-b.txt only, verified". Kiosk: overlay + QR + accept-all toggle; #claim deep link banner; no consent dialog; wall entry + vault badge; room rotation logged. Templates: chips + prefs + toast. Arabic: dir=rtl, lang=ar, Arabic hero. OLED: lab(0 0 0) body. Custom accent: hue 360 live re-skin + persistence. ETA band math unit-verified (steady/jitter/fallback).
+
+## Quality gates
+- `bun run lint` exit 0; `bunx tsc --noEmit` clean.
+- Headless quirks noted (not bugs): synthetic input events don't reach React-controlled sliders (real keyboard works — verified with End key); the command palette's ⌘K isn't reachable via synthetic keypress (its Kiosk entry dispatches the same fluxdrop:open-kiosk event as the verified receiver-panel button).
+
+## Commit
+About to commit as feat v5-c; push to origin/main as 20Youssef10 (ShinZero) <youssef2010.mahmoud@gmail.com>.
