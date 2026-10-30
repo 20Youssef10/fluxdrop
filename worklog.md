@@ -2334,3 +2334,32 @@ section item implemented, E2E-verified, and shipped.
   points at the Redis recipe documented since v2.0.
 - `transfer.started` fires only for signaling-path manifests (SDK/relay
   sends); pure-P2P manifests ride the DataChannel by design.
+
+## feat-v5-ef-deploy: preview topology restored + browser re-verification
+
+**Follow-up after a failed preview deploy.** The sandbox had kept only the
+v5-e17 E2E "beta" signaling instance (SIGNALING_PORT=3014, leftover from the
+federation test) — nothing was listening on the canonical :3003 the frontend
+resolves through the gateway (`/?XTransformPort=3003`), so every page load
+came up signaling-less.
+
+- `scripts/start-signaling.sh` (new): idempotent launcher that brings up the
+  deployed-preview topology — alpha :3003 (ADMIN_TOKEN=changeme-dev, feeds
+  the frontend) + beta :3014 (federation partner for live ROOM@beta demos),
+  shared HMAC secret `fedsharedsecret1`, detached via setsid, logs to
+  /tmp/fluxdrop-signaling-{alpha,beta}.log, LOG_LEVEL passthrough.
+- Hygiene: wiped stale E2E artifacts (dead webhook wh-24e8474d retrying
+  against a gone receiver; E2ERacer leaderboard rows) via the admin API +
+  data-file reset, then rebooted the pair clean.
+- Browser re-verification through the Caddy gateway (:81), both sessions
+  isolated: sender create (room+PIN+QR) → receiver join (devices:2) →
+  WebRTC DataChannel live → 293 KB transfer → **SHA-256 verified ✓** (6 s).
+  Dev tab conformance badge renders live: **72 passed · fresh**. Admin
+  dashboard serves `<title>FluxDrop · Signaling Admin</title>`, beta
+  /healthz ok, federation links alpha↔beta up both directions.
+- Learning (test artifact, not a product bug): two tabs in ONE browser share
+  localStorage, so both peers mint the same deviceId and the receiver's
+  join silently overwrites the sender's device entry in the room map —
+  pairing stalls forever. Real cross-device usage and isolated browser
+  sessions are unaffected; noting it here so future same-browser E2Es use
+  `--session` isolation from the start.
