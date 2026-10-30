@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  v5-d12: intent filters for the ANDROID APP (not the plugin — intent filters
+  must sit on the app's launcher activity, which `npx cap add android`
+  generates as .MainActivity).
+
+  Copy the blocks below INTO
+    android/app/src/main/AndroidManifest.xml
+  inside the existing <activity android:name=".MainActivity" ...> element.
+
+  They arm:
+    • fluxdrop:// deep links (fluxdrop://join?room=X&pin=Y etc.)
+    • the OS share sheet → FluxDrop (files AND text)
+  The plugin's own manifest (already merged by cap sync) adds the foreground
+  service, its permissions and the FileProvider.
+-->
+<intent-filter>
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <data android:scheme="fluxdrop" />
+</intent-filter>
+<intent-filter>
+    <action android:name="android.intent.action.SEND" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <data android:mimeType="*/*" />
+</intent-filter>
+<intent-filter>
+    <action android:name="android.intent.action.SEND_MULTIPLE" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <data android:mimeType="*/*" />
+</intent-filter>

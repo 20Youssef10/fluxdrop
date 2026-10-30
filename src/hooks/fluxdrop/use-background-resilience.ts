@@ -12,6 +12,7 @@
 import { useEffect, useRef } from 'react'
 import { usePrefsStore } from '@/lib/fluxdrop/prefs'
 import { useTransferStore } from '@/stores/transfer-store'
+import { isNativeShell } from '@/lib/fluxdrop/native-bridge'
 
 export function useBackgroundResilience(
   pause: () => void,
@@ -30,6 +31,10 @@ export function useBackgroundResilience(
 
     const handleHidden = () => {
       if (!usePrefsStore.getState().backgroundResilience) return
+      // v5-d13: native shells keep the process fully alive (Android
+      // foreground service / desktop hide-to-tray) — auto-pausing there
+      // would fight a perfectly healthy DataChannel for no reason.
+      if (isNativeShell()) return
       const st = useTransferStore.getState().transferState
       if (st === 'TRANSFERRING') {
         pausedByBgRef.current = true

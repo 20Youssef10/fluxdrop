@@ -13,6 +13,8 @@ import { FAST_LANE_MAX } from './protocol'
 export type AccentId = 'emerald' | 'fern' | 'amber' | 'rose' | 'violet' | 'custom'
 export type SoundPack = 'calm' | 'lively' | 'silent'
 export type LocaleId = 'en' | 'es' | 'fr' | 'de' | 'pt' | 'ja' | 'ar'
+// v5-d12: which native shell to SIMULATE in a plain browser (demo/E2E).
+export type NativeShellSim = 'off' | 'tauri' | 'capacitor'
 
 export interface QuietHours {
   enabled: boolean
@@ -126,6 +128,20 @@ interface PrefsState {
   setScheduleTime: (v: string) => void
   scheduleDaily: boolean
   setScheduleDaily: (v: boolean) => void
+
+  // v5-d12: simulate a native shell (Tauri desktop / Capacitor Android) in a
+  // plain browser — exercises the full bridge surface (tray/foreground
+  // service lifecycle, deep links, share-sheet arming) for demos and E2E.
+  // A REAL shell always wins over the simulation (detection checks globals
+  // first). Read live by the bridge on every call — no reload needed.
+  nativeShellSim: NativeShellSim
+  setNativeShellSim: (v: NativeShellSim) => void
+
+  // v5-d13: keep the screen awake while a transfer is active in a native
+  // shell (Android keep-screen-on flag / desktop wake lock). The process
+  // itself is kept alive by the foreground service / tray regardless.
+  keepAwakeDuringTransfers: boolean
+  setKeepAwakeDuringTransfers: (v: boolean) => void
 }
 
 const KEY = 'fluxdrop:prefs-v4'
@@ -335,6 +351,22 @@ export const usePrefsStore = create<PrefsState>((set) => ({
   setScheduleDaily: (v) => {
     set({ scheduleDaily: v })
     persist({ scheduleDaily: v })
+  },
+
+  // v5-d12: native shell simulation (demo/E2E). No side effects — the
+  // bridge reads this live, so flipping it re-skins the shell surface now.
+  nativeShellSim: 'off',
+  setNativeShellSim: (v) => {
+    const next: NativeShellSim = v === 'tauri' || v === 'capacitor' ? v : 'off'
+    set({ nativeShellSim: next })
+    persist({ nativeShellSim: next })
+  },
+
+  // v5-d13: screen-keep-awake during active transfers (native shells).
+  keepAwakeDuringTransfers: true,
+  setKeepAwakeDuringTransfers: (v) => {
+    set({ keepAwakeDuringTransfers: v })
+    persist({ keepAwakeDuringTransfers: v })
   },
 
   ...stored,

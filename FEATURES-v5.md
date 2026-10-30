@@ -28,7 +28,9 @@ grounded in what exists, nothing here duplicates shipped features.
 | C9 | Arabic + RTL locale | ✅ E2E verified |
 | C10 | OLED black + custom accent picker | ✅ E2E verified |
 | C11 | ETA confidence bands | ✅ shipped (unit-verified) |
-| D–F | Everything below section C | ⬜ |
+| D12 | Ship the shells (Tauri desktop + Capacitor Android) | ✅ E2E verified (bridge sim) |
+| D13 | Background transfer resilience (native shells) | ✅ E2E verified (sim lifecycle) |
+| E–F | Sections E & F | ⬜ |
 
 **E2E evidence (two browser sessions via gateway, 2026-10-29):**
 - A1: fastLanes=2 + 20 MB fresh file → lane 1 connected mid-transfer and
@@ -112,6 +114,47 @@ grounded in what exists, nothing here duplicates shipped features.
 - C11: computeEtaBand unit-verified — steady link (20 samples ≈1 MB/s) →
   9.86–9.97 s band around a 9.90 s point for 10 MB; jittery link → 5.9–33 s
   band; <5 samples or 0 remaining → null (classic point ETA fallback).
+
+**Section D evidence (two browser sessions via gateway, 2026-10-30):**
+- D12/D13 were built as REAL shell sources + a web-side bridge whose whole
+  surface is browser-VERIFIABLE through a first-class simulation mode
+  (`?shellSim=capacitor|tauri` or Settings → Device — a real installed shell
+  always wins over the sim; detection probes `window.__TAURI__` /
+  `window.Capacitor`). One E2E run, all green:
+- **Transfer regression through the new wiring**: plain-web sender →
+  sim-Capacitor receiver joined + accepted → `Transfer complete`,
+  `d-file.txt` arrived, `SHA-256 verified` badge, Done button — and the
+  plain-web session showed NO native chip, no shell card lines.
+- **D13 lifecycle verbatim** (receiver console, the exact calls the Android
+  foreground service / desktop tray would receive):
+  `keepScreenAwake(true)` → `transfersActive(true) — "Reading manifest…"` →
+  `"Receiving files…"` → `"Verifying checksums…"` → `"Transfer complete"` →
+  `keepScreenAwake(false)` → `transfersActive(false) — "Idle"`. The
+  web build's hidden-tab auto-pause is correctly suppressed in shells
+  (`isNativeShell()` guard in use-background-resilience).
+- **D12 deep links**: `window.__fluxdropSim.deepLink('fluxdrop://claim?room=KIOSKQ1&pin=4321')`
+  → view switched to sender + "Sending to kiosk KIOSKQ1" banner + toast
+  (same parser serves the web `#claim=`/`#join=` hashes and the
+  `fluxdrop://` scheme; 15/15 parser unit checks pass).
+- **D12 share-sheet / file associations**: `__fluxdropSim.openFiles([...])`
+  → "Added 1 shared file" toast, `d-shared.txt` sitting in the sender queue
+  ("1 file · …") — the same arming path the Web Share Target uses.
+- **Shell card + controls** (Settings → Device): "Capacitor · simulated"
+  badge, capability chips, live "Foreground service: …" line, bridge-call
+  log. Switching the sim to Tauri via the REAL Radix Select (keyboard:
+  ArrowDown → Home → ArrowDown → Enter) flipped the header chip to
+  "Desktop app · sim", revealed the Tray-status line + autostart row, and
+  the autostart toggle round-tripped (`__fluxdropSim.autostart() → true`,
+  "Autostart enabled" toast, call logged).
+- **Rust/Kotlin sources ship complete but were not compiled here** (no
+  cargo/gradle/SDK in the sandbox): the Tauri project (tray + close-to-tray,
+  single-instance forwarding, deep-link plugin, autostart, file
+  associations with a Rust-side READ ALLOWLIST, `.fluxdrop` room-link
+  files, `flux_read_file_chunk` at 4 MiB/chunk) and the Capacitor plugin
+  (ForegroundTransferService with partial wake lock + dataSync
+  notification, share-sheet in/out with cache stashing, intent deep links,
+  keep-awake, FileProvider) are template-faithful and documented in
+  src-tauri/README.md + src-capacitor/README.md.
 
 > Note on A4: BLAKE3/WASM was evaluated and **dropped** — `blake3` fails to
 > resolve its `blake3-wasm` dep on the current registry, and SHA-256 digests
@@ -354,13 +397,38 @@ active session; schedule fires a toast on an idle session.
     2.5× clamp) shown as "≈ 1m 12s (1m 05s–1m 30s)" once ≥5 samples exist;
     the classic point ETA covers the warm-up.
 
-# D. Platform & Distribution — ⬜
+# D. Platform & Distribution — v5 shipped
 
-12. **Ship the shells** — Capacitor/Tauri are scaffolds. Minimum lovable
-    desktop: tray, autostart, native share-sheet, `fluxdrop://` scheme, file
-    associations. Android: foreground transfer service. (Large.)
-13. **Background transfer resilience** (native shells) — keep the pipeline
-    alive when the screen locks. (Medium, in shell.)
+12. **Ship the shells** — ✅ shipped. The web app gained a typed **native
+    bridge** (`src/lib/fluxdrop/native-bridge.ts`) that probes
+    `window.__TAURI__` / `window.Capacitor`, exposes the full capability
+    matrix (tray, autostart, deep links, share target/out, foreground
+    service, keep-awake, file-assoc reads), and degrades to a no-op on the
+    plain web build. A first-class **simulation mode** (`?shellSim=` or
+    Settings → Device) mirrors either shell in a browser — every bridge call
+    logged — which is how D12/D13 are E2E-verified without native
+    toolchains. **Desktop (Tauri 2)**: the Rust project is complete — tray
+    with live status + Show/Quit, close→hide-to-tray, single-instance argv
+    forwarding, `fluxdrop://` deep-link plugin (+ `.fluxdrop` room-link
+    files), autostart (`--hidden`), file associations with a Rust-side read
+    ALLOWLIST (`flux_read_file_chunk`, 4 MiB chunks — the webview can only
+    read files the OS handed the app), committed PNG/ICO/ICNS icon set.
+    **Android (Capacitor)**: `src-capacitor/plugin` — FluxDropShell plugin
+    with ForegroundTransferService (partial wake lock, dataSync
+    notification), share-sheet in (streams stashed to cache, cold-start
+    replay) and out (FileProvider ACTION_SEND), intent deep links,
+    keep-screen-awake, plus the app manifest snippets. Deep links and share
+    opens route through ONE parser (`deep-links.ts`) shared with the web
+    hash links, arming receiver-join / kiosk-claim / sender-queue exactly
+    like the web paths.
+13. **Background transfer resilience** (native shells) — ✅ shipped.
+    `use-native-resilience.ts` subscribes to the transfer store and drives
+    the shells' keep-alive machinery on active↔idle transitions: Android
+    foreground service start/update/stop (with a 4 s terminal settle so the
+    final status lands) + keep-screen-awake, desktop tray status mirror.
+    The web build's hidden/frozen auto-pause is suppressed inside shells
+    (`isNativeShell()` guard) — the service keeps the process fully alive,
+    so pausing would fight a healthy DataChannel.
 
 # E. Ecosystem & Infrastructure — ⬜
 

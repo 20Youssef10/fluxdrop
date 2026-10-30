@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "FluxDrop main window — core (incl. event listen/emit for the fluxdrop://native channel). The shell's own commands (flux_*) are app-defined and not ACL-gated; every plugin is driven from Rust, not from the webview.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

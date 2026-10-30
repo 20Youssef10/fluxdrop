@@ -1,7 +1,7 @@
 'use client'
 
 import { useTheme } from 'next-themes'
-import { Moon, Sun, Settings, Wifi, WifiOff, Plus, Trash2, Server, User, Shield, ShieldCheck, ShieldAlert, HelpCircle, Bell, Volume2, BellOff, VolumeX, BadgeCheck, RotateCcw, Zap, Lock, Archive, SlidersHorizontal, Palette, Languages, Vibrate, Smartphone, PlayCircle, Timer } from 'lucide-react'
+import { Moon, Sun, Settings, Wifi, WifiOff, Plus, Trash2, Server, User, Shield, ShieldCheck, ShieldAlert, HelpCircle, Bell, Volume2, BellOff, VolumeX, BadgeCheck, RotateCcw, Zap, Lock, Archive, SlidersHorizontal, Palette, Languages, Vibrate, Smartphone, PlayCircle, Timer, Monitor, Globe } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -19,7 +19,7 @@ import { Switch } from '@/components/ui/switch'
 import { Slider } from '@/components/ui/slider'
 import { Separator } from '@/components/ui/separator'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useSyncExternalStore } from 'react'
 import { toast } from 'sonner'
 import { useSessionStore, type IceServerConfig } from '@/stores/session-store'
 import { useTransferStore } from '@/stores/transfer-store'
@@ -35,7 +35,39 @@ import { FAST_LANE_MAX, DISAPPEAR_TTL_CHOICES } from '@/lib/fluxdrop/protocol'
 import { hasDuressPin, setDuressPin, removeDuressPin } from '@/lib/fluxdrop/panic'
 import { LOCALES } from '@/lib/fluxdrop/i18n'
 import { useT } from '@/lib/fluxdrop/i18n'
+// v5-d12: native shell bridge — detection, tray/foreground-service state,
+// autostart + keep-awake controls for the Tauri/Capacitor shells (and sim).
+import {
+  getNativeShellInfo,
+  nativeSetAutostart,
+  nativeGetAutostart,
+  clearNativeShellOverride,
+  subscribeBridgeState,
+  getBridgeState,
+  type NativeShellInfo,
+  type NativeShellCapabilities,
+} from '@/lib/fluxdrop/native-bridge'
 import { FluxLogo, FluxWordmark } from './flux-logo'
+
+/** One-line human description for the Settings → Device shell card. */
+function describeShell(info: NativeShellInfo): string {
+  const sim = info.simulated ? ' (simulated)' : ''
+  if (info.kind === 'tauri') return `Desktop shell · ${info.platform}${sim} — tray, autostart, deep links, file associations.`
+  if (info.kind === 'capacitor') return `Mobile shell · ${info.platform}${sim} — share sheet, foreground service, keep-awake.`
+  return 'Browser tab — the desktop/Android shells add tray, share sheet and background transfers.'
+}
+
+const CAPABILITY_LABELS: Array<[keyof NativeShellCapabilities, string]> = [
+  ['tray', 'Tray'],
+  ['autostart', 'Autostart'],
+  ['deepLinks', 'fluxdrop:// links'],
+  ['shareTarget', 'Share target'],
+  ['shareOut', 'Share out'],
+  ['foregroundService', 'Foreground service'],
+  ['keepScreenAwake', 'Keep awake'],
+  ['openExternal', 'Open links'],
+  ['readFileChunk', 'Assoc file reads'],
+]
 
 export function FluxHeader({ onOpenSettings, onOpenHelp }: { onOpenSettings?: () => void; onOpenHelp?: () => void }) {
   const { theme, setTheme } = useTheme()
@@ -57,6 +89,12 @@ export function FluxHeader({ onOpenSettings, onOpenHelp }: { onOpenSettings?: ()
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setMounted(true)
   }, [])
+
+  // v5-d12: native shell chip (Tauri desktop / Capacitor Android). Subscribing
+  // to the sim pref keeps this live without a reload; a REAL shell (globals)
+  // always wins over the simulation. Gated on `mounted` for hydration safety.
+  const shellSimPref = usePrefsStore((s) => s.nativeShellSim)
+  const shellInfo = mounted ? getNativeShellInfo() : null
 
   return (
     <header className="sticky top-0 z-40 w-full border-b border-border/60 bg-background/80 backdrop-blur-xl">
@@ -127,6 +165,25 @@ export function FluxHeader({ onOpenSettings, onOpenHelp }: { onOpenSettings?: ()
               </>
             )}
           </Badge>
+
+          {/* v5-d12: native shell chip — mirrors which shell is live (or simulated). */}
+          {mounted && shellInfo && shellInfo.kind !== 'web' && (
+            <Badge
+              variant="outline"
+              title={describeShell(shellInfo)}
+              className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 border-flux-500/40 bg-flux-500/10 text-flux-700 dark:text-flux-300"
+            >
+              {shellInfo.kind === 'tauri' ? (
+                <Monitor className="h-3 w-3" aria-hidden />
+              ) : (
+                <Smartphone className="h-3 w-3" aria-hidden />
+              )}
+              <span className="text-[11px] font-medium">
+                {shellInfo.kind === 'tauri' ? 'Desktop app' : 'Android app'}
+                {shellInfo.simulated ? ' · sim' : ''}
+              </span>
+            </Badge>
+          )}
 
           <Button
             variant="ghost"
@@ -209,6 +266,41 @@ export function SettingsDialog({
   // v4: central prefs (accent, i18n, QoS, sounds, sync, a11y)
   const prefs = usePrefsStore()
   const t = useT()
+  // v5-d12: native shell card state — live detection + bridge activity.
+  // Detection is cheap/pure (globals + pref read), so it derives at render
+  // time; only the autostart round-trip needs async state. The bridge state
+  // is module-level (server-safe), so getServerSnapshot = getSnapshot.
+  const shellSim = usePrefsStore((s) => s.nativeShellSim)
+  const shellInfo = open ? getNativeShellInfo() : null
+  const [autostart, setAutostart] = useState<boolean | null>(null)
+  const bridge = useSyncExternalStore(subscribeBridgeState, getBridgeState, getBridgeState)
+  useEffect(() => {
+    if (!open) return
+    void nativeGetAutostart().then((v) => setAutostart(v))
+  }, [open, shellSim])
+  const handleAutostartToggle = async (on: boolean) => {
+    const v = await nativeSetAutostart(on)
+    setAutostart(v)
+    toast.success(v ? 'Autostart enabled' : 'Autostart disabled', {
+      description: shellInfo?.simulated
+        ? 'Simulated shell — the real toggle lives in the desktop app.'
+        : 'The app starts (hidden to tray) with your system.',
+    })
+  }
+  const handleSimSelect = (v: string) => {
+    const next = v === 'tauri' || v === 'capacitor' ? v : 'off'
+    // An explicit selection beats any ?shellSim= URL override for this session.
+    clearNativeShellOverride()
+    prefs.setNativeShellSim(next)
+    if (next === 'off') {
+      toast.info('Native shell simulation off', { description: 'Back to the plain web build.' })
+    } else {
+      toast.info(
+        next === 'tauri' ? 'Simulating the desktop (Tauri) shell' : 'Simulating the Android (Capacitor) shell',
+        { description: 'Watch the bridge calls at the bottom of this card while you transfer.' }
+      )
+    }
+  }
   const vaultBudgetMb = useSessionStore((s) => s.vaultBudgetMb)
   const setVaultBudgetMb = useSessionStore((s) => s.setVaultBudgetMb)
   const vaultOk = vaultSupported()
@@ -439,6 +531,156 @@ export function SettingsDialog({
                 A unique device ID is generated locally and stored in your browser.
                 It persists across sessions to identify you to peers.
               </span>
+            </div>
+
+            {/* v5-d12: native shell — detection, capabilities, lifecycle state,
+                autostart/keep-awake controls and the simulation selector. */}
+            <div className="rounded-lg border border-flux-500/30 bg-flux-500/5 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-flux-500/10 text-flux-600 dark:text-flux-400">
+                    {shellInfo?.kind === 'capacitor' ? (
+                      <Smartphone className="h-4.5 w-4.5" aria-hidden />
+                    ) : shellInfo?.kind === 'tauri' ? (
+                      <Monitor className="h-4.5 w-4.5" aria-hidden />
+                    ) : (
+                      <Globe className="h-4.5 w-4.5" aria-hidden />
+                    )}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium">Native shell</p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {shellInfo ? describeShell(shellInfo) : 'Detecting…'}
+                    </p>
+                  </div>
+                </div>
+                {shellInfo && shellInfo.kind !== 'web' && (
+                  <Badge
+                    variant="outline"
+                    className="shrink-0 border-flux-500/40 bg-flux-500/10 text-flux-700 dark:text-flux-300"
+                  >
+                    {shellInfo.kind === 'tauri' ? 'Tauri' : 'Capacitor'}
+                    {shellInfo.simulated ? ' · simulated' : ''}
+                  </Badge>
+                )}
+              </div>
+
+              {/* Capability matrix of the live (or simulated) shell */}
+              {shellInfo && shellInfo.kind !== 'web' && (
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {CAPABILITY_LABELS.map(([key, label]) => {
+                    const on = shellInfo.capabilities[key]
+                    return (
+                      <span
+                        key={key}
+                        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] ${
+                          on
+                            ? 'border-flux-500/40 bg-flux-500/10 text-flux-700 dark:text-flux-300'
+                            : 'border-border/60 bg-muted/40 text-muted-foreground opacity-70'
+                        }`}
+                        title={on ? 'Available in this shell' : 'Not applicable in this shell'}
+                      >
+                        {on ? '✓' : '–'} {label}
+                      </span>
+                    )
+                  })}
+                </div>
+              )}
+
+              {/* Live lifecycle line: Android foreground service / desktop tray */}
+              {shellInfo && shellInfo.kind !== 'web' && (
+                <div className="mt-3 flex items-center gap-2 rounded-md border border-border/60 bg-card/50 px-2.5 py-2 text-xs">
+                  <span className="relative flex h-2 w-2 shrink-0">
+                    {bridge.serviceRunning && (
+                      <span className="absolute inline-flex h-full w-full rounded-full bg-flux-500 opacity-75 flux-pulse-dot" />
+                    )}
+                    <span
+                      className={`relative inline-flex h-2 w-2 rounded-full ${
+                        bridge.serviceRunning ? 'bg-flux-500' : 'bg-muted-foreground/40'
+                      }`}
+                    />
+                  </span>
+                  <span className="truncate text-muted-foreground">
+                    {shellInfo.kind === 'capacitor' ? 'Foreground service' : 'Tray status'}:
+                    <span className="font-medium text-foreground">
+                      {' '}
+                      {bridge.serviceRunning ? bridge.lastStatus : 'idle'}
+                    </span>
+                  </span>
+                </div>
+              )}
+
+              {/* Autostart (desktop shell) */}
+              {shellInfo?.capabilities.autostart && (
+                <div className="mt-2 flex items-center justify-between rounded-lg border border-border/60 bg-card/40 p-2.5">
+                  <div className="min-w-0 pr-3">
+                    <p className="text-xs font-medium">Start with your computer</p>
+                    <p className="mt-0.5 text-[10px] text-muted-foreground">
+                      Launches hidden to the tray — transfers keep running when you close the window.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={autostart === true}
+                    disabled={autostart === null}
+                    onCheckedChange={handleAutostartToggle}
+                    aria-label="Toggle autostart"
+                    className="shrink-0"
+                  />
+                </div>
+              )}
+
+              {/* Keep screen awake (Android shell) */}
+              {shellInfo?.capabilities.keepScreenAwake && (
+                <div className="mt-2 flex items-center justify-between rounded-lg border border-border/60 bg-card/40 p-2.5">
+                  <div className="min-w-0 pr-3">
+                    <p className="text-xs font-medium">Keep screen on during transfers</p>
+                    <p className="mt-0.5 text-[10px] text-muted-foreground">
+                      The transfer itself survives a locked screen via the foreground service — this keeps the screen lit so you can watch it.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={prefs.keepAwakeDuringTransfers}
+                    onCheckedChange={prefs.setKeepAwakeDuringTransfers}
+                    aria-label="Toggle keep screen awake"
+                    className="shrink-0"
+                  />
+                </div>
+              )}
+
+              {/* Simulation selector (demo/testing) */}
+              <div className="mt-3 rounded-lg border border-border/60 bg-card/40 p-2.5">
+                <Label className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                  Simulate native shell
+                </Label>
+                <Select value={shellSim} onValueChange={handleSimSelect}>
+                  <SelectTrigger className="mt-1.5 h-8 text-xs" aria-label="Simulate native shell">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="off">Off — plain web</SelectItem>
+                    <SelectItem value="tauri">Desktop (Tauri)</SelectItem>
+                    <SelectItem value="capacitor">Android (Capacitor)</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="mt-1.5 text-[10px] leading-relaxed text-muted-foreground">
+                  Demo &amp; testing: mirrors the chosen shell&apos;s capabilities in this browser — bridge calls are logged below. A real installed shell always wins over the simulation.
+                </p>
+              </div>
+
+              {/* Recent bridge calls (transparency + E2E anchor) */}
+              {bridge.calls.length > 0 && (
+                <div className="mt-3 max-h-24 overflow-y-auto flux-scroll rounded-md border border-border/60 bg-muted/30 px-2.5 py-2 font-mono text-[10px] leading-relaxed text-muted-foreground">
+                  {bridge.calls
+                    .slice(-3)
+                    .reverse()
+                    .map((c) => (
+                      <p key={c.at} className="truncate">
+                        ▸ {c.op}
+                        {c.detail ? ` — ${c.detail}` : ''}
+                      </p>
+                    ))}
+                </div>
+              )}
             </div>
           </TabsContent>
 

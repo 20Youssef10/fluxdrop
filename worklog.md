@@ -2139,3 +2139,44 @@ Pull: library browser rendered all 3 files; single-file request; sender console 
 
 ## Commit
 About to commit as feat v5-c; push to origin/main as 20Youssef10 (ShinZero) <youssef2010.mahmoud@gmail.com>.
+
+---
+Task ID: feat-v5-d
+Agent: Z.ai Code (Section D: Platform & Distribution)
+Task: Implement FEATURES-v5.md section D — D12 ship the shells (Tauri desktop + Capacitor Android), D13 background transfer resilience.
+
+## What shipped
+
+### D12 — Ship the shells
+- **Web-side native bridge** (`src/lib/fluxdrop/native-bridge.ts`, no npm deps — probes `window.__TAURI__` / `window.Capacitor`):
+  sync `getNativeShellInfo()` (kind/platform/capability matrix), `nativeTransferStatus(active, text)` (Android FGS / desktop tray), `nativeSetAutostart`/`nativeGetAutostart`, `nativeKeepScreenAwake` (Android flag / webview wake lock), `nativeOpenExternal` (http(s)-only), `nativeReadFileChunk` (Tauri file-assoc reads), unified `onNativeEvent` (deep-link / open-files) + `resolveNativeEventFiles` (chunk reads / convertFileSrc / sim bytes), observable `subscribeBridgeState` for the Settings card. Every op is a no-op on the plain web build.
+- **Simulation mode**: `?shellSim=tauri|capacitor` URL override (session-long, yields to an explicit Settings selection) or the `nativeShellSim` pref; `window.__fluxdropSim` test hooks (deepLink / openFiles / autostart). This is how the whole surface is E2E-verified in a browser.
+- **One deep-link parser** (`src/lib/fluxdrop/deep-links.ts`): web `#claim=`/`#join=` hashes AND `fluxdrop://join|claim|open?room=&pin=` — page.tsx's hash handler refactored onto it; native events route through the exact same arming paths (claim → sender + pendingClaim banner; join → receiver + startReceive; open-files → sender queue with dedupe/toasts, same as Web Share Target).
+- **Desktop (Tauri 2) — complete Rust project** (`src-tauri/`): Cargo.toml/build.rs/main.rs/lib.rs + capabilities + committed icons (PNG 32/128/256/512, PNG-embedded ICO, PNG-payload ICNS — `file(1)`-verified, regenerated via `scripts/gen-shell-icons.mjs`). Tray (Show / live status item / Quit, tooltip mirrors transfer state), close→hide-to-tray, single-instance argv forwarding, deep-link plugin + `register_all`, autostart (`--hidden` launch), file associations (images/video/docs + `.fluxdrop` room-link files whose tiny text content is a fluxdrop:// URL), `flux_read_file_chunk` with a Rust-side READ ALLOWLIST (only paths the OS handed the app; 4 MiB max chunks), `flux_open_external` (http(s) only).
+- **Android (Capacitor) — complete plugin** (`src-capacitor/plugin`): FluxDropPlugin.kt (getShellInfo, start/stopTransferService, keepScreenAwake, openExternal, shareFiles via FileProvider) + ForegroundTransferService.kt (dataSync FGS, partial wake lock, channel, notification status line) + plugin manifest (FGS/WAKE_LOCK/POST_NOTIFICATIONS permissions, service, FileProvider + xml paths) + app intent-filter snippets (fluxdrop:// VIEW + ACTION_SEND/SEND_MULTIPLE share target) + README walkthrough. Share-sheet streams are stashed to cache with a 24 h sweep; cold-start intents replay via retained notifyListeners.
+- **UI**: header native-shell chip (Desktop app / Android app · sim, pref-subscribed, hydration-safe) + Settings → Device "Native shell" card (badge, capability chips, live FGS/Tray line, autostart + keep-awake switches, simulation Select, bridge-call log via useSyncExternalStore).
+- Prefs: `nativeShellSim` + `keepAwakeDuringTransfers`.
+
+### D13 — Background transfer resilience
+- `use-native-resilience.ts`: subscribes the transfer store; active↔idle transitions drive `nativeTransferStatus` (start/update/stop with a 4 s terminal settle so "Transfer complete" lands before Idle) + `keepScreenAwake` (pref-gated). Mounted once from page.tsx; re-arms when the sim pref changes.
+- `use-background-resilience.ts`: hidden/frozen auto-pause now suppressed when `isNativeShell()` — the FGS/tray keeps the process alive, so pausing would fight a healthy DataChannel.
+
+## Real bugs found & fixed during E2E
+1. **`useSyncExternalStore` without getServerSnapshot** → SSR 500 on every page load (SettingsDialog renders on the server even when closed). Fixed: `useSyncExternalStore(subscribe, get, get)` — the bridge state is module-level and server-safe.
+2. **`?shellSim=` URL cleaning raced Next's router** (replaceState stripped the query, the router restored it) — dropped the replaceState; the param now stays visible (honest) and is session-long until an explicit Settings selection (`clearNativeShellOverride()`).
+3. Script-level (not product): agent-browser eval returns JSON-quoted strings — polling comparisons must `tr -d '"'`; arrow-function evals missing the trailing `()` serialize as `{}`; Radix Select needs real keyboard events (ArrowDown → Home → ArrowDown → Enter) — synthetic pointer volleys are unreliable.
+
+## E2E verification (agent-browser, two sessions via :81 gateway — one run, all green)
+- Transfer regression through the new wiring: plain-web sender → sim-Capacitor receiver → `Transfer complete`, d-file.txt arrived, `SHA-256 verified`, Done button; plain-web session: NO native chip, Device card shows "Browser tab", no FGS/Tray lines.
+- D13 lifecycle verbatim (receiver console): `keepScreenAwake(true)` → `transfersActive(true) — "Reading manifest…"` → `"Receiving files…"` → `"Verifying checksums…"` → `"Transfer complete"` → `keepScreenAwake(false)` → `transfersActive(false) — "Idle"`.
+- D12 deep links: `fluxdrop://claim?room=KIOSKQ1&pin=4321` sim → "Sending to kiosk KIOSKQ1" banner + "Kiosk room linked" toast (parser: 15/15 unit checks).
+- D12 share sheet: sim openFiles → "Added 1 shared file" toast + d-shared.txt queued ("1 file ·").
+- Shell card (Settings → Device): "Capacitor · simulated" badge, capability chips, "Foreground service:" line, calls log incl. `transfersActive(true)`, simulation Select present. Sim → Tauri via the real Radix Select → header chip "Desktop app · sim", "Tray status:" line, autostart row; autostart toggle → `__fluxdropSim.autostart() === true`, "Autostart enabled" toast, call logged.
+- Honest limit: no cargo/gradle/Android SDK in the sandbox — the Rust/Kotlin sources are template-faithful and complete but were not compiled here (documented in src-tauri/README.md + src-capacitor/README.md).
+
+## Quality gates
+- `bun run lint` exit 0; `bunx tsc --noEmit` clean; deep-links parser 15/15 unit checks; icons verified with `file(1)` (MS Windows icon resource / Mac OS X icns).
+- `src-capacitor` added to tsconfig excludes (like cli/sdk/src-tauri); `.gitignore` gains `src-tauri/target|gen` + plugin dist.
+
+## Commit
+About to commit as feat v5-d; push to origin/main as 20Youssef10 (ShinZero) <youssef2010.mahmoud@gmail.com>.

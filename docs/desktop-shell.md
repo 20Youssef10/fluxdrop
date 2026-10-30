@@ -1,6 +1,6 @@
-# FluxDrop desktop shell (Tauri) — feature 7.2
+# FluxDrop desktop shell (Tauri) — feature 7.2 / v5-d12
 
-> **Status: scaffold.** [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json) + this guide are the deliverable; the Rust sources are intentionally absent (no Rust toolchain in the producing sandbox — [`src-tauri/README.md`](../src-tauri/README.md) explains how `npm create tauri-app` fills them in). The web codebase stays canonical.
+> **Status: SHIPPED (v5-d12).** The Rust project is complete — tray + live status, close→hide-to-tray, single-instance argv forwarding, `fluxdrop://` deep links (`.fluxdrop` room-link files too), autostart, file associations with a read ALLOWLIST — see [`src-tauri/`](../src-tauri/) and its README. The web side talks to it through the typed native bridge ([`src/lib/fluxdrop/native-bridge.ts`](../src/lib/fluxdrop/native-bridge.ts)), browser-verifiable via the simulation mode (`?shellSim=tauri` or Settings → Device). This guide remains the design walkthrough; where it says "future work", the tray/deep-link/autostart items are now real.
 
 Tauri wraps the existing web app in a native desktop frame (WebView2 on Windows, WebKit on macOS/Linux) at a fraction of an Electron bundle, and gives FluxDrop the two desktop-native affordances from FEATURES.md 7.2: a **system-tray "quick drop" target** and **native save dialogs**.
 

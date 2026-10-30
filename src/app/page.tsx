@@ -32,6 +32,7 @@ import { NearbyDevices } from '@/components/fluxdrop/nearby-devices'
 import { I18nProvider } from '@/lib/fluxdrop/i18n'
 import { applyPersistedPrefs } from '@/lib/fluxdrop/prefs'
 import { useBackgroundResilience } from '@/hooks/fluxdrop/use-background-resilience'
+import { useNativeResilience } from '@/hooks/fluxdrop/use-native-resilience'
 import { onClipboardSync } from '@/lib/fluxdrop/clipboard-sync'
 import { useFluxDrop } from '@/hooks/fluxdrop/use-fluxdrop'
 import { useKeyboardShortcuts } from '@/hooks/fluxdrop/use-keyboard-shortcuts'
@@ -43,6 +44,10 @@ import { toast } from 'sonner'
 import { getSenderFiles, type StoredTransfer } from '@/lib/fluxdrop/resume'
 import { formatBytes } from '@/lib/fluxdrop/format'
 import type { TransferManifest } from '@/lib/fluxdrop/protocol'
+// v5-d12: native shell bridge — deep links (fluxdrop://) + OS share-sheet /
+// file-association opens, routed through the same arming paths as the web.
+import { parseFluxLink } from '@/lib/fluxdrop/deep-links'
+import { onNativeEvent, resolveNativeEventFiles } from '@/lib/fluxdrop/native-bridge'
 
 export default function Home() {
   const flux = useFluxDrop()
@@ -62,6 +67,8 @@ export default function Home() {
   // Deep-link parsing: #join=ROOM&pin=PIN auto-switches to receiver mode;
   // v5-c7: #claim=ROOM&pin=PIN (kiosk QRs) switches to SENDER mode and arms
   // the pre-created room claim — pick files and the room is claimed.
+  // v5-d12: the shapes are parsed by the shared deep-links module so the
+  // fluxdrop:// scheme (native shells) and the web hashes stay in lockstep.
   // Handles BOTH a full page load and hash-only navigation (hashchange), and
   // each distinct link is handled exactly once. startReceive waits for the
   // signaling socket internally, so no fixed delay is needed here.
@@ -71,29 +78,23 @@ export default function Home() {
       if (typeof window === 'undefined') return
       const hash = window.location.hash
       if (!hash) return
-      const claimMatch = hash.match(/claim=([A-Za-z0-9]+)&pin=(\d+)/)
-      if (claimMatch) {
-        if (deepLinkHandled.current === hash) return
-        deepLinkHandled.current = hash
-        const [, roomCode, pin] = claimMatch
-        window.history.replaceState(null, '', window.location.pathname + window.location.search)
+      const link = parseFluxLink(hash)
+      if (!link || link.kind === 'open') return
+      if (deepLinkHandled.current === hash) return
+      deepLinkHandled.current = hash
+      window.history.replaceState(null, '', window.location.pathname + window.location.search)
+      if (link.kind === 'claim') {
         setView('sender')
-        setPendingClaim({ roomCode, pin })
+        setPendingClaim({ roomCode: link.roomCode, pin: link.pin })
         toast.info('Kiosk room linked', {
-          description: `Pick files and press Send — they land on the kiosk (room ${roomCode}).`,
+          description: `Pick files and press Send — they land on the kiosk (room ${link.roomCode}).`,
         })
         return
       }
-      const match = hash.match(/join=([A-Za-z0-9]+)&pin=(\d+)/)
-      if (!match) return
-      if (deepLinkHandled.current === hash) return
-      deepLinkHandled.current = hash
-      const [, roomId, pin] = match
       // Clean the hash so a reload doesn't re-join a (probably expired) room.
-      window.history.replaceState(null, '', window.location.pathname + window.location.search)
       setView('receiver')
-      void fluxApi.startReceive(roomId, pin)
-      toast.info('Joining room from link…', { description: `Room ${roomId}` })
+      void fluxApi.startReceive(link.roomCode, link.pin)
+      toast.info('Joining room from link…', { description: `Room ${link.roomCode}` })
     },
     [setView]
   )
@@ -103,6 +104,52 @@ export default function Home() {
     window.addEventListener('hashchange', onHashChange)
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [flux, handleDeepLink])
+
+  // v5-d12: native shell events — fluxdrop:// deep links (Tauri deep-link
+  // plugin / Android intent filter) and OS share-sheet & file-association
+  // opens. Deep links route through the exact same arming logic as the web
+  // hashes above; shared files land in the sender queue exactly like the
+  // Web Share Target flow below.
+  useEffect(() => {
+    const un = onNativeEvent((ev) => {
+      if (ev.type === 'deep-link') {
+        const link = parseFluxLink(ev.url)
+        if (!link || link.kind === 'open') return
+        if (link.kind === 'claim') {
+          setView('sender')
+          setPendingClaim({ roomCode: link.roomCode, pin: link.pin })
+          toast.info('Kiosk room linked', {
+            description: `Deep link armed room ${link.roomCode} — pick files and press Send.`,
+          })
+        } else {
+          setView('receiver')
+          void flux.startReceive(link.roomCode, link.pin)
+          toast.info('Joining room from link…', { description: `Room ${link.roomCode}` })
+        }
+        return
+      }
+      // open-files: the OS handed us files (share sheet / "open with").
+      void resolveNativeEventFiles(ev)
+        .then((incoming) => {
+          if (incoming.length === 0) return
+          setFiles((prev) => {
+            const seen = new Set(prev.map((x) => `${x.name}:${x.size}`))
+            const fresh = incoming.filter((f) => !seen.has(`${f.name}:${f.size}`))
+            if (fresh.length === 0) {
+              toast.info('Already in the queue', { description: incoming[0]?.name })
+              return prev
+            }
+            toast.success(`Added ${fresh.length} shared file${fresh.length > 1 ? 's' : ''}`, {
+              description: `${fresh.map((f) => f.name).join(', ').slice(0, 100)} · ${formatBytes(fresh.reduce((n, f) => n + f.size, 0))}`,
+            })
+            return [...prev, ...fresh]
+          })
+          setView('sender')
+        })
+        .catch(() => toast.error('Could not read shared files'))
+    })
+    return un
+  }, [flux, setView])
 
   // Web Share Target ingestion: the service worker receives the OS share-sheet
   // POST /share-target, stashes the payload in IndexedDB and redirects here
@@ -216,6 +263,10 @@ export default function Home() {
     flux.resumeTransfer,
     () => toast.info('Transfer resumed', { description: 'Welcome back — continuing where we left off.' })
   )
+
+  // v5-d13: native-shell resilience — drives the Android foreground transfer
+  // service / desktop tray status from the transfer lifecycle. No-op on web.
+  useNativeResilience()
 
   // v4: external openers (command palette) for the dialogs the page owns.
   useEffect(() => {

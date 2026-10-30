@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  v5-d12/d13: FluxDropShell plugin manifest. Everything here MERGES into the
+  app's manifest automatically on `npx cap sync android`:
+    • FGS permissions (incl. dataSync for API 34+), WAKE_LOCK, POST_NOTIFICATIONS
+    • the ForegroundTransferService (dataSync type)
+    • a FileProvider for shareFiles (ACTION_SEND out)
+  The deep-link + share-target intent filters live on the APP's launcher
+  activity — see ../android-app-manifest-snippets.xml.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application>
+        <service
+            android:name="app.fluxdrop.plugin.ForegroundTransferService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fluxdrop.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/fluxdrop_file_paths" />
+        </provider>
+    </application>
+</manifest>

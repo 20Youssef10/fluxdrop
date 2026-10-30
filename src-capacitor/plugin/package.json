@@ -1,0 +1,29 @@
+{
+  "name": "@fluxdrop/capacitor-plugin",
+  "version": "0.1.0",
+  "description": "FluxDrop Android shell bridge: foreground transfer service (wake lock), share sheet in/out, fluxdrop:// deep links, keep-screen-awake",
+  "main": "index.ts",
+  "types": "definitions.ts",
+  "files": [
+    "android/",
+    "definitions.ts",
+    "index.ts",
+    "web.ts"
+  ],
+  "keywords": [
+    "capacitor",
+    "plugin",
+    "android",
+    "fluxdrop",
+    "webrtc",
+    "file-transfer"
+  ],
+  "capacitor": {
+    "android": {
+      "src": "android"
+    }
+  },
+  "peerDependencies": {
+    "@capacitor/core": "^6.0.0 || ^7.0.0"
+  }
+}

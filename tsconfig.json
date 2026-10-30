@@ -47,6 +47,7 @@
     "docs",
     "cli",
     "sdk",
-    "src-tauri"
+    "src-tauri",
+    "src-capacitor"
   ]
 }

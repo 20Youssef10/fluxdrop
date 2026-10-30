@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider scopes for FluxDropPlugin.shareFiles (share OUT via the OS
+     share sheet) and for handing stashed share-target copies to other apps. -->
+<paths>
+    <cache-path name="fluxdrop_shared" path="fluxdrop-shared/" />
+    <cache-path name="cache" path="." />
+    <files-path name="files" path="." />
+    <external-files-path name="external_files" path="." />
+    <external-path name="external" path="." />
+</paths>

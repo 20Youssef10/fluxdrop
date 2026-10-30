@@ -1,0 +1,33 @@
+[package]
+name = "fluxdrop"
+version = "0.1.0"
+description = "FluxDrop desktop shell — tray, deep links, autostart, file associations, background transfers"
+authors = ["20Youssef10 (ShinZero) <youssef2010.mahmoud@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/20Youssef10/fluxdrop"
+edition = "2021"
+rust-version = "1.77.2"
+
+# The `lib` name is referenced by MAIN_THREAD_WAKER / mobile entry glue —
+# keep it in sync with src/main.rs.
+[lib]
+name = "fluxdrop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-deep-link = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-opener = "2"
+serde_json = "1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

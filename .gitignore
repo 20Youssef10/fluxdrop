@@ -63,3 +63,8 @@ server.log
 /agent-ctx/
 /examples/
 /download/
+
+# Native shell build artifacts (src-tauri/ + src-capacitor/ sources ARE tracked)
+/src-tauri/target/
+/src-tauri/gen/
+/src-capacitor/plugin/dist/

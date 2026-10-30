@@ -1,6 +1,6 @@
-# FluxDrop mobile shells (Capacitor) — feature 7.1
+# FluxDrop mobile shells (Capacitor) — feature 7.1 / v5-d12+d13
 
-> **Status: scaffold.** The repo ships [`capacitor.config.ts`](../capacitor.config.ts) + this guide. No dependencies are installed and no native project is generated — the web codebase stays canonical (FEATURES.md 7.1) and everything below is a walkthrough for when you pick this up on a machine with the native toolchains.
+> **Status: SHIPPED for Android (v5-d12/d13).** [`src-capacitor/plugin`](../src-capacitor/) is a complete Capacitor plugin: FluxDropShell (foreground transfer service with a partial wake lock — transfers survive a locked screen — share-sheet in/out, `fluxdrop://` intent deep links, keep-screen-awake). Build walkthrough: [`src-capacitor/README.md`](../src-capacitor/README.md). The web side talks through [`src/lib/fluxdrop/native-bridge.ts`](../src/lib/fluxdrop/native-bridge.ts) (browser-verifiable via `?shellSim=capacitor`). This guide remains the background/design doc.
 
 FluxDrop's mobile story is deliberately boring: the app is already an installable PWA (Web Share Target, offline shell, service worker at `public/sw.js`). Capacitor wraps that same web codebase into store-distributable APKs/IPAs and gives it the two things a PWA can't do — **OS share-sheet entry everywhere** and **keep-awake/background notifications during transfer**.
 

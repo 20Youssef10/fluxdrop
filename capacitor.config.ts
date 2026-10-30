@@ -1,8 +1,10 @@
-// Capacitor configuration for the FluxDrop mobile shells (feature 7.1).
+// Capacitor configuration for the FluxDrop mobile shell (feature 7.1 / v5-d12).
 //
 // This file ALREADY satisfies `npx cap init` — no interactive init is needed;
 // after installing the CLI + platform packages you can run `npx cap add android`
-// / `npx cap add ios` directly. Full walkthrough: docs/mobile-shell.md.
+// / `npx cap add ios` directly. Full walkthrough: src-capacitor/README.md
+// (the FluxDropShell plugin lives in src-capacitor/plugin — install it with
+// `bun add file:./src-capacitor/plugin`, then `bunx cap sync android`).
 //
 // Strategy in one line: the web codebase stays canonical — the native shell
 // points at the SAME PWA assets (`webDir: 'public'`) or, the pragmatic

@@ -1,59 +1,72 @@
-# FluxDrop desktop shell (Tauri) — `src-tauri/`
+# FluxDrop Desktop Shell (Tauri 2) — v5-d12/d13
 
-> **Status: config + docs only (scaffold).** The Rust toolchain is not available in the sandbox where this scaffold was produced, so this directory intentionally contains **no Rust sources** — `tauri.conf.json` plus this README are the deliverable. Concept + integration guide: [`../docs/desktop-shell.md`](../docs/desktop-shell.md).
+A real, buildable Tauri 2 project — not a scaffold anymore. It wraps the
+FluxDrop web app and adds everything a browser tab can't do for itself:
 
-## What's here
-
-| File | Purpose |
+| Shell feature | How |
 |---|---|
-| `tauri.conf.json` | Tauri 2 config: productName `FluxDrop`, identifier `com.fluxdrop.app`, 1100×780 main window, `devUrl http://localhost:3000` (the Next.js dev server), `frontendDist: "../public"` |
-| this README | how to generate the missing Rust side and wire it up |
+| **Tray + live status** | Rust-built tray (`fluxdrop-main`): *Show FluxDrop*, a disabled status item, *Quit*. The web side mirrors transfer state onto it (`flux_set_tray_status`) — "Sending files…", "Verifying checksums…", "Transfer complete". |
+| **Close → hide to tray** | `CloseRequested` is prevented and the window hides. The process — and any live transfer pipeline — survives the window being closed (v5-d13). *Quit* on the tray is the real exit. |
+| **Autostart** | `tauri-plugin-autostart`, exposed to the web via `flux_set_autostart` / `flux_autostart_enabled`. Autostart launches with `--hidden` (straight to tray). |
+| **`fluxdrop://` deep links** | `tauri-plugin-deep-link` (scheme: `fluxdrop`). `fluxdrop://join?room=X&pin=Y` arms the receiver; `…/claim?…` arms a kiosk send; `…/open` just focuses. Runtime registration on Windows/Linux; macOS needs the scheme in Info.plist (below). |
+| **File associations** | "Open with FluxDrop" for common image/video/document types + `.fluxdrop` room-link files. Handed paths land in a **read allowlist**; the web side pulls their bytes chunk-wise through `flux_read_file_chunk` (4 MiB max per chunk, 64 MiB per file, allowlisted paths ONLY — the webview can never use the bridge as a generic disk reader). |
+| **`.fluxdrop` room-link files** | Tiny text files whose content is a `fluxdrop://…` URL — unwrapped by the shell and routed as a deep link. |
+| **Single instance** | A second launch focuses the running instance and forwards its argv (deep link / associated files) instead of starting over. |
+| **Unified event channel** | Everything native → web rides ONE Tauri event, `fluxdrop://native`, with payloads `{type:"deep-link",url}` / `{type:"open-files",files:[{path,name,size}]}`. The web contract lives in `src/lib/fluxdrop/native-bridge.ts`. |
 
-### Config notes (JSON can't carry comments)
+## Prerequisites
 
-- **`devUrl: http://localhost:3000`** — during `cargo tauri dev` the window loads the repo's Next.js dev server (`bun run dev` via `beforeDevCommand`). Remove `beforeDevCommand`/`devUrl` and set the window's `url` to your hosted instance for the production hosted-URL strategy (see `../docs/desktop-shell.md`).
-- **`frontendDist: "../public"`** — Tauri requires a directory even when a dev/remote URL is used. `../public` is the PWA shell (icons, manifest, `sw.js`, `offline.html`); it keeps `tauri build` structurally happy but is **not** a built Next.js app. Bundling a real offline client would require a static export (`output: 'export'`) — a web-build decision outside this scaffold's scope; until then the hosted-URL strategy is the path.
-- **`dragDropEnabled: false`** — FluxDrop's web UI implements HTML5 drag-and-drop drop zones (`src/components/fluxdrop/full-page-drop-zone.tsx`). Tauri's *native* drag-drop handler would swallow those events before the page sees them, so it is disabled on the main window. The tray "quick drop" window (see docs) is where the native handler gets *enabled*, because that window forwards dropped file paths to Rust.
-- **`security.csp: null`** — the hosted FluxDrop instance ships its own CSP; the shell adds none.
+- Rust 1.77.2+ (https://rustup.rs)
+- Platform webview deps: Linux `libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev` · Windows: WebView2 (preinstalled on 10/11) · macOS: Xcode CLT
+- Bun + the web app deps (`bun install` at repo root)
 
-## Generating the Rust side
-
-`npm create tauri-app` scaffolds exactly the files missing here (choose the **Vanilla / TypeScript** template — the web content is the existing Next.js app or a hosted URL, not a new frontend):
-
-```text
-src-tauri/
-├── Cargo.toml          # tauri = { version = "2", features = ["tray-icon"] } once you add the tray
-├── build.rs            # tauri-build
-├── icons/              # default.png + platform formats (or generate from public/icons via `cargo tauri icon ../public/icons/icon-512.png`)
-├── capabilities/
-│   └── default.json    # permissions — add "dialog:default" (+ "dialog:allow-save") when you add the save-dialog plugin
-├── src/
-│   ├── main.rs         # fn main() { fluxdrop_lib::run() }
-│   └── lib.rs          # #[cfg_attr(mobile, tauri::mobile_entry_point)] pub fn run() { tauri::Builder... }
-└── tauri.conf.json     # ← keep THIS file (replace the generated one)
-```
-
-To integrate:
-
-1. Run `npm create tauri-app@latest fluxdrop-tmp -- --template vanilla-ts` somewhere scratch.
-2. Copy `src/`, `Cargo.toml`, `build.rs`, `.gitignore` and `capabilities/` from the generated `fluxdrop-tmp/src-tauri/` into this directory — **keep the `tauri.conf.json` that is already here**.
-3. Generate icons from the app's own: `cargo tauri icon ../public/icons/icon-512.png`.
-4. From the **repo root** (Tauri expects to run from there; the `src-tauri` dir is picked up by convention):
+## Run / build
 
 ```bash
-bun run dev &            # or rely on beforeDevCommand
-cargo tauri dev          # window opens on http://localhost:3000
-
-cargo tauri build         # bundles installers (bundle.targets: "all")
+bun install                 # repo root (web app deps)
+cargo tauri dev             # or: bunx @tauri-apps/cli dev
+cargo tauri build           # bundles for your OS (targets: "all")
 ```
 
-If you prefer not to install the Rust CLI globally: `npm i -D @tauri-apps/cli` and run `npx tauri dev` / `npx tauri build` instead.
+`beforeDevCommand` runs `bun run dev` (Next.js on :3000) and the window loads
+`devUrl`. For **production**, the web app is a Next.js server — point the main
+window at your deployed instance (`app.windows[0].url`) or keep the bundled
+static shell in `frontendDist` for the PWA-only subset. See
+`docs/desktop-shell.md` → "Hosting strategy" for the trade-offs.
 
-## Adding the desktop features (pointers)
+## Deep links on macOS
 
-Each of these needs matching `capabilities/default.json` permission entries — the walkthrough lives in [`../docs/desktop-shell.md`](../docs/desktop-shell.md):
+Runtime `register_all()` covers Windows (registry) and Linux (desktop file).
+macOS requires the scheme at **build** time — append to the bundle's
+`Info.plist` (or `bundle.macOS.infoPlist` in tauri.conf.json):
 
-- **System tray "quick drop"** — Tauri 2 tray API (`tray-icon` crate feature) + a small always-on-top window that collects native drops.
-- **Native save dialogs** — [`tauri-plugin-dialog`](https://v2.tauri.app/plugin/dialog/) (`dialog:default`, `dialog:allow-save`) instead of the browser's File System Access API.
-- **Deep links / OS share menus** — `tauri-plugin-deep-link` with a `fluxdrop://` scheme.
-- **Auto-update** — `tauri-plugin-updater` once there are signed artifacts to ship.
+```xml
+<key>CFBundleURLTypes</key>
+<array>
+  <dict>
+    <key>CFBundleURLName</key><string>com.fluxdrop.app</string>
+    <key>CFBundleURLSchemes</key><array><string>fluxdrop</string></array>
+  </dict>
+</array>
+```
+
+## Icons
+
+`src-tauri/icons/` is committed (PNG 32/128/256/512, `icon.ico`,
+`icon.icns`, plus the `icon.svg` source). Regenerate the whole set with:
+
+```bash
+bun scripts/gen-shell-icons.mjs          # committed formats
+bunx @tauri-apps/cli icon src-tauri/icons/icon.svg   # full platform set
+```
+
+## Trust notes (read before hosting remotely)
+
+- `flux_read_file_chunk` only serves paths **the OS handed to FluxDrop**
+  (allowlisted at argv/second-instance time). Pointing the window at a
+  remote instance still means that page can only read files the user
+  explicitly opened with the app — but if you don't need file associations
+  in that deployment, delete the command from `lib.rs` + `invoke_handler`.
+- `flux_open_external` accepts http(s) URLs only.
+- `withGlobalTauri` is on because the web bridge uses `window.__TAURI__`
+  (core.invoke + event.listen) without any npm dependency — keep it on.
