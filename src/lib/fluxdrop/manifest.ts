@@ -1,7 +1,7 @@
 // Manifest creation and parsing for FluxDrop transfers.
 
 import type { FileManifestEntry, TransferManifest } from './protocol'
-import { CONSTANTS, DELTA_MIN_FILE_BYTES } from './protocol'
+import { CONSTANTS, DELTA_MIN_FILE_BYTES, DISAPPEAR_TTL_CHOICES } from './protocol'
 import { computeTotalChunks } from './format'
 import { hashFile } from './checksum'
 // v5-a4: pooled hashing — one file per free worker, round-robin over the pool.
@@ -126,6 +126,12 @@ export async function buildManifest(
   }))
 
   const now = Date.now()
+  // v5-b1: sender-requested vault retention. Validated against the fixed
+  // choice list so a corrupted pref can never smuggle an arbitrary TTL.
+  const ttlMinutes = usePrefsStore.getState().disappearTtlMinutes
+  const ttlMs = (DISAPPEAR_TTL_CHOICES as readonly number[]).includes(ttlMinutes) && ttlMinutes > 0
+    ? ttlMinutes * 60_000
+    : undefined
   return {
     transferId: randomUUID(),
     version: 1,
@@ -136,6 +142,7 @@ export async function buildManifest(
     createdAt: now,
     expiresAt: now + CONSTANTS.RESUME_RECORD_TTL_MS,
     ...(wireCompression ? { compression: wireCompression } : {}),
+    ...(ttlMs ? { ttlMs } : {}),
   }
 }
 

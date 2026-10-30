@@ -1,7 +1,7 @@
 'use client'
 
 import { useTheme } from 'next-themes'
-import { Moon, Sun, Settings, Wifi, WifiOff, Plus, Trash2, Server, User, Shield, ShieldCheck, HelpCircle, Bell, Volume2, BellOff, VolumeX, BadgeCheck, RotateCcw, Zap, Lock, Archive, SlidersHorizontal, Palette, Languages, Vibrate, Smartphone, PlayCircle, Timer } from 'lucide-react'
+import { Moon, Sun, Settings, Wifi, WifiOff, Plus, Trash2, Server, User, Shield, ShieldCheck, ShieldAlert, HelpCircle, Bell, Volume2, BellOff, VolumeX, BadgeCheck, RotateCcw, Zap, Lock, Archive, SlidersHorizontal, Palette, Languages, Vibrate, Smartphone, PlayCircle, Timer } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -30,7 +30,9 @@ import { listVault, deleteVaultEntry, vaultSupported, enforceVaultBudget } from 
 import { formatBytes } from '@/lib/fluxdrop/format'
 import { usePrefsStore, ACCENTS, type AccentId, type LocaleId, type SoundPack } from '@/lib/fluxdrop/prefs'
 // v5-a1: caps the fast-lane segmented control (1..4).
-import { FAST_LANE_MAX } from '@/lib/fluxdrop/protocol'
+import { FAST_LANE_MAX, DISAPPEAR_TTL_CHOICES } from '@/lib/fluxdrop/protocol'
+// v5-b2: panic mode — duress PIN arming + wipe.
+import { hasDuressPin, setDuressPin, removeDuressPin } from '@/lib/fluxdrop/panic'
 import { LOCALES } from '@/lib/fluxdrop/i18n'
 import { useT } from '@/lib/fluxdrop/i18n'
 import { FluxLogo, FluxWordmark } from './flux-logo'
@@ -242,6 +244,11 @@ export function SettingsDialog({
   }
   const [notifPermission, setNotifPermission] = useState<NotificationPermission | 'unsupported'>('default')
   const [trustedList, setTrustedList] = useState<TrustedPeer[]>([])
+  // v5-b2: duress PIN draft + armed state (Privacy tab).
+  const [duressArmed, setDuressArmed] = useState(false)
+  const [duressDraft, setDuressDraft] = useState('')
+  const [duressConfirm, setDuressConfirm] = useState('')
+  const [showDuressSetup, setShowDuressSetup] = useState(false)
 
   const [draft, setDraft] = useState(alias)
   const [iceDraft, setIceDraft] = useState<IceServerConfig[]>([])
@@ -264,10 +271,38 @@ export function SettingsDialog({
       setNotifPermission('unsupported')
     }
     setTrustedList(getTrustedPeers())
+    setDuressArmed(hasDuressPin())
+    setShowDuressSetup(false)
+    setDuressDraft('')
+    setDuressConfirm('')
     if (vaultSupported()) {
       void refreshVaultUsage()
     }
   }, [open, alias, customIceServers, useCustomIce, refreshVaultUsage])
+
+  // v5-b2: arm / re-arm the duress PIN from the draft pair.
+  const handleDuressSave = () => {
+    if (duressDraft !== duressConfirm) {
+      toast.error('The two PINs do not match')
+      return
+    }
+    if (setDuressPin(duressDraft)) {
+      setDuressArmed(true)
+      setShowDuressSetup(false)
+      setDuressDraft('')
+      setDuressConfirm('')
+      toast.success('Panic mode armed', {
+        description: 'Entering that PIN anywhere a room PIN is asked silently wipes history, vault and caches, then refuses the pairing.',
+      })
+    } else {
+      toast.error('Invalid panic PIN', { description: 'Use 4–12 digits, digits only.' })
+    }
+  }
+  const handleDuressRemove = () => {
+    removeDuressPin()
+    setDuressArmed(false)
+    toast.info('Panic mode disarmed')
+  }
 
   const save = () => {
     if (draft.trim()) setAlias(draft.trim())
@@ -701,6 +736,138 @@ export function SettingsDialog({
               <p className="text-[11px] text-muted-foreground">
                 Only applies to a transfer ID you previously accepted with partial progress — never to
                 new transfers. The consent dialog still appears for anything else.
+              </p>
+            </div>
+
+            {/* v5-b1: disappearing transfers — sender-side default retention.
+                Stamped into every manifest as ttlMs; the receiver's vault
+                auto-purges the entry when the countdown hits zero. */}
+            <div className="rounded-lg border border-border/60 p-3 space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <div className="pr-2">
+                  <p className="text-sm font-medium flex items-center gap-1.5">
+                    <Timer className="h-4 w-4 text-flux-500" />
+                    Disappearing transfers
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Ask receivers to keep your transfers only for a limited time — their vault copy
+                    auto-purges when the countdown ends. Applies to the next send.
+                  </p>
+                </div>
+                <Select
+                  value={String(prefs.disappearTtlMinutes)}
+                  onValueChange={(v) => prefs.setDisappearTtlMinutes(Number(v))}
+                >
+                  <SelectTrigger className="w-28 h-9 shrink-0" aria-label="Disappearing transfers retention">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {DISAPPEAR_TTL_CHOICES.map((m) => (
+                      <SelectItem key={m} value={String(m)}>
+                        {m === 0 ? 'Keep' : m < 60 ? `${m} min` : m < 1440 ? `${m / 60} hour${m >= 120 ? 's' : ''}` : `${m / 1440} day`}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                The receiver&apos;s own save through the file picker is always out of reach (that&apos;s the
+                OS&apos;s copy, not FluxDrop&apos;s). After a send you can also press
+                <span className="font-medium text-foreground"> Wipe on receiver </span>
+                in the summary card to purge their vault copy immediately.
+              </p>
+            </div>
+
+            {/* v5-b2: panic mode — the duress PIN. */}
+            <div className="rounded-lg border border-rose-500/30 bg-rose-500/5 p-3 space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <div className="pr-2">
+                  <p className="text-sm font-medium flex items-center gap-1.5">
+                    <ShieldAlert className="h-4 w-4 text-rose-500" />
+                    Panic mode (duress PIN)
+                    {duressArmed && (
+                      <Badge variant="outline" className="border-rose-500/40 bg-rose-500/10 text-rose-600 dark:text-rose-400 text-[10px]">
+                        armed
+                      </Badge>
+                    )}
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    A second, secret PIN. Typing it anywhere a room PIN is asked silently wipes your
+                    transfer history, vault, resume cache, trusted devices and chat — then refuses the
+                    pairing exactly like a wrong PIN. Nothing on screen reveals the wipe.
+                  </p>
+                </div>
+                {duressArmed ? (
+                  <div className="flex shrink-0 flex-col gap-1.5">
+                    <Button variant="outline" size="sm" className="h-8 text-xs" onClick={() => setShowDuressSetup((v) => !v)}>
+                      {showDuressSetup ? 'Cancel' : 'Change'}
+                    </Button>
+                    <Button variant="ghost" size="sm" className="h-8 text-xs text-muted-foreground hover:text-destructive" onClick={handleDuressRemove}>
+                      Disarm
+                    </Button>
+                  </div>
+                ) : (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-9 shrink-0 border-rose-500/40 hover:bg-rose-500/10"
+                    onClick={() => setShowDuressSetup((v) => !v)}
+                  >
+                    Set panic PIN
+                  </Button>
+                )}
+              </div>
+              {showDuressSetup && (
+                <div className="space-y-2 rounded-md border border-border/50 bg-card/60 p-2.5">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <Label htmlFor="duress-pin" className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                        Panic PIN (4–12 digits)
+                      </Label>
+                      <Input
+                        id="duress-pin"
+                        value={duressDraft}
+                        onChange={(e) => setDuressDraft(e.target.value.replace(/\D/g, '').slice(0, 12))}
+                        inputMode="numeric"
+                        type="password"
+                        placeholder="••••"
+                        className="h-8 font-mono"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label htmlFor="duress-pin-2" className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                        Repeat
+                      </Label>
+                      <Input
+                        id="duress-pin-2"
+                        value={duressConfirm}
+                        onChange={(e) => setDuressConfirm(e.target.value.replace(/\D/g, '').slice(0, 12))}
+                        inputMode="numeric"
+                        type="password"
+                        placeholder="••••"
+                        className="h-8 font-mono"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[10px] text-muted-foreground">
+                      Stored only as a salted SHA-256 hash on this device.
+                    </p>
+                    <Button
+                      size="sm"
+                      className="h-8 bg-rose-600 hover:bg-rose-700 text-white"
+                      onClick={handleDuressSave}
+                      disabled={duressDraft.length < 4 || duressDraft !== duressConfirm}
+                    >
+                      Arm panic mode
+                    </Button>
+                  </div>
+                </div>
+              )}
+              <p className="text-[11px] text-muted-foreground">
+                Use a PIN you can remember under pressure but that no one would guess is special. The
+                real room PIN keeps working exactly as before — the panic PIN only fires when typed
+                instead of it.
               </p>
             </div>
 

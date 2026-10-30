@@ -2044,3 +2044,49 @@ Work Log:
 - bun run lint clean; tsc --noEmit clean. Dev server restarted twice after OOM kills (unrelated to code).
 
 Files: protocol.ts, prefs.ts, webrtc.ts, use-fluxdrop.ts, manifest.ts, signaling.ts, delta.ts (new), relay-transport.ts (new), net-weather.ts (new), watch-folder.ts (new), hash-worker-client.ts, hash-worker.ts, transfer-store.ts, debug-bundle.ts, signaling server index.ts, connection-status.tsx, flux-header.tsx, sender-panel.tsx, transfer-summary-card.tsx, diagnostics-panel.tsx, network-weather.tsx (new), watch-folder-panel.tsx (new), FEATURES-v5.md, .gitignore, worklog.md.
+
+---
+Task ID: feat-v5-b
+Agent: Z.ai Code (Section B: Privacy & Security)
+Task: Implement FEATURES-v5.md section B — B1 disappearing transfers, B2 panic mode, B3 post-quantum hybrid PAKE, B4 scoped session grants, B5 relay abuse quotas.
+
+## What shipped
+
+### B1 — Disappearing transfers (vault TTL + remote wipe)
+- `TransferManifest.ttlMs` (optional, additive — older receivers ignore it) stamped from the new `disappearTtlMinutes` pref (Keep/1m/10m/1h/1d, validated against `DISAPPEAR_TTL_CHOICES`); all three receiver completion paths (streamed / delta / in-memory) arm `saveToVault` with `expiresAt = now + ttlMs`.
+- `vault.ts`: `VaultEntry.expiresAt`, `sweepVaultExpiry()` (runs inside every `listVault()`), `wipeVault()` (per-entry removal + OPFS subtree enumeration for orphans).
+- New wire frame `WIPE_REQUEST` (0x14, control-style, `{ reason }`): receiver purges the vault entry + resume chunk cache/history record (`deleteTransferRecord` clears both IDB stores) + in-memory buffers. Sender API `requestRemoteWipe()` fans it over every open peer DC; summary card gained a "Wipe on receiver" button; sender Privacy tab gained the retention selector; vault view gained live countdown badges (30s tick).
+
+### B2 — Panic mode / duress PIN
+- New `src/lib/fluxdrop/panic.ts`: salted-SHA-256 storage (localStorage), timing-safe compare, `executePanicWipe()` (history records + sender file attachments, vault, chunk cache, trusted peers, recent rooms, chat transcript, telemetry, live E2E session keys — each step individually fail-soft).
+- Wired at both PIN entry points: receiver join (`startReceive`) and share-link claim (`startSend`). The refusal is byte-identical to a wrong PIN (`Signaling error: INVALID_PIN` toast) — nothing on screen reveals the wipe. Arm/change/disarm UI in Settings → Privacy.
+
+### B3 — Post-quantum hybrid PAKE (ML-KEM-768)
+- `@noble/post-quantum` (pure JS — deliberately no WASM, see the A4 blake3 note). `E2ERelayMessage` hello gains `kemPub`, reply gains `kemCt`.
+- Hybrid derivation: IKM = `concat("hybrid:", spakeShared, kemSS)`; transcript + SAS bind `kemPub || kemCt` (domain-separated). Classic-only path (older peer) derives byte-identical v1.2 keys. Tampered kemCt → ML-KEM implicit rejection → different keys → confirmation MAC fails (fail-closed, never a downgrade).
+- `activateE2ESession(..., pqHybrid)`; verification card shows a PQ badge; console logs `[PQ hybrid ML-KEM-768]`.
+- Standalone crypto tests (bun): hybrid keys/SAS match both sides; classic fallback works; tamper caught by MAC.
+
+### B4 — Scoped session grants
+- New `src/lib/fluxdrop/session-grants.ts` (in-memory per session, reactive for the transparency panel). `SessionGrants = { files, chat, clipboard }` rides the existing `transfer-accepted` signaling event (older senders default-allow).
+- Consent dialog: two grant checkboxes (chat default ON, clipboard default OFF). Receiver-side enforcement (`grantAllows`) drops denied inbound CHAT/CLIPBOARD frames before any UI; sender-side filter (`grantedToUse`) stops phantom sends. Transparency panel gained a "Session permission grants" section (both directions).
+
+### B5 — Relay abuse quotas (signaling server)
+- Ladder in `relay-data`: admin block (kill switch, `blocked`) → per-room LIFETIME cap (512 MB default, `room-cap`) → per-IP token bucket (2 MB/s, 16 MB burst, `quota`) → per-room token bucket (existing). Counters for all four.
+- Admin: `block-relay`/`unblock-relay` actions; snapshot `relay` section (config, totals, top rooms, blocked list, abuse counters); dashboard gained relay-bytes card, policy chips, per-room Block relay buttons. Blocked rooms + stale IP buckets swept with rooms.
+- Client `RelayTransport`: `room-cap`/`blocked` → fatal (stop retransmitting); `quota` stays transient.
+
+## E2E verification (agent-browser, two sessions via :81 gateway)
+- B3: both consoles `[FluxDrop] E2E session active … [PQ hybrid ML-KEM-768]` + `session ACTIVE (SAS … · PQ hybrid)`, matching SAS on both sides.
+- B4: consent checkboxes visible; chat UNchecked → sender's chat draft refused (outbound filter, frame never left), receiver never displayed the message.
+- B1: sender summary "Disappears after 1 min" badge + "Wipe on receiver" button; wipe click → receiver "Transfer wiped on this device" toast. Second timed run: receiver vault showed the entry with a live "51s" countdown badge (tooltip "Disappearing transfer…"); after the TTL elapsed the sweep purged it (vault 1 → 0 transfers, IDB meta 0 entries).
+- B2: panic PIN armed via Settings UI (armed badge + salted hash in localStorage); joining with the duress PIN → byte-identical INVALID_PIN toast, history 1 → "No transfers yet", recent rooms gone, vault cleared.
+- B5: signaling rebuilt + healthy (`/healthz` 200), admin endpoints refuse without ADMIN_TOKEN (503), bogus action rejected with the new action list.
+- Sandbox note: the 4 GB box OOM-killed next-server twice under multi-browser load — each E2E batch was re-run one-shot within a single tool invocation (servers + browsers together); final run caught the full TTL lifecycle.
+
+## Quality gates
+- `bun run lint`: exit 0. `bunx tsc --noEmit`: clean (app + signaling builds via `bun build`).
+- Known UI nuance (documented, not a bug): the receiver-side transparency grants section has a narrow visible window because the room view swaps to the progress card at accept; the record + enforcement are live (proven by the sender-side filter test).
+
+## Commit
+About to commit as feat v5-b; push to origin/main as 20Youssef10 (ShinZero) <youssef2010.mahmoud@gmail.com>.

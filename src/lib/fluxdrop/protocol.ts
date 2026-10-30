@@ -65,6 +65,16 @@ export interface TransferManifest {
     root: string // hex SHA-256 of the root node
     leaves: number // leaf count == totalChunks
   }
+  /**
+   * v5-b1: disappearing transfers — sender-requested vault retention.
+   * When set, the RECEIVER arms its vault copy of this transfer with
+   * expiresAt = completion + ttlMs and a local sweep purges it once the
+   * countdown reaches zero (the receiver's own budget/LRU rules still apply
+   * on top). Purely a hint: older receivers ignore it, and it never touches
+   * the bytes already saved through the picker — only the on-device vault
+   * copy and the resume chunk cache.
+   */
+  ttlMs?: number
 }
 
 // === Transfer state machine ===
@@ -126,6 +136,14 @@ export const MessageType = {
   // peers enabled clipboard sync; receivers surface a copy toast (direct
   // clipboard writes need a user gesture on most browsers).
   CLIPBOARD: 0x13,
+  // v5-b1: sender-requested remote wipe. Body is { reason?: string } — the
+  // RECEIVER purges every trace of that transferId from its side: the vault
+  // entry (if stored), the resume chunk cache, and any in-memory buffers.
+  // Sent over the DataChannel (P2P) after completion or during a live
+  // transfer; ack'd implicitly by the receiver's own toast + state. Older
+  // receivers ignore unknown frame types gracefully (protocol error path is
+  // non-fatal for control frames they don't recognize).
+  WIPE_REQUEST: 0x14,
 } as const
 
 export type MessageTypeValue = (typeof MessageType)[keyof typeof MessageType]
@@ -307,8 +325,39 @@ export const SIGNALING_EVENTS = {
 export const RELAY_EVENTS = {
   RELAY_DATA: 'relay-data',   // sender -> server -> receiver (chunk payload)
   RELAY_ACK: 'relay-ack',    // receiver -> server -> sender (per-seq ack)
-  RELAY_ERROR: 'relay-error', // server -> sender (e.g. quota exceeded)
+  RELAY_ERROR: 'relay-error', // server -> sender (quota / room-cap / blocked)
 } as const
+
+/** v5-b5: reasons the server may attach to relay-error. */
+export type RelayErrorReason =
+  | 'quota'      // per-room token bucket drained — transient, retransmit later
+  | 'room-cap'   // per-room hard byte cap reached — permanent for this room
+  | 'blocked'   // admin blocked relay for this room — permanent
+
+// === v5-b4: scoped session grants (receiver → sender capabilities) ===
+// The receiver that consents to a transfer also decides which SESSION
+// capabilities it grants the SENDER beyond the files themselves. `files` is
+// implied by accepting (and models future pull-mode browse rights), `chat`
+// gates in-room chat display, `clipboard` gates clipboard-sync pushes.
+// Grants ride the existing transfer-accepted signaling event as an optional
+// `grants` field (older senders ignore it → default-allow back-compat).
+export interface SessionGrants {
+  /** Future pull-mode browse/pull rights — always false until C6 ships. */
+  files: boolean
+  /** In-room chat frames from this peer are displayed (default true). */
+  chat: boolean
+  /** Clipboard-sync pushes from this peer are surfaced (default false). */
+  clipboard: boolean
+}
+
+export const DEFAULT_SESSION_GRANTS: SessionGrants = {
+  files: false,
+  chat: true,
+  clipboard: false,
+}
+
+// === v5-b1: disappearing-transfer TTL choices (minutes → ms) ===
+export const DISAPPEAR_TTL_CHOICES = [0, 1, 10, 60, 1440] as const // 0 = off
 
 // === v1.1: per-connection transport hint ===
 // Populated from the selected ICE candidate pair once the DataChannel opens;

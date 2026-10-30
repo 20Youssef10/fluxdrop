@@ -3,26 +3,37 @@
 // v4 (2.6): transparency panel — "What left your device this session".
 // Renders the local telemetry trail: signaling events (in/out + bytes),
 // DataChannel byte totals, and ICE candidate type/version availability.
+// v5-b4: also renders the session's scoped permission grants — what each
+// peer may do (chat / clipboard) and what we granted others.
 // Lives inside the diagnostics panel; read-only + clear.
 
 import { useEffect, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { ArrowDownUp, Eraser, Eye, ShieldCheck } from 'lucide-react'
+import { ArrowDownUp, Eraser, Eye, KeyRound, MessageSquare, ClipboardList, ShieldCheck } from 'lucide-react'
 import {
   getTransparencyReport,
   clearTelemetry,
   subscribeTelemetry,
   type TransparencyReport,
 } from '@/lib/fluxdrop/telemetry'
+import { listGrantRecords, subscribeGrants, type GrantRecord } from '@/lib/fluxdrop/session-grants'
 import { formatBytes } from '@/lib/fluxdrop/format'
 import { useT } from '@/lib/fluxdrop/i18n'
 
 export function TransparencyPanel() {
   const [report, setReport] = useState<TransparencyReport>(() => getTransparencyReport())
+  const [grants, setGrants] = useState<GrantRecord[]>(() => listGrantRecords())
   const t = useT()
 
-  useEffect(() => subscribeTelemetry(() => setReport(getTransparencyReport())), [])
+  useEffect(() => {
+    const unsubT = subscribeTelemetry(() => setReport(getTransparencyReport()))
+    const unsubG = subscribeGrants(() => setGrants(listGrantRecords()))
+    return () => {
+      unsubT()
+      unsubG()
+    }
+  }, [])
 
   const fmt = (n: number) => new Date(n).toLocaleTimeString([], { hour12: false })
 
@@ -71,6 +82,29 @@ export function TransparencyPanel() {
         ))}
       </div>
 
+      {/* v5-b4: session grants — what each paired peer may do this session.
+          Rows: "peer → us" (grants we received, sender side) and
+          "us → peer" (grants we gave, receiver side). */}
+      {grants.length > 0 && (
+        <div className="rounded-md border border-border/40 bg-card/30 p-2.5">
+          <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            <KeyRound className="h-3 w-3" aria-hidden />
+            Session permission grants
+          </div>
+          <div className="mt-1.5 space-y-1.5">
+            {grants.slice(0, 8).map((g) => (
+              <div key={g.peerId} className="flex items-center gap-2 text-[11px]">
+                <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground">
+                  {g.grantedToUs ? 'from' : 'to'} {g.peerId.slice(0, 8)}…
+                </span>
+                <GrantChip icon={<MessageSquare className="h-3 w-3" aria-hidden />} label="chat" allowed={g.grants.chat} />
+                <GrantChip icon={<ClipboardList className="h-3 w-3" aria-hidden />} label="clipboard" allowed={g.grants.clipboard} />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Event trail */}
       <div className="max-h-40 overflow-y-auto flux-scroll rounded-md border border-border/40 bg-card/30">
         {report.events.length === 0 ? (
@@ -116,5 +150,21 @@ function Stat({ label, value }: { label: string; value: string }) {
       <p className="text-[9px] font-medium uppercase tracking-wider text-muted-foreground">{label}</p>
       <p className="mt-0.5 text-xs font-semibold tabular-nums">{value}</p>
     </div>
+  )
+}
+
+function GrantChip({ icon, label, allowed }: { icon: React.ReactNode; label: string; allowed: boolean }) {
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium tabular-nums ${
+        allowed
+          ? 'bg-flux-500/10 text-flux-700 dark:text-flux-300'
+          : 'bg-muted text-muted-foreground line-through'
+      }`}
+      title={allowed ? `${label} granted` : `${label} denied`}
+    >
+      {icon}
+      {label}
+    </span>
   )
 }

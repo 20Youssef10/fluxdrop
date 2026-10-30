@@ -2,10 +2,11 @@
 
 import { useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
-import { CheckCircle2, ShieldCheck, Clock, Database, FileStack, Gauge, Leaf, Copy, Check, FileArchive, Forward, Loader2, Route } from 'lucide-react'
+import { CheckCircle2, ShieldCheck, Clock, Database, FileStack, Gauge, Leaf, Copy, Check, FileArchive, Forward, Loader2, Route, Timer, Eraser } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { useSessionStore } from '@/stores/session-store'
 import { useTransferStore } from '@/stores/transfer-store'
 import { formatBytes, formatDuration, fileTypeCategory } from '@/lib/fluxdrop/format'
 import { computeFileSkips } from '@/lib/fluxdrop/manifest'
@@ -50,6 +51,10 @@ interface TransferSummaryCardProps {
  */
 export function TransferSummaryCard({ onDone, onSendAnother }: TransferSummaryCardProps) {
   const t = useTransferStore()
+  // v5-b1: the wipe-on-receiver action is sender-side only (the receiver's
+  // own copy is out of OUR reach by design — its vault entry is what wipes).
+  const isSender = useSessionStore((s) => s.view === 'sender')
+  const [wipeAsked, setWipeAsked] = useState(false)
   // v5-a3w: i18n (the store owns the single-letter `t` in this component).
   const tr = useT()
   const m = t.manifest
@@ -176,6 +181,18 @@ export function TransferSummaryCard({ onDone, onSendAnother }: TransferSummaryCa
                 >
                   <Route className="mr-1 h-3 w-3" />
                   {tr('relay.badge', 'Relayed via server')}
+                </Badge>
+              )}
+              {/* v5-b1: disappearing transfer — the receiver's vault copy
+                  auto-purges after the sender-requested TTL. */}
+              {m.ttlMs != null && m.ttlMs > 0 && (
+                <Badge
+                  variant="outline"
+                  className="border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400 tabular-nums"
+                  title="The receiver keeps this transfer in its vault only until the requested retention expires — then it auto-purges."
+                >
+                  <Timer className="mr-1 h-3 w-3" />
+                  {tr('disappear.badge', `Disappears after ${formatTtl(m.ttlMs)}`)}
                 </Badge>
               )}
               <span className="text-xs text-muted-foreground">
@@ -306,6 +323,27 @@ export function TransferSummaryCard({ onDone, onSendAnother }: TransferSummaryCa
               </>
             )}
           </Button>
+          {/* v5-b1: sender-requested remote wipe — asks the receiver to purge
+              its vault copy + resume cache + buffers over the still-open
+              DataChannel. */}
+          {isSender && (
+            <Button
+              onClick={() => {
+                if (wipeAsked) return
+                setWipeAsked(true)
+                window.dispatchEvent(
+                  new CustomEvent('fluxdrop:request-remote-wipe', { detail: { transferId: m.transferId } })
+                )
+              }}
+              disabled={wipeAsked}
+              variant="ghost"
+              className="sm:w-auto text-muted-foreground hover:text-destructive"
+              title="Ask the receiver to purge every stored copy of this transfer (vault entry, resume cache, buffers)"
+            >
+              <Eraser className="mr-2 h-4 w-4" />
+              {wipeAsked ? 'Wipe requested' : 'Wipe on receiver'}
+            </Button>
+          )}
           <div className="flex-1 flex flex-col sm:flex-row gap-2">
             {/* v4 (4.2): zip-on-receive (receiver side, multi-file) */}
             {received && received.length > 1 && (
@@ -359,6 +397,18 @@ export function TransferSummaryCard({ onDone, onSendAnother }: TransferSummaryCa
       </div>
     </Card>
   )
+}
+
+/** v5-b1: TTL in minutes → "1 min" / "10 min" / "1 hour" / "1 day". */
+function formatTtl(ttlMs: number): string {
+  const minutes = Math.round(ttlMs / 60_000)
+  if (minutes < 60) return `${minutes} min`
+  if (minutes < 1440) {
+    const h = Math.round(minutes / 60)
+    return `${h} hour${h > 1 ? 's' : ''}`
+  }
+  const d = Math.round(minutes / 1440)
+  return `${d} day${d > 1 ? 's' : ''}`
 }
 
 function RecapStat({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {

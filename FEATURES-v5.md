@@ -17,7 +17,12 @@ grounded in what exists, nothing here duplicates shipped features.
 | A4 | Parallel hash pool (double-buffered streaming) | ✅ shipped (code-verified) |
 | A5 | Network weather + pre-flight sim | ✅ shipped (code-verified) |
 | A6 | Watch folder + scheduled send | ✅ shipped (UI verified) |
-| B–F | Everything below section A | ⬜ |
+| B1 | Disappearing transfers (vault TTL + remote wipe) | ✅ E2E verified |
+| B2 | Panic mode / duress PIN | ✅ E2E verified |
+| B3 | Post-quantum hybrid PAKE (ML-KEM-768) | ✅ E2E verified |
+| B4 | Scoped session grants | ✅ E2E verified |
+| B5 | Relay abuse quotas | ✅ shipped (code-verified) |
+| C–F | Everything below section B | ⬜ |
 
 **E2E evidence (two browser sessions via gateway, 2026-10-29):**
 - A1: fastLanes=2 + 20 MB fresh file → lane 1 connected mid-transfer and
@@ -36,6 +41,38 @@ grounded in what exists, nothing here duplicates shipped features.
 - A6: WATCH FOLDER + SCHEDULED SEND panels render in the sender flow
   (status badges, feed, queue, switches); FS-directory picking itself can't
   run headless.
+
+**Section B evidence (two browser sessions via gateway, 2026-10-30):**
+- B1: sender pref TTL=1 min → manifest ttlMs → sender summary badge
+  "Disappears after 1 min"; receiver's vault showed the entry with a live
+  countdown badge ("51s", tooltip "Disappearing transfer…"); after the TTL
+  elapsed the sweep purged it (vault 1 transfer → 0, IDB meta 0 entries —
+  OPFS bytes + metadata both gone). Remote wipe: sender's "Wipe on
+  receiver" button → receiver toast "Transfer wiped on this device",
+  vault entry + resume cache + buffers purged.
+- B2: Settings → Privacy → "Set panic PIN" armed 919191 (salted SHA-256
+  in localStorage, "armed" badge). Joining a room with the duress PIN
+  showed the byte-identical INVALID_PIN error a wrong PIN shows — and
+  silently wiped: transfer history (1 → "No transfers yet"), recent rooms,
+  vault, chunk cache, trusted devices, chat, telemetry.
+- B3: every PAKE handshake now also runs ML-KEM-768 (@noble/post-quantum,
+  pure JS). Both consoles: `E2E session active … [PQ hybrid ML-KEM-768]` +
+  matching SAS; verification card shows a PQ badge. Standalone crypto
+  tests: hybrid keys match, classic-only fallback byte-identical (older
+  peers), tampered kemCt caught by the confirmation MAC (ML-KEM implicit
+  rejection → different keys → MAC fails).
+- B4: consent dialog gained grant checkboxes (chat default on, clipboard
+  default off). With chat UNchecked: the sender's chat draft was refused
+  (outbound filter, message never left) and the receiver never displayed
+  it. Grants ride transfer-accepted; both sides' transparency panels get a
+  "Session permission grants" section (rendered on the sender-side record
+  path; the receiver-side display window is narrow because the room view
+  swaps to the progress card at accept — the record + enforcement are live).
+- B5: signaling server built + booted with the quota ladder (per-IP bucket
+  → per-room lifetime cap → admin block), /healthz 200, admin endpoints
+  guarded (503 without ADMIN_TOKEN), admin dashboard gained relay-bytes
+  card + policy chips + per-room Block relay buttons. Client treats
+  room-cap/blocked relay-errors as fatal (no infinite retransmit).
 
 > Note on A4: BLAKE3/WASM was evaluated and **dropped** — `blake3` fails to
 > resolve its `blake3-wasm` dep on the current registry, and SHA-256 digests
@@ -206,21 +243,41 @@ active session; schedule fires a toast on an idle session.
 
 ---
 
-# B. Privacy & Security — ⬜
+# B. Privacy & Security — v5 shipped
 
-1. **Disappearing transfers (vault TTL)** — receiver-side auto-purge
-   countdown badges; sender-requested remote wipe of un-saved buffers.
-   (Small.)
-2. **Panic mode / duress PIN** — alternate PIN silently refuses new pairings
-   and wipes history + vault. (Small.)
-3. **Post-quantum hybrid PAKE** — SPAKE2 + ML-KEM (WASM) hybrid so sessions
-   survive harvest-now-decrypt-later; SAS binds the hybrid transcript.
-   (Large; v6 headline candidate.)
-4. **Scoped permission grants** — per-session grants (send/chat/pull) shown
-   in the transparency panel; pairs with C12 pull mode. (Medium.)
-5. **Relay abuse quotas** — per-room rate/quota accounting on relay paths
-   (A2 ships the transport-level token bucket; this extends to room-level
-   policy + admin views). (Small.)
+1. **Disappearing transfers (vault TTL)** — ✅ shipped. `manifest.ttlMs`
+   (sender pref: Keep / 1 min / 10 min / 1 hour / 1 day) arms the receiver's
+   vault copy with `expiresAt`; `sweepVaultExpiry()` purges on every list
+   (OPFS bytes + IDB metadata). Vault entries show live countdown badges.
+   `WIPE_REQUEST` (opcode 0x14) lets the sender purge the receiver's copy
+   mid/post-transfer over the open DataChannel (vault entry + resume chunk
+   cache + in-memory buffers).
+2. **Panic mode / duress PIN** — ✅ shipped. A second PIN (salted SHA-256,
+   localStorage) typed anywhere a room PIN is asked (receiver join,
+   share-link claim) silently wipes history, vault, chunk cache, trusted
+   devices, recent rooms, chat and telemetry, then refuses the pairing with
+   the byte-identical INVALID_PIN error. Arming UI in Settings → Privacy.
+3. **Post-quantum hybrid PAKE** — ✅ shipped (was “v6 headline candidate”).
+   Every SPAKE2 handshake now runs ML-KEM-768 in parallel
+   (`@noble/post-quantum`, pure JS — no WASM). Hybrid IKM =
+   concat(SPAKE2 shared, KEM ss) with domain separation; the transcript +
+   SAS bind kemPub + kemCt, so HNDL attackers who recorded today's
+   classical transcript can't derive tomorrow's key. Older peers fall back
+   to the byte-identical classic v1.2 derivation. Verification card shows a
+   PQ badge when the hybrid leg contributed.
+4. **Scoped permission grants** — ✅ shipped. The consent dialog grants the
+   sender per-session capabilities: `chat` (default on) and `clipboard`
+   (default off) — `files` models future pull-mode rights. Grants ride
+   `transfer-accepted`, are enforced receiver-side on every inbound
+   CHAT/CLIPBOARD frame (the authority) and filtered sender-side (UX);
+   the transparency panel renders both directions.
+5. **Relay abuse quotas** — ✅ shipped. Beyond A2's per-room token bucket:
+   a per-IP relay bucket (2 MB/s sustained, 16 MB burst), a per-room
+   LIFETIME cap (512 MB, `relay-error { reason: 'room-cap' }` — client fails
+   over instead of retransmitting forever), and an admin block/unblock
+   kill-switch (`relay-error { reason: 'blocked' }`). Admin dashboard gained
+   relay-bytes totals, policy chips, abuse counters and per-room Block
+   relay buttons. All env-tunable; metadata-only (opaque base64 lengths).
 
 # C. UX & Interaction — ⬜
 

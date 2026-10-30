@@ -786,6 +786,16 @@ export class FluxDropWebRTC {
   }
 
   /**
+   * v5-b1: sender-requested remote wipe. Asks the RECEIVER to purge every
+   * trace of `transferId` from its side — the vault entry, the resume chunk
+   * cache, and in-memory buffers. Control frame; rides the open DataChannel
+   * (P2P-only by design — a wiped transfer's peer is by definition nearby).
+   */
+  sendWipeRequest(transferId: string, reason?: string): void {
+    this.sendControl(MessageType.WIPE_REQUEST, transferId, 0, { reason: reason ?? 'sender requested' })
+  }
+
+  /**
    * Classify the transport from the selected ICE candidate pair (v1.1).
    * host↔host = direct LAN, anything relayed = TURN, otherwise unknown
    * (srflx/srflx or stats unavailable). Drives the initial flow window.

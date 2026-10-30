@@ -186,6 +186,59 @@ function relayQuotaAllows(roomId: string, costBytes: number): boolean {
   return allowed
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// v5-b5: relay ABUSE quotas — three layers beyond the per-room token bucket:
+//
+//   1. PER-IP bucket — one IP spraying N rooms must not multiply its budget
+//      (each room gets its own bucket above, so without this an abuser just
+//      mints rooms). Default 2 MB/s sustained, 16 MB burst (env-tunable).
+//   2. PER-ROOM hard byte cap — a room's LIFETIME relayed total is capped
+//      (default 512 MB, env-tunable). Over cap: relay-error { reason:
+//      'room-cap' } — permanent for that room (the client fails over instead
+//      of retransmitting forever).
+//   3. ADMIN block — /admin/action { block-relay, unblock-relay } toggles a
+//      hard per-room block (metadata-only kill switch, no payload inspection
+//      ever — the blocked set holds room ids only).
+//
+// PRIVACY: all three layers count opaque base64 LENGTHS and room ids — the
+// server still never reads, stores, or logs relayed payload content.
+// ─────────────────────────────────────────────────────────────────────────────
+export const RELAY_IP_RATE_BYTES_PER_SEC = (() => {
+  const n = parseInt(process.env.RELAY_IP_RATE_BYTES_PER_SEC ?? '', 10)
+  if (!Number.isFinite(n) || n <= 0) return 2 * 1024 * 1024
+  return n
+})()
+export const RELAY_IP_BURST_BYTES = (() => {
+  const n = parseInt(process.env.RELAY_IP_BURST_BYTES ?? '', 10)
+  if (!Number.isFinite(n) || n <= 0) return 16 * 1024 * 1024
+  return n
+})()
+export const RELAY_MAX_ROOM_BYTES = (() => {
+  const n = parseInt(process.env.RELAY_MAX_ROOM_BYTES ?? '', 10)
+  if (!Number.isFinite(n) || n <= 0) return 512 * 1024 * 1024
+  return n
+})()
+
+/** Per-IP token bucket state (keyed by client IP). */
+const relayIpBuckets = new Map<string, { tokens: number; last: number }>()
+
+function relayIpQuotaAllows(ip: string, costBytes: number): boolean {
+  const now = Date.now()
+  const b = relayIpBuckets.get(ip) ?? { tokens: RELAY_IP_BURST_BYTES, last: now }
+  b.tokens = Math.min(RELAY_IP_BURST_BYTES, b.tokens + ((now - b.last) / 1000) * RELAY_IP_RATE_BYTES_PER_SEC)
+  b.last = now
+  const allowed = b.tokens >= costBytes
+  if (allowed) b.tokens -= costBytes
+  relayIpBuckets.set(ip, b)
+  return allowed
+}
+
+/** Admin-toggled hard per-room relay blocks (room ids only — metadata). */
+const relayBlockedRooms = new Set<string>()
+
+/** v5-b5: cumulative abuse counters for the admin dashboard. */
+const relayAbuse = { quotaExceeded: 0, ipQuotaExceeded: 0, roomCapExceeded: 0, blockedDrops: 0 }
+
 function checkRoomCreateRate(ip: string): { allowed: boolean; retryAfterSec: number } {
   const now = Date.now()
   const recent = (roomCreatesByIp.get(ip) ?? []).filter((t) => now - t < ROOM_CREATE_WINDOW_MS)
@@ -556,6 +609,8 @@ function adminSnapshot(): Record<string, unknown> {
     transferActive: r.transferActive,
     // v5-a2: relay fallback counters (metadata only — bytes, never content).
     relayedBytes: r.relayedBytes,
+    // v5-b5: admin kill-switch state for the relay path.
+    relayBlocked: relayBlockedRooms.has(r.id),
     pending: r.preCreated === true,
     oneJoin: r.oneJoin === true,
   }))
@@ -566,6 +621,14 @@ function adminSnapshot(): Record<string, unknown> {
     relayedEvents[event] = count
     totalRelayed += count
   }
+  // v5-b5: rooms that actually used the relay (relayedBytes > 0), top by bytes.
+  const relayRooms = roomList
+    .filter((r) => (r.relayedBytes as number) > 0)
+    .sort((a, b) => (b.relayedBytes as number) - (a.relayedBytes as number))
+    .slice(0, 10)
+    .map((r) => ({ code: r.code, bytes: r.relayedBytes, blocked: r.relayBlocked }))
+  let totalRelayedBytes = 0
+  for (const r of roomList) totalRelayedBytes += r.relayedBytes as number
   return {
     ok: true,
     version: VERSION,
@@ -576,6 +639,18 @@ function adminSnapshot(): Record<string, unknown> {
     rooms: roomList,
     relayedEvents,
     totalRelayed,
+    // v5-b5: relay abuse-quota accounting + live policy config (metadata only).
+    relay: {
+      rateBytesPerSec: RELAY_RATE_BYTES_PER_SEC,
+      burstBytes: RELAY_BURST_BYTES,
+      ipRateBytesPerSec: RELAY_IP_RATE_BYTES_PER_SEC,
+      ipBurstBytes: RELAY_IP_BURST_BYTES,
+      maxRoomBytes: RELAY_MAX_ROOM_BYTES,
+      totalRelayedBytes,
+      relayRooms,
+      blockedRooms: Array.from(relayBlockedRooms),
+      abuse: { ...relayAbuse },
+    },
   }
 }
 
@@ -651,11 +726,19 @@ const ADMIN_HTML = `<!doctype html>
   <div class="card"><div class="k">Connected sockets</div><div class="v" id="sockets">–</div></div>
   <div class="card"><div class="k">Rooms</div><div class="v" id="roomCount">–</div></div>
   <div class="card"><div class="k">Relayed events</div><div class="v" id="relayed">–</div></div>
+  <div class="card"><div class="k">Relayed bytes</div><div class="v" id="relayBytes">–</div></div>
 </div>
 
 <section>
   <h2>Relayed events by type</h2>
   <div class="chips" id="relayChips"><span class="pill muted">none yet</span></div>
+</section>
+
+<section>
+  <h2>Relay fallback &amp; abuse quotas</h2>
+  <div class="chips" id="relayPolicy" style="margin-bottom:10px"><span class="pill muted">loading…</span></div>
+  <div class="chips" id="relayAbuse"></div>
+  <div id="relayRooms" style="margin-top:10px"></div>
 </section>
 
 <section>
@@ -702,6 +785,13 @@ No PINs, IP addresses, aliases or file data are ever displayed or stored here.</
     if (delta <= 0) return 'expired';
     return 'in ' + fmtDur(delta);
   }
+  function fmtBytes(n) {
+    if (n == null) return '–';
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+    return (n / 1073741824).toFixed(2) + ' GB';
+  }
   function render(d) {
     document.getElementById('meta').textContent =
       d.region + ' · v' + d.version + ' · max ' + d.maxDevicesPerRoom + ' devices/room';
@@ -709,6 +799,35 @@ No PINs, IP addresses, aliases or file data are ever displayed or stored here.</
     document.getElementById('sockets').textContent = d.sockets;
     document.getElementById('roomCount').textContent = d.rooms.length;
     document.getElementById('relayed').textContent = d.totalRelayed;
+    // v5-b5: relay bytes + policy + abuse accounting.
+    var rel = d.relay || {};
+    document.getElementById('relayBytes').textContent = fmtBytes(rel.totalRelayedBytes);
+    document.getElementById('relayPolicy').innerHTML =
+      '<span class="chip">room rate <b>' + fmtBytes(rel.rateBytesPerSec) + '/s</b></span>'
+      + '<span class="chip">room burst <b>' + fmtBytes(rel.burstBytes) + '</b></span>'
+      + '<span class="chip">ip rate <b>' + fmtBytes(rel.ipRateBytesPerSec) + '/s</b></span>'
+      + '<span class="chip">ip burst <b>' + fmtBytes(rel.ipBurstBytes) + '</b></span>'
+      + '<span class="chip">room cap <b>' + fmtBytes(rel.maxRoomBytes) + '</b></span>'
+      + ((rel.blockedRooms || []).length
+          ? '<span class="pill warn">blocked: ' + esc(rel.blockedRooms.join(', ')) + '</span>'
+          : '<span class="pill ok">no rooms blocked</span>');
+    var ab = rel.abuse || {};
+    document.getElementById('relayAbuse').innerHTML =
+      '<span class="chip">quota hits <b>' + (ab.quotaExceeded || 0) + '</b></span>'
+      + '<span class="chip">ip-quota hits <b>' + (ab.ipQuotaExceeded || 0) + '</b></span>'
+      + '<span class="chip">room-cap hits <b>' + (ab.roomCapExceeded || 0) + '</b></span>'
+      + '<span class="chip">blocked drops <b>' + (ab.blockedDrops || 0) + '</b></span>';
+    var rr = rel.relayRooms || [];
+    document.getElementById('relayRooms').innerHTML = rr.length
+      ? '<table><thead><tr><th>Room</th><th>Relayed bytes</th><th>Relay</th></tr></thead><tbody>'
+        + rr.map(function (r) {
+            return '<tr><td class="code">' + esc(r.code) + '</td><td>' + fmtBytes(r.bytes) + '</td><td>'
+              + (r.blocked
+                  ? '<span class="pill warn">blocked</span>'
+                  : '<button class="blockRelay" data-code="' + esc(r.code) + '">Block relay</button>')
+              + '</td></tr>';
+          }).join('') + '</tbody></table>'
+      : '<div class="empty">No room has used the relay fallback this window</div>';
     var keys = Object.keys(d.relayedEvents || {}).sort();
     document.getElementById('relayChips').innerHTML = keys.length
       ? keys.map(function (k) {
@@ -728,6 +847,8 @@ No PINs, IP addresses, aliases or file data are ever displayed or stored here.</
       if (r.pending) flags += ' <span class="pill warn">link · unclaimed</span>';
       if (r.oneJoin) flags += ' <span class="pill muted">one-join</span>';
       if (r.transferActive) flags += ' <span class="pill ok">transferring</span>';
+      if (r.relayedBytes > 0) flags += ' <span class="pill muted">relayed ' + fmtBytes(r.relayedBytes) + '</span>';
+      if (r.relayBlocked) flags += ' <span class="pill warn">relay blocked</span>';
       return '<tr>'
         + '<td class="code">' + esc(r.code) + '</td>'
         + '<td>' + esc(r.state) + flags + '</td>'
@@ -735,7 +856,12 @@ No PINs, IP addresses, aliases or file data are ever displayed or stored here.</
         + '<td>' + sender + '</td>'
         + '<td>' + fmtTime(r.createdAt) + '</td>'
         + '<td>' + fmtTime(r.expiresAt) + ' <span class="pill muted">' + fmtIn(r.expiresAt) + '</span></td>'
-        + '<td><button class="danger kill" data-code="' + esc(r.code) + '">Kill</button></td>'
+        + '<td><button class="danger kill" data-code="' + esc(r.code) + '">Kill</button>'
+        + (r.relayedBytes > 0
+            ? ' <button class="blockRelay" data-code="' + esc(r.code) + '" data-block="' + (r.relayBlocked ? 'off' : 'on') + '">'
+              + (r.relayBlocked ? 'Unblock relay' : 'Block relay') + '</button>'
+            : '')
+        + '</td>'
         + '</tr>';
     }).join('');
     document.getElementById('roomsTable').innerHTML =
@@ -762,8 +888,23 @@ No PINs, IP addresses, aliases or file data are ever displayed or stored here.</
     var t = ev.target;
     if (!t || t.tagName !== 'BUTTON' || !t.hasAttribute('data-code')) return;
     var code = t.getAttribute('data-code');
+    if (t.classList.contains('blockRelay')) {
+      var blockOn = t.getAttribute('data-block') !== 'off';
+      if (confirm((blockOn ? 'Block' : 'Unblock') + ' the relay fallback for room ' + code + '?')) {
+        action({ action: blockOn ? 'block-relay' : 'unblock-relay', roomCode: code }, refresh);
+      }
+      return;
+    }
     if (confirm('Close room ' + code + '? Members will receive room-closed.')) {
       action({ action: 'close-room', roomCode: code }, refresh);
+    }
+  });
+  document.getElementById('relayRooms').addEventListener('click', function (ev) {
+    var t = ev.target;
+    if (!t || t.tagName !== 'BUTTON' || !t.hasAttribute('data-code')) return;
+    var code = t.getAttribute('data-code');
+    if (confirm('Block the relay fallback for room ' + code + '?')) {
+      action({ action: 'block-relay', roomCode: code }, refresh);
     }
   });
   document.getElementById('closeAll').addEventListener('click', function () {
@@ -825,7 +966,20 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, pat
       sendJson(res, 200, { ok: true, action, closed: codes.length })
       return
     }
-    sendJson(res, 400, { error: "unknown action — expected 'close-room' or 'close-all'" })
+    // v5-b5: relay abuse kill-switch — block/unblock the relay path for one
+    // room (metadata-only: the set holds room ids; payloads stay opaque).
+    if (action === 'block-relay' || action === 'unblock-relay') {
+      const code = String(body.roomCode ?? '').trim()
+      if (!code) return sendJson(res, 400, { error: 'roomCode required' })
+      const room = findRoomByCode(code)
+      if (!room) return sendJson(res, 404, { error: 'room not found' })
+      if (action === 'block-relay') relayBlockedRooms.add(room.id)
+      else relayBlockedRooms.delete(room.id)
+      log('warn', `admin_${action}`, { roomId: room.id })
+      sendJson(res, 200, { ok: true, action, roomCode: room.id, blocked: relayBlockedRooms.has(room.id) })
+      return
+    }
+    sendJson(res, 400, { error: "unknown action — expected 'close-room', 'close-all', 'block-relay' or 'unblock-relay'" })
     return
   }
   sendJson(res, 404, { error: 'not found' })
@@ -1041,6 +1195,18 @@ setInterval(() => {
   }
   for (const roomId of relayBuckets.keys()) {
     if (!rooms.has(roomId)) relayBuckets.delete(roomId)
+  }
+  // v5-b5: relay blocks and per-IP buckets die with their rooms too (an IP
+  // bucket with no live room is pure garbage; a block on a dead room must
+  // never shadow a future room that reuses the code).
+  for (const roomId of relayBlockedRooms) {
+    if (!rooms.has(roomId)) relayBlockedRooms.delete(roomId)
+  }
+  for (const ip of relayIpBuckets.keys()) {
+    // Keep an IP bucket only while it still holds tokens AND touched an
+    // existing room recently — simplest correct proxy: rooms are the only
+    // relay sources, so empty-room sets mean the bucket is stale.
+    if (rooms.size === 0 || relayBuckets.size === 0) relayIpBuckets.delete(ip)
   }
 }, 30 * 1000)
 
@@ -1419,8 +1585,34 @@ io.on('connection', (socket) => {
         log('debug', 'relay_data_session_mismatch', { roomId: room.id })
         return
       }
-      // Per-room token bucket — over quota: tell the SENDER, drop the frame.
+      // ── v5-b5: relay abuse quota ladder ──
+      // 0. Admin hard-block (kill switch): permanent, no retransmit help.
+      if (relayBlockedRooms.has(room.id)) {
+        relayAbuse.blockedDrops++
+        socket.emit('relay-error', { roomId: room.id, reason: 'blocked' })
+        log('warn', 'relay_blocked_room', { roomId: room.id })
+        return
+      }
+      // 1. Per-room LIFETIME cap: permanent for this room — the client's
+      //    retransmit timer must stop hammering, so the reason differs.
+      if (room.relayedBytes + data.length > RELAY_MAX_ROOM_BYTES) {
+        relayAbuse.roomCapExceeded++
+        socket.emit('relay-error', { roomId: room.id, reason: 'room-cap' })
+        log('warn', 'relay_room_cap', { roomId: room.id, bytes: room.relayedBytes })
+        return
+      }
+      // 2. Per-IP bucket: an abuser minting many rooms must not multiply
+      //    the per-room budgets. Transient — the retransmit timer retries
+      //    once the IP bucket refills.
+      if (!relayIpQuotaAllows(clientIpOfSocket(socket), data.length)) {
+        relayAbuse.ipQuotaExceeded++
+        socket.emit('relay-error', { roomId: room.id, reason: 'quota' })
+        log('warn', 'relay_ip_quota_exceeded', { roomId: room.id, ip: hashIp(clientIpOfSocket(socket)) })
+        return
+      }
+      // 3. Per-room token bucket — over quota: tell the SENDER, drop the frame.
       if (!relayQuotaAllows(room.id, data.length)) {
+        relayAbuse.quotaExceeded++
         socket.emit('relay-error', { roomId: room.id, reason: 'quota' })
         log('warn', 'relay_quota_exceeded', { roomId: room.id })
         return

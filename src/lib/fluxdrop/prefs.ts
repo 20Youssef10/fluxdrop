@@ -64,6 +64,13 @@ interface PrefsState {
   deltaSync: boolean
   setDeltaSync: (v: boolean) => void
 
+  // v5-b1: disappearing transfers — minutes a received copy stays in the
+  // receiver's vault before auto-purging (sender-side default, stamped into
+  // every manifest as ttlMs). 0 = keep until the receiver's own budget rules
+  // evict. Applies to the NEXT transfer.
+  disappearTtlMinutes: number
+  setDisappearTtlMinutes: (m: number) => void
+
   // 1.7 Merkle integrity tree on send (extra pre-send read pass)
   merkleEnabled: boolean
   setMerkleEnabled: (v: boolean) => void
@@ -203,6 +210,15 @@ export const usePrefsStore = create<PrefsState>((set) => ({
   setDeltaSync: (v) => {
     set({ deltaSync: v })
     persist({ deltaSync: v })
+  },
+
+  // v5-b1: off by default — retention is the receiver's business until the
+  // sender explicitly asks for disappearing copies.
+  disappearTtlMinutes: 0,
+  setDisappearTtlMinutes: (m) => {
+    const v = Math.max(0, Math.min(10080, Math.round(m) || 0)) // ≤ 1 week
+    set({ disappearTtlMinutes: v })
+    persist({ disappearTtlMinutes: v })
   },
 
   merkleEnabled: true,

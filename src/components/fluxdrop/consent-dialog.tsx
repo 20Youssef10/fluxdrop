@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
-import { Check, X, AlertTriangle, ShieldCheck, BadgeCheck, RotateCcw } from 'lucide-react'
+import { Check, X, AlertTriangle, ShieldCheck, BadgeCheck, RotateCcw, MessageSquare, ClipboardList } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -12,14 +12,14 @@ import { FileIcon } from './file-icon'
 import { isTrustedPeer } from '@/lib/fluxdrop/trusted-peers'
 import { getTransferRecord } from '@/lib/fluxdrop/resume'
 import { useTransferStore } from '@/stores/transfer-store'
-import type { TransferManifest } from '@/lib/fluxdrop/protocol'
+import type { TransferManifest, SessionGrants } from '@/lib/fluxdrop/protocol'
 import { CONSTANTS } from '@/lib/fluxdrop/protocol'
 
 interface ConsentDialogProps {
   manifest: TransferManifest | null
   peerAlias: string
   peerDeviceId?: string | null
-  onAccept: (trust?: boolean) => void
+  onAccept: (trust?: boolean, grants?: SessionGrants) => void
   onReject: () => void
 }
 
@@ -31,6 +31,11 @@ interface ConsentDialogProps {
  */
 export function ConsentDialog({ manifest, peerAlias, peerDeviceId, onAccept, onReject }: ConsentDialogProps) {
   const [trust, setTrust] = useState(false)
+  // v5-b4: scoped session grants — what this device allows the SENDER to do
+  // beyond the files themselves. Defaults mirror the protocol's: chat allowed,
+  // clipboard denied (clipboard pushes text to this device — needs opt-in).
+  const [grantChat, setGrantChat] = useState(true)
+  const [grantClipboard, setGrantClipboard] = useState(false)
   // v1.2 (4.4): rich previews streamed over the DataChannel while this dialog
   // is open (image thumbs + text first-lines). Hook-side `requestPreviews`
   // fires when the manifest lands; entries that never arrive render plain.
@@ -229,6 +234,34 @@ export function ConsentDialog({ manifest, peerAlias, peerDeviceId, onAccept, onR
               </label>
             )}
 
+            {/* v5-b4: scoped session grants — per-session capabilities this
+                device grants the sender. Enforced receiver-side on every
+                inbound CHAT / CLIPBOARD frame; shown in the transparency
+                panel for both sides. */}
+            <div className="rounded-lg border border-border/50 bg-card/40 p-2.5 space-y-2">
+              <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                Allow {peerAlias} to (this session)
+              </p>
+              <label htmlFor="grant-chat" className="flex cursor-pointer items-center gap-2.5">
+                <Checkbox
+                  id="grant-chat"
+                  checked={grantChat}
+                  onCheckedChange={(v) => setGrantChat(v === true)}
+                />
+                <MessageSquare className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                <span className="text-xs">In-room chat</span>
+              </label>
+              <label htmlFor="grant-clipboard" className="flex cursor-pointer items-center gap-2.5">
+                <Checkbox
+                  id="grant-clipboard"
+                  checked={grantClipboard}
+                  onCheckedChange={(v) => setGrantClipboard(v === true)}
+                />
+                <ClipboardList className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                <span className="text-xs">Clipboard sync pushes</span>
+              </label>
+            </div>
+
           </div>
 
           {/* Actions — pinned footer OUTSIDE the scrollable summary, so
@@ -244,7 +277,7 @@ export function ConsentDialog({ manifest, peerAlias, peerDeviceId, onAccept, onR
               Reject
             </Button>
             <Button
-              onClick={() => onAccept(trust || undefined)}
+              onClick={() => onAccept(trust || undefined, { files: true, chat: grantChat, clipboard: grantClipboard })}
               disabled={hasErrors}
               autoFocus
               className="flex-1 bg-flux-600 hover:bg-flux-700 text-white"

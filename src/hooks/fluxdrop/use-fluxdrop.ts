@@ -23,6 +23,7 @@ import {
   saveTransferRecord,
   updateTransferRecord,
   getTransferRecord,
+  deleteTransferRecord,
   markChunkAcked,
   markChunksAcked,
   saveChunk,
@@ -36,14 +37,14 @@ import {
 import { assembleBlob, saveBlobWithPicker, saveFilesToDirectory } from '@/lib/fluxdrop/file-io'
 // v1.3 (4.1): Files vault (OPFS) — verified received transfers are kept on
 // device before the save pickers, with a byte budget + LRU eviction.
-import { saveToVault, vaultSupported, enforceVaultBudget, listVault, getVaultFileBlob } from '@/lib/fluxdrop/vault'
+import { saveToVault, vaultSupported, enforceVaultBudget, listVault, getVaultFileBlob, deleteVaultEntry } from '@/lib/fluxdrop/vault'
 import { resolveSaveConflicts } from '@/components/fluxdrop/save-conflict-dialog'
 import type { FilePreview } from '@/stores/transfer-store'
 import { useChatStore } from '@/stores/chat-store'
 import { addRecentRoom } from '@/lib/fluxdrop/recent-rooms'
 import { isTrustedPeer, addTrustedPeer } from '@/lib/fluxdrop/trusted-peers'
 import { playSuccess, playError, playConnect, playPause, playResume } from '@/lib/fluxdrop/sound'
-import { MessageType, CONSTANTS, FAST_LANE_MAX, FAST_LANE_MIN_BYTES, DELTA_MSG, DELTA_MAX_PATCH_BYTES, DELTA_SOURCE_MAX, DELTA_PLAN_WAIT_MS, type TransferManifest, type TransferSummary, type TransferState, type DeltaHashesBody, type DeltaPlanBody, type DeltaDeclinedBody } from '@/lib/fluxdrop/protocol'
+import { MessageType, CONSTANTS, FAST_LANE_MAX, FAST_LANE_MIN_BYTES, DELTA_MSG, DELTA_MAX_PATCH_BYTES, DELTA_SOURCE_MAX, DELTA_PLAN_WAIT_MS, type TransferManifest, type TransferSummary, type TransferState, type DeltaHashesBody, type DeltaPlanBody, type DeltaDeclinedBody, type SessionGrants } from '@/lib/fluxdrop/protocol'
 import { gzipCompress, gzipDecompress, shouldCompressTransfer, isCompressionSupported } from '@/lib/fluxdrop/compress'
 import { fetchTurnCredentials, mergeTurnIntoIceServers } from '@/lib/fluxdrop/turn'
 import {
@@ -75,6 +76,10 @@ import {
   applyPatch,
 } from '@/lib/fluxdrop/delta'
 import { toast } from 'sonner'
+// v5-b1/b2/b4: disappearing transfers (TTL + remote wipe), panic mode
+// (duress PIN), and scoped session grants.
+import { isDuressPin, executePanicWipe } from '@/lib/fluxdrop/panic'
+import { grantAllows, grantedToUse, recordIncomingGrants, recordOutgoingGrants, clearGrants } from '@/lib/fluxdrop/session-grants'
 // v4: merkle integrity tree (1.7), clipboard sync (4.6), prefs (1.3/5.4/etc).
 import { computeTransferMerkle } from '@/lib/fluxdrop/merkle'
 import { isValidClipboardFrame, deliverClipboardSync, attachClipboardSender, CLIPBOARD_MAX_LEN } from '@/lib/fluxdrop/clipboard-sync'
@@ -851,7 +856,9 @@ export function useFluxDrop() {
             senderDeviceId: payload.from,
             receiverDeviceId: s.deviceId,
           })
-          const { reply } = hs.processHello({ salt: data.salt, xPub: data.xPub })
+          // v5-b3: forward the ML-KEM-768 public key when the sender offered
+          // the hybrid leg; encapsulation happens inside processHello.
+          const { reply } = hs.processHello({ salt: data.salt, xPub: data.xPub, kemPub: data.kemPub })
           e2eHandshakesRef.current.set(payload.from, hs)
           e2eGenRef.current++
           s.setE2EStatus('handshaking')
@@ -859,7 +866,7 @@ export function useFluxDrop() {
             roomId,
             from: s.deviceId,
             to: payload.from,
-            data: { type: 'reply', v: 1, yPub: reply.yPub } satisfies E2ERelayMessage,
+            data: { type: 'reply', v: 1, yPub: reply.yPub, ...(reply.kemCt ? { kemCt: reply.kemCt } : {}) } satisfies E2ERelayMessage,
           })
           console.log('[FluxDrop] E2E: hello received — reply sent')
         } catch (err: any) {
@@ -872,7 +879,8 @@ export function useFluxDrop() {
         const hs = e2eHandshakesRef.current.get(payload.from)
         if (!hs || hs.role !== 'sender' || hs.isComplete) return
         try {
-          const { confirmMac } = hs.processReply({ yPub: data.yPub })
+          // v5-b3: forward the KEM ciphertext when the receiver encapsulated.
+          const { confirmMac } = hs.processReply({ yPub: data.yPub, kemCt: data.kemCt })
           signalingRef.current?.sendE2ERelay({
             roomId,
             from: useSessionStore.getState().deviceId,
@@ -899,11 +907,13 @@ export function useFluxDrop() {
           const { sas } =
             myRole === 'sender' ? hs.verifyReceiverConfirm(data.mac) : hs.verifyPeerConfirm(data.mac)
           if (!hs.aesKeyRaw) throw new Error('key material missing')
-          await activateE2ESession(hs.aesKeyRaw, sas, roomId, payload.from)
+          // v5-b3: pqHybrid records whether the ML-KEM-768 leg contributed —
+          // surfaced in the verification card + trusted-peer TOFU record.
+          await activateE2ESession(hs.aesKeyRaw, sas, roomId, payload.from, hs.isPqHybrid)
           e2eGenRef.current++
           useSessionStore.getState().setE2EStatus('active')
           useSessionStore.getState().setE2ESas(sas)
-          console.log(`[FluxDrop] E2E: session ACTIVE (SAS ${sas})`)
+          console.log(`[FluxDrop] E2E: session ACTIVE (SAS ${sas}${hs.isPqHybrid ? ' · PQ hybrid' : ''})`)
           if (myRole === 'receiver') {
             // Receiver answers with its own (role-tagged) confirmation so the
             // sender's activation is mutual.
@@ -1872,8 +1882,11 @@ export function useFluxDrop() {
       onTransferAccepted: (payload) => {
         // v1.3 (6.1): `from` is the receiver that accepted. Mark THAT peer
         // accepted; the fan-out scheduler kicks off on the first acceptor.
+        // v5-b4: the acceptor's session grants (chat/clipboard) are recorded
+        // here — absent grants (older receiver) default to allow.
         if (payload.accepted) {
           const peerId = payload.from
+          if (peerId) recordIncomingGrants(peerId, payload.grants)
           if (peerId && senderPeersRef.current.has(peerId)) {
             senderPeersRef.current.get(peerId)!.accepted = true
             if (!requiredPeersRef.current.has(peerId) && senderPeersRef.current.size > 0 && transferRef.current.transferState !== 'TRANSFERRING') {
@@ -3800,6 +3813,13 @@ export function useFluxDrop() {
         // from ANY peer (group rooms: each receiver's channel lands here with
         // its own fromPeerId). Strictly fail-soft: a bad chat frame is
         // dropped and NEVER disturbs a transfer.
+        // v5-b4: scoped session grants — a peer we denied chat to is dropped
+        // here, BEFORE any UI surface (the receiver-side check is the
+        // authority; default-allow for peers with no record).
+        if (!grantAllows(peerId, 'chat')) {
+          console.log('[FluxDrop] Chat frame dropped — not granted this session')
+          break
+        }
         void (async () => {
           try {
             const e2eOn = isE2EActive(peerId)
@@ -3844,6 +3864,12 @@ export function useFluxDrop() {
         // dropped while E2E is on), shape-guarded, strictly fail-soft. The
         // receiving side only opted-in surfaces this (the sync pref gates
         // delivery).
+        // v5-b4: scoped session grants — clipboard pushes need an explicit
+        // grant from THIS device's consent (default: denied).
+        if (!grantAllows(peerId, 'clipboard')) {
+          console.log('[FluxDrop] Clipboard frame dropped — not granted this session')
+          break
+        }
         void (async () => {
           try {
             if (!usePrefsStore.getState().clipboardSync) return // not opted in here
@@ -3859,6 +3885,34 @@ export function useFluxDrop() {
             deliverClipboardSync({ text: body.text, at: body.at })
           } catch (err: any) {
             console.warn('[FluxDrop] Clipboard frame dropped:', err?.message ?? err)
+          }
+        })()
+        break
+      }
+      case MessageType.WIPE_REQUEST: {
+        // v5-b1: sender-requested remote wipe. Purge every trace of this
+        // transferId from the RECEIVER side: the vault entry, the resume
+        // chunk cache + history record (deleteTransferRecord clears both
+        // stores), and any in-memory buffers of the active receive. Never
+        // touches anything already saved through the OS picker (out of the
+        // browser's reach by design). Strictly fire-and-forget.
+        const m0 = manifestRef.current
+        const targetId = m?.transferId ?? ''
+        if (!targetId) break
+        void (async () => {
+          try {
+            await deleteVaultEntry(targetId)
+            await deleteTransferRecord(targetId)
+            if (m0?.transferId === targetId) {
+              receiverBuffersRef.current.clear()
+            }
+            console.log(`[FluxDrop] Remote wipe applied for transfer ${targetId.slice(0, 8)} (sender: ${msg.body?.reason ?? 'requested'})`)
+            toast.info('Transfer wiped on this device', {
+              description: 'The sender asked this copy to disappear — vault entry, resume cache and buffers were removed.',
+              duration: 8000,
+            })
+          } catch (err: any) {
+            console.warn('[FluxDrop] Remote wipe failed:', err?.message ?? err)
           }
         })()
         break
@@ -3898,7 +3952,10 @@ export function useFluxDrop() {
   // ---- Receiver: handle incoming manifest (via DC or signaling) ----
   // Shared accept pipeline — used by the manual consent dialog AND the
   // trusted-device auto-accept path.
-  const doAcceptTransfer = useCallback(async (m: TransferManifest) => {
+  // v5-b4: `grants` (from the consent dialog) ride the transfer-accepted
+  // signaling event so the SENDER knows which session capabilities we
+  // granted; the local record powers the receiver-side enforcement above.
+  const doAcceptTransfer = useCallback(async (m: TransferManifest, grants?: SessionGrants) => {
     sessionRef.current.setPendingManifest(null)
     transferRef.current.setTransferState('TRANSFERRING')
     transferRef.current.startTimer()
@@ -3908,7 +3965,11 @@ export function useFluxDrop() {
       from: sessionRef.current.deviceId,
       to: peerDeviceIdRef.current!,
       accepted: true,
+      ...(grants ? { grants } : {}),
     })
+    if (grants && peerDeviceIdRef.current) {
+      recordOutgoingGrants(peerDeviceIdRef.current, grants)
+    }
     // New receiving attempt: start a fresh flush set (old flushed chunks stay
     // in IndexedDB and still count via the record's chunksAcked below).
     flushedChunkIdsRef.current = new Set()
@@ -4040,7 +4101,7 @@ export function useFluxDrop() {
   }, [doAcceptTransfer, requestPreviews])
 
   /** Called when the user accepts the transfer in the ConsentDialog. */
-  const acceptTransfer = useCallback(async (trust = false) => {
+  const acceptTransfer = useCallback(async (trust = false, grants?: SessionGrants) => {
     const m = manifestRef.current
     if (!m) return
     if (trust && peerDeviceIdRef.current) {
@@ -4059,7 +4120,7 @@ export function useFluxDrop() {
           : 'Future transfers from this device can be auto-accepted (enable in Settings → Privacy).',
       })
     }
-    await doAcceptTransfer(m)
+    await doAcceptTransfer(m, grants)
     toast.success(`Receiving ${m.files.length} file${m.files.length > 1 ? 's' : ''} (${formatBytes(m.totalSize)})`)
   }, [doAcceptTransfer])
 
@@ -4246,6 +4307,9 @@ export function useFluxDrop() {
               totalSize: m.totalSize,
               fileCount: m.files.length,
               verified: true,
+              // v5-b1: disappearing transfers — arm the TTL when the sender
+              // requested one (absent = keep until budget/LRU eviction).
+              ...(m.ttlMs ? { expiresAt: Date.now() + m.ttlMs } : {}),
               files: m.files.map((f) => ({
                 name: f.name,
                 relativePath: f.relativePath,
@@ -4475,6 +4539,8 @@ export function useFluxDrop() {
               totalSize: m.totalSize,
               fileCount: 1,
               verified: true,
+              // v5-b1: disappearing transfers — arm the TTL when requested.
+              ...(m.ttlMs ? { expiresAt: Date.now() + m.ttlMs } : {}),
               files: [
                 {
                   name: entry.name,
@@ -4752,6 +4818,8 @@ export function useFluxDrop() {
               totalSize: m.totalSize,
               fileCount: m.files.length,
               verified: true,
+              // v5-b1: disappearing transfers — arm the TTL when requested.
+              ...(m.ttlMs ? { expiresAt: Date.now() + m.ttlMs } : {}),
               files: m.files.map((f) => ({
                 name: f.name,
                 relativePath: f.relativePath,
@@ -5512,6 +5580,15 @@ export function useFluxDrop() {
   // is skipped — checksums are already baked into the manifest.
   const startSend = useCallback(async (files: File[], resumeManifest?: TransferManifest, claim?: { roomCode: string; pin: string }) => {
     try {
+      // v5-b2: panic mode — the duress PIN typed into a share-link claim is
+      // the other place a user enters a PIN. Same silent-refusal contract as
+      // the receiver join path.
+      if (claim?.pin && isDuressPin(claim.pin)) {
+        void executePanicWipe()
+        toast.error('Signaling error: INVALID_PIN', { description: 'incorrect PIN' })
+        transferRef.current.setTransferState('FAILED')
+        return
+      }
       const validation = validateFiles(files)
       if (!validation.ok) {
         toast.error('Cannot send files', { description: validation.errors.join(', ') })
@@ -5689,6 +5766,16 @@ export function useFluxDrop() {
   // ---- Public API: join a room as receiver ----
   const startReceive = useCallback(async (roomId: string, pin: string) => {
     try {
+      // v5-b2: panic mode — the duress PIN entered where a room PIN is asked
+      // silently wipes everything and refuses the pairing with the SAME error
+      // a wrong PIN produces (nothing about the wipe is surfaced). The wipe
+      // is fire-and-forget; the user can re-type the real PIN right after.
+      if (isDuressPin(pin)) {
+        void executePanicWipe()
+        toast.error('Signaling error: INVALID_PIN', { description: 'incorrect PIN' })
+        transferRef.current.setTransferState('FAILED')
+        return
+      }
       transferRef.current.setTransferState('PAIRING')
       // Ensure device identity is ready before connecting.
       await ensureDeviceReady()
@@ -5735,14 +5822,16 @@ export function useFluxDrop() {
     // Targets: every OPEN peer channel. Sender side iterates the fan-out map
     // (same pattern as pauseTransfer); with no fan-out state (receiver, or a
     // sender before its first pairing) fall back to the primary channel.
+    // v5-b4: peers that granted us chat=false are filtered out here (the
+    // receiver drops such frames anyway — this stops phantom "sent" legs).
     const targets: { peerId: string | null; rtc: FluxDropWebRTC }[] = []
     for (const peer of senderPeersRef.current.values()) {
       // v5-a2: relay-mode peers have no DC — chat/clipboard are P2P-only.
-      if (peer.rtc?.isOpen) targets.push({ peerId: peer.id, rtc: peer.rtc })
+      if (peer.rtc?.isOpen && grantedToUse(peer.id, 'chat')) targets.push({ peerId: peer.id, rtc: peer.rtc })
     }
     if (targets.length === 0) {
       const rtc = getRtc()
-      if (rtc?.isOpen) targets.push({ peerId: peerDeviceIdRef.current, rtc })
+      if (rtc?.isOpen && grantedToUse(peerDeviceIdRef.current, 'chat')) targets.push({ peerId: peerDeviceIdRef.current, rtc })
     }
     if (targets.length === 0) return false
     // The message travelled PIN-sealed only if EVERY leg is E2E-encrypted.
@@ -5872,6 +5961,8 @@ export function useFluxDrop() {
   const cleanup = useCallback(() => {
     clearPaused()
     stopDiagnosticsPolling()
+    // v5-b4: session grants die with the session — a new pairing re-consents.
+    clearGrants()
     // v1.3: close EVERY peer connection (group fan-out).
     for (const rtc of peerRtcsRef.current.values()) {
       try { rtc.close() } catch { /* ignore */ }
@@ -5968,11 +6059,12 @@ export function useFluxDrop() {
     const targets: { peerId: string | null; rtc: FluxDropWebRTC }[] = []
     for (const peer of senderPeersRef.current.values()) {
       // v5-a2: relay-mode peers have no DC — chat/clipboard are P2P-only.
-      if (peer.rtc?.isOpen) targets.push({ peerId: peer.id, rtc: peer.rtc })
+      // v5-b4: only peers that explicitly granted clipboard pushes.
+      if (peer.rtc?.isOpen && grantedToUse(peer.id, 'clipboard')) targets.push({ peerId: peer.id, rtc: peer.rtc })
     }
     if (targets.length === 0) {
       const rtc = getRtc()
-      if (rtc?.isOpen) targets.push({ peerId: peerDeviceIdRef.current, rtc })
+      if (rtc?.isOpen && grantedToUse(peerDeviceIdRef.current, 'clipboard')) targets.push({ peerId: peerDeviceIdRef.current, rtc })
     }
     if (targets.length === 0) return false
     void (async () => {
@@ -6039,6 +6131,48 @@ export function useFluxDrop() {
     return unsub
   }, [])
 
+  // ---- v5-b1: sender-requested remote wipe — public API ----
+  // Sends WIPE_REQUEST for `transferId` over every live peer channel (the
+  // receiver purges its vault entry + resume cache + buffers). P2P-only by
+  // design: the peer that must wipe is by definition the one we just talked
+  // to; a relay-mode leg has no DataChannel to carry the request.
+  const requestRemoteWipe = useCallback((transferId: string, reason?: string): boolean => {
+    if (!transferId) return false
+    let sent = false
+    for (const [peerId, peer] of senderPeersRef.current) {
+      if (peer.rtc?.isOpen) {
+        try { peer.rtc.sendWipeRequest(transferId, reason); sent = true } catch { /* per-leg best-effort */ }
+        void peerId
+      }
+    }
+    const rtc = getRtc()
+    if (!sent && rtc?.isOpen) {
+      try { rtc.sendWipeRequest(transferId, reason); sent = true } catch { /* best-effort */ }
+    }
+    if (sent) {
+      console.log(`[FluxDrop] Remote wipe requested for transfer ${transferId.slice(0, 8)}`)
+      toast.success('Remote wipe requested', {
+        description: 'The receiver will purge its vault copy, resume cache and buffers of this transfer.',
+      })
+    } else {
+      toast.error('No live channel to the receiver', {
+        description: 'The peer must still be connected for a remote wipe — DataChannel only.',
+      })
+    }
+    return sent
+  }, [])
+
+  // v5-b1: bridge from the summary card (dispatches 'fluxdrop:request-remote-wipe'
+  // with { transferId } — same pattern as the v4 'fluxdrop:send-onward' event).
+  useEffect(() => {
+    const onWipe = (e: Event) => {
+      const detail = (e as CustomEvent<{ transferId?: string }>).detail
+      if (detail?.transferId) requestRemoteWipe(detail.transferId)
+    }
+    window.addEventListener('fluxdrop:request-remote-wipe', onWipe)
+    return () => window.removeEventListener('fluxdrop:request-remote-wipe', onWipe)
+  }, [requestRemoteWipe])
+
   // ---- v5-a1: terminal states tear every fast lane down (complete, cancel,
   // fail, error). PAUSED/RESUMING keep lanes — resume continuity. ----
   // v5-a2: the same rule closes every relay leg — terminal means terminal.
@@ -6064,6 +6198,7 @@ export function useFluxDrop() {
     requestPreviews,
     sendChat,
     sendClipboardSync,
+    requestRemoteWipe,
     /** v4 (6.2): verified received files of a completed transfer (for onward sending). */
     getReceivedFiles: (transferId: string): File[] | null => {
       const cached = receivedFilesCache.get(transferId)

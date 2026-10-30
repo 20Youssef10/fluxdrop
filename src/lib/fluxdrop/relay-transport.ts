@@ -103,8 +103,22 @@ export class RelayTransport {
     this.opts = opts
     this.detachAck = signaling.onRelayAck((p) => this.handleAck(p))
     this.detachError = signaling.onRelayError((p) => {
-      // Quota / routing errors surface here; the retransmit timer already
-      // handles delivery retries once the server bucket refills.
+      // v5-b5: relay-error reasons split by recoverability:
+      //  - 'quota'      (per-room or per-IP token bucket) — TRANSIENT: the
+      //                 4s retransmit timer retries once the bucket refills.
+      //  - 'room-cap'   (per-room lifetime byte cap) — PERMANENT for this
+      //                 room: retransmitting forever is pure hammering, so
+      //                 the leg fails over to the engine's FAILED path.
+      //  - 'blocked'    (admin kill-switch) — PERMANENT, same treatment.
+      if (p?.reason === 'room-cap' || p?.reason === 'blocked') {
+        const why = p.reason === 'room-cap'
+          ? 'server room relay cap reached'
+          : 'relay blocked by server policy'
+        console.warn(`[FluxDrop] v5-b5 relay: ${why} — failing this leg`)
+        this.close()
+        this.fatalCb?.(why)
+        return
+      }
       if (p?.reason === 'quota') {
         console.warn('[FluxDrop] v5-a2 relay: server rate limit hit — backing off to the 4s retransmit timer')
       }

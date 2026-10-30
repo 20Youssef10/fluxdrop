@@ -26,6 +26,13 @@ export interface VaultEntry {
   fileCount: number
   files: VaultFileMeta[]
   verified: boolean
+  /**
+   * v5-b1: disappearing transfers — epoch ms when this entry auto-purges.
+   * Absent = keep until budget/LRU eviction. Stamped from the manifest's
+   * ttlMs hint at save time; enforced by sweepVaultExpiry() (idempotent,
+   * called on every list + on visibility changes + after each save).
+   */
+  expiresAt?: number
 }
 
 // Budget source of truth. The session store persists `fluxdrop:vault-budget-mb`
@@ -172,9 +179,10 @@ export async function saveToVault(
   }
 }
 
-/** Every vault entry, newest first. */
+/** Every vault entry, newest first (v5-b1: expiry-swept first). */
 export async function listVault(): Promise<VaultEntry[]> {
   try {
+    await sweepVaultExpiry()
     const store = getMetaStore()
     if (!store) return []
     const ks = await keys(store)
@@ -263,4 +271,66 @@ export async function enforceVaultBudget(): Promise<void> {
       total -= Number.isFinite(e.totalSize) ? e.totalSize : 0
     }
   } catch { /* best-effort */ }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v5-b1: disappearing transfers — TTL enforcement + full wipe (panic mode)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Purge every vault entry whose expiresAt has passed. Idempotent, never throws. */
+export async function sweepVaultExpiry(): Promise<number> {
+  let wiped = 0
+  try {
+    const store = getMetaStore()
+    if (!store) return 0
+    const ks = await keys(store)
+    const now = Date.now()
+    for (const k of ks) {
+      if (typeof k !== 'string' || !k.startsWith(META_KEY_PREFIX)) continue
+      const v = await get<VaultEntry>(k, store)
+      if (isVaultEntryShape(v) && typeof v.expiresAt === 'number' && v.expiresAt <= now) {
+        await deleteVaultEntry(v.transferId)
+        wiped++
+      }
+    }
+  } catch { /* best-effort — never break a list */ }
+  return wiped
+}
+
+/**
+ * Wipe the ENTIRE vault (every entry + the OPFS vault subtree) — used by panic
+ * mode (v5-b2). Returns the number of entries removed. Never throws.
+ */
+export async function wipeVault(): Promise<number> {
+  let wiped = 0
+  try {
+    const entries = await listVault()
+    for (const e of entries) {
+      await deleteVaultEntry(e.transferId)
+      wiped++
+    }
+    // Belt-and-braces: clear the OPFS vault subtree too (orphaned blobs from
+    // partially-written entries have no metadata record to discover).
+    // OPFS has no recursive "remove self" — enumerate + remove children
+    // (entries() exists at runtime; the TS DOM lib lags behind, hence the cast).
+    const vaultDir = await getVaultDir()
+    if (vaultDir) {
+      try {
+        const iterable = (vaultDir as unknown as {
+          entries?: () => AsyncIterableIterator<[string, FileSystemHandle]>
+        }).entries
+        if (typeof iterable === 'function') {
+          for await (const [name, handle] of iterable.call(vaultDir)) {
+            try {
+              await vaultDir.removeEntry(name, { recursive: handle.kind === 'directory' })
+            } catch { /* best-effort per entry */ }
+          }
+        }
+      } catch {
+        // Enumeration unsupported — the per-entry loop above is the
+        // authoritative wipe; this is only orphan cleanup.
+      }
+    }
+  } catch { /* best-effort */ }
+  return wiped
 }

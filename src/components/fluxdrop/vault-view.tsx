@@ -8,7 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Archive, Search, Download, FolderDown, Trash2, ShieldCheck, HardDrive, ChevronDown } from 'lucide-react'
+import { Archive, Search, Download, FolderDown, Timer, Trash2, ShieldCheck, HardDrive, ChevronDown } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -19,12 +19,32 @@ import { formatBytes } from '@/lib/fluxdrop/format'
 import { saveFilesToDirectory, saveBlobWithPicker } from '@/lib/fluxdrop/file-io'
 import { toast } from 'sonner'
 
+/** v5-b1: compact countdown — "42s", "8m", "3h", "2d". */
+function formatCountdown(expiresAt: number): string {
+  const ms = expiresAt - Date.now()
+  if (ms <= 0) return 'now'
+  const s = Math.ceil(ms / 1000)
+  if (s < 90) return `${s}s`
+  const m = Math.ceil(s / 60)
+  if (m < 90) return `${m}m`
+  const h = Math.ceil(m / 60)
+  if (h < 36) return `${h}h`
+  return `${Math.ceil(h / 24)}d`
+}
+
 export function VaultView() {
   const vaultEnabled = useSessionStore((s) => s.vaultEnabled)
   const [entries, setEntries] = useState<VaultEntry[]>([])
   const [query, setQuery] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  // v5-b1: 30s tick so disappearing-transfer countdown badges stay live
+  // (expired entries vanish on the next sweep — listVault sweeps on read).
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => setTick((n) => n + 1), 30_000)
+    return () => clearInterval(id)
+  }, [])
   // SSR gate: OPFS checks + localStorage-backed prefs differ between server
   // and client, which would hydrate-mismatch. Render nothing until mounted.
   const [mounted, setMounted] = useState(false)
@@ -174,6 +194,18 @@ export function VaultView() {
                       <Badge variant="outline" className="shrink-0 border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 text-[10px]">
                         <ShieldCheck className="mr-1 h-3 w-3" aria-hidden="true" />
                         SHA-256 ✓
+                      </Badge>
+                    )}
+                    {/* v5-b1: disappearing transfers — live countdown to the
+                        receiver-side auto-purge armed by the sender's TTL. */}
+                    {typeof entry.expiresAt === 'number' && (
+                      <Badge
+                        variant="outline"
+                        className="shrink-0 border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400 text-[10px] tabular-nums"
+                        title="Disappearing transfer — the vault copy auto-purges when this reaches zero"
+                      >
+                        <Timer className="mr-1 h-3 w-3" aria-hidden="true" />
+                        {formatCountdown(entry.expiresAt)}
                       </Badge>
                     )}
                     <div className="flex shrink-0 items-center gap-1">

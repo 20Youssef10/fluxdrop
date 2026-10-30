@@ -11,6 +11,17 @@
 //   arithmetic. The PAKE structure means every PIN guess an attacker makes
 //   requires a fresh ONLINE interaction — a 6-digit PIN stays safe against
 //   offline dictionary attacks.
+// - v5-b3 POST-QUANTUM HYBRID: every handshake now ALSO runs an ML-KEM-768
+//   (Kyber, FIPS 203) key-exchange in parallel with SPAKE2 — the same
+//   hybrid pattern as Signal's PQXDH / Apple's PQ3. The HKDF input key
+//   material becomes concat(spaKE_shared || kem_shared_secret) and the
+//   transcript + SAS bind BOTH legs (kemPub || kemCt included), so a
+//   harvest-now-decrypt-later attacker who records today's classical
+//   transcript still can't derive tomorrow's session key. A classical-only
+//   MITM between two hybrid peers produces different keys → confirmation
+//   MACs fail, exactly like any other tamper. Back-compat: a peer that
+//   doesn't answer with a kem ciphertext (older client) transparently
+//   completes the classic v1.2 handshake — byte-identical derivation.
 // - Key confirmation (HMAC over the transcript) + SAS (6-digit short
 //   authentication string shown on both sides) catch a two-leg MITM: each leg
 //   derives a DIFFERENT key/SAS, so codes differ → user sees it.
@@ -28,6 +39,10 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { hkdf } from '@noble/hashes/hkdf.js'
 import { pbkdf2 } from '@noble/hashes/pbkdf2.js'
 import { hmac } from '@noble/hashes/hmac.js'
+// v5-b3: ML-KEM-768 (FIPS 203) from the audited @noble family — pure JS, no
+// WASM dependency (the blake3-wasm registry failure is why A4 avoided WASM).
+// The root module throws by design; the KEM lives in the ml-kem submodule.
+import { ml_kem768 } from '@noble/post-quantum/ml-kem.js'
 
 // RFC 9383 test-vector constants M and N for P-256 (SPAKE2 M/N points).
 const M_HEX = '02886e2f97ace46e55ba9dd7242579f2993b64e16ef3dcab95afd497333d8fa12f'
@@ -52,8 +67,8 @@ export interface E2EContext {
 
 /** Messages exchanged via the signaling e2e-relay channel (opaque to the server). */
 export type E2ERelayMessage =
-  | { type: 'hello'; v: 1; salt: string; xPub: string }
-  | { type: 'reply'; v: 1; yPub: string }
+  | { type: 'hello'; v: 1; salt: string; xPub: string; kemPub?: string }
+  | { type: 'reply'; v: 1; yPub: string; kemCt?: string }
   | { type: 'confirm'; v: 1; mac: string }
   | { type: 'fail'; v: 1; reason: string }
 
@@ -97,6 +112,11 @@ interface SpakeSecrets {
   w0: bigint
   scalar: bigint
   myPublic: ReturnType<typeof p256.Point.fromHex> | null
+  /** v5-b3: our side of the ML-KEM-768 leg (sender: secret key; receiver: encapsulated shared secret). */
+  kemSecretKey?: Uint8Array
+  kemPub?: Uint8Array
+  kemCt?: Uint8Array
+  kemSs?: Uint8Array
 }
 
 /** Derive w0 (password scalar) from PIN + salt. */
@@ -107,10 +127,12 @@ function deriveW0(pin: string, salt: Uint8Array): bigint {
 
 /**
  * Shared transcript. Binds EVERYTHING both sides must agree on: protocol tag,
- * room, both device ids, salt, both ephemeral points. Changing ANY byte here
- * changes the derived keys → confirmation fails.
+ * room, both device ids, salt, both ephemeral points, and (v5-b3) the ML-KEM
+ * public key + ciphertext when the hybrid leg ran. Changing ANY byte here
+ * changes the derived keys → confirmation fails. Classic-only handshakes
+ * (older peer) omit the kem fields and derive byte-identical v1.2 keys.
  */
-function transcriptBytes(ctx: E2EContext, salt: Uint8Array, xPub: Uint8Array, yPub: Uint8Array): Uint8Array {
+function transcriptBytes(ctx: E2EContext, salt: Uint8Array, xPub: Uint8Array, yPub: Uint8Array, kemPub?: Uint8Array, kemCt?: Uint8Array): Uint8Array {
   return concatBytes(
     utf8(PROTOCOL_TAG),
     utf8(ctx.roomId),
@@ -118,7 +140,8 @@ function transcriptBytes(ctx: E2EContext, salt: Uint8Array, xPub: Uint8Array, yP
     utf8(ctx.receiverDeviceId),
     salt,
     xPub,
-    yPub
+    yPub,
+    ...(kemPub && kemCt ? [utf8('ml-kem-768'), kemPub, kemCt] : [])
   )
 }
 
@@ -126,24 +149,39 @@ interface DerivedKeys {
   aesKeyRaw: Uint8Array
   confirmKey: Uint8Array
   sas: string
+  /** v5-b3: true when the ML-KEM-768 hybrid leg contributed key material. */
+  pqHybrid: boolean
 }
 
-function deriveKeys(ctx: E2EContext, salt: Uint8Array, xPub: Uint8Array, yPub: Uint8Array, sharedPoint: ReturnType<typeof p256.Point.fromHex>): DerivedKeys {
+/** v5-b3: the PQ leg's contribution to a handshake — pub + ct feed the
+ * transcript/SAS, ss feeds the HKDF input key material. */
+interface KemLeg {
+  pub: Uint8Array
+  ct: Uint8Array
+  ss: Uint8Array
+}
+
+function deriveKeys(ctx: E2EContext, salt: Uint8Array, xPub: Uint8Array, yPub: Uint8Array, sharedPoint: ReturnType<typeof p256.Point.fromHex>, kem?: KemLeg): DerivedKeys {
   const sharedX = new Uint8Array(32)
   let kx = sharedPoint.x
   for (let i = 31; i >= 0; i--) {
     sharedX[i] = Number(kx & 0xffn)
     kx >>= 8n
   }
-  const transcript = transcriptBytes(ctx, salt, xPub, yPub)
-  const okm = hkdf(sha256, sharedX, sha256(transcript), utf8(`${PROTOCOL_TAG} keys`), 96)
+  const transcript = transcriptBytes(ctx, salt, xPub, yPub, kem?.pub, kem?.ct)
+  // v5-b3: hybrid IKM — the classical SPAKE2 secret and the ML-KEM-768
+  // shared secret are concatenated with domain separation; an attacker must
+  // break BOTH to derive keys (HNDL resistance). Without the kem leg the IKM
+  // is byte-identical to v1.2 (older-peer back-compat).
+  const ikm = kem ? concatBytes(utf8('hybrid:'), sharedX, kem.ss) : sharedX
+  const okm = hkdf(sha256, ikm, sha256(transcript), utf8(`${PROTOCOL_TAG} keys`), 96)
   const aesKeyRaw = okm.slice(0, 32)
   const confirmKey = okm.slice(32, 64)
   const sasSeed = okm.slice(64, 96)
   let sasNum = 0n
   for (let i = 0; i < 8; i++) sasNum = (sasNum << 8n) | BigInt(sasSeed[i])
   const sas = (sasNum % 1_000_000n).toString().padStart(6, '0')
-  return { aesKeyRaw, confirmKey, sas }
+  return { aesKeyRaw, confirmKey, sas, pqHybrid: !!kem }
 }
 
 function confirmMac(confirmKey: Uint8Array, role: 'sender' | 'receiver', transcriptHash: Uint8Array): string {
@@ -175,13 +213,19 @@ export class E2EHandshake {
     return this.done
   }
 
+  /** v5-b3: the ML-KEM-768 hybrid leg contributed to this handshake's keys. */
+  get isPqHybrid(): boolean {
+    return this.keys?.pqHybrid === true
+  }
+
   /** Raw derived AES key material (available once both messages processed). */
   get aesKeyRaw(): Uint8Array | null {
     return this.keys?.aesKeyRaw ?? null
   }
 
-  /** SENDER step 1: create the hello (salt + ephemeral point X = x·G + w0·M). */
-  createHello(): { salt: string; xPub: string } {
+  /** SENDER step 1: create the hello (salt + ephemeral point X = x·G + w0·M
+   * + our ML-KEM-768 public key — v5-b3 hybrid). */
+  createHello(): { salt: string; xPub: string; kemPub?: string } {
     if (this.role !== 'sender') throw new Error('createHello is sender-only')
     const salt = randomBytes(16)
     const w0 = deriveW0(this.ctx.pin, salt)
@@ -190,11 +234,18 @@ export class E2EHandshake {
     const xPub = X.toBytes(true)
     this.secrets = { salt, w0, scalar: x, myPublic: X }
     this.myPublicBytes = xPub
-    return { salt: toHex(salt), xPub: toHex(xPub) }
+    // v5-b3: generate the KEM keypair INSIDE the try of the caller — a keygen
+    // failure aborts the handshake (fail-closed), never a silent classical-only
+    // downgrade between two hybrid-capable peers. (~1 ms for ML-KEM-768.)
+    const { publicKey, secretKey } = ml_kem768.keygen()
+    this.secrets.kemPub = publicKey
+    this.secrets.kemSecretKey = secretKey
+    return { salt: toHex(salt), xPub: toHex(xPub), kemPub: toHex(publicKey) }
   }
 
-  /** RECEIVER step 1: process hello → reply (Y = y·G + w0·N) + our confirm mac. */
-  processHello(hello: { salt: string; xPub: string }): { reply: { yPub: string }; confirmMac: string; sas: string } {
+  /** RECEIVER step 1: process hello → reply (Y = y·G + w0·N + the KEM
+   * ciphertext encapsulated against the sender's kemPub — v5-b3 hybrid). */
+  processHello(hello: { salt: string; xPub: string; kemPub?: string }): { reply: { yPub: string; kemCt?: string }; confirmMac: string; sas: string } {
     if (this.role !== 'receiver') throw new Error('processHello is receiver-only')
     const salt = fromHex(hello.salt)
     const xPub = fromHex(hello.xPub)
@@ -205,28 +256,54 @@ export class E2EHandshake {
     this.secrets = { salt, w0, scalar: y, myPublic: Y }
     this.myPublicBytes = Y.toBytes(true)
     this.peerPublic = xPub
+    // v5-b3: encapsulate against the sender's ML-KEM public key. A malformed
+    // or missing kemPub from a v5 sender is treated as a classic-only peer —
+    // the handshake completes exactly as in v1.2 (back-compat).
+    let kem: KemLeg | undefined
+    if (hello.kemPub) {
+      try {
+        const pub = fromHex(hello.kemPub)
+        const { cipherText, sharedSecret } = ml_kem768.encapsulate(pub)
+        this.secrets.kemCt = cipherText
+        this.secrets.kemSs = sharedSecret
+        kem = { pub, ct: cipherText, ss: sharedSecret }
+      } catch {
+        kem = undefined
+      }
+    }
     // K = y·(X − w0·M) == x·y·G  (the receiver's offset point is M)
     const shared = X.subtract(POINT_M.multiply(w0)).multiply(y)
-    this.keys = deriveKeys(this.ctx, salt, xPub, this.myPublicBytes, shared)
-    this.transcriptHash = sha256(transcriptBytes(this.ctx, salt, xPub, this.myPublicBytes))
+    this.keys = deriveKeys(this.ctx, salt, xPub, this.myPublicBytes, shared, kem)
+    this.transcriptHash = sha256(transcriptBytes(this.ctx, salt, xPub, this.myPublicBytes, kem?.pub, kem?.ct))
     return {
-      reply: { yPub: toHex(this.myPublicBytes) },
+      reply: { yPub: toHex(this.myPublicBytes), ...(kem ? { kemCt: toHex(kem.ct) } : {}) },
       confirmMac: confirmMac(this.keys.confirmKey, 'sender', this.transcriptHash), // expected FROM sender
       sas: this.keys.sas,
     }
   }
 
   /** SENDER step 2: process reply → keys + our confirm mac (to send). */
-  processReply(reply: { yPub: string }): { confirmMac: string; sas: string } {
+  processReply(reply: { yPub: string; kemCt?: string }): { confirmMac: string; sas: string } {
     if (this.role !== 'sender') throw new Error('processReply is sender-only')
     if (!this.secrets || !this.myPublicBytes) throw new Error('createHello must run first')
     const yPub = fromHex(reply.yPub)
     const Y = p256.Point.fromBytes(yPub)
     this.peerPublic = yPub
+    // v5-b3: decapsulate the receiver's ciphertext when BOTH sides offered the
+    // hybrid leg. No kemCt (older receiver) → classic v1.2 derivation. A TAMPERED
+    // kemCt decapsulates to a garbage secret (ML-KEM implicit rejection never
+    // throws) → the derived keys differ → the confirmation MACs mismatch → the
+    // handshake aborts. Fail-closed either way, never a silent downgrade.
+    let kem: KemLeg | undefined
+    if (reply.kemCt && this.secrets.kemPub && this.secrets.kemSecretKey) {
+      const ct = fromHex(reply.kemCt)
+      const ss = ml_kem768.decapsulate(ct, this.secrets.kemSecretKey)
+      kem = { pub: this.secrets.kemPub, ct, ss }
+    }
     // K = x·(Y − w0·N) == x·y·G
     const shared = Y.subtract(POINT_N.multiply(this.secrets.w0)).multiply(this.secrets.scalar)
-    this.keys = deriveKeys(this.ctx, this.secrets.salt, this.myPublicBytes, yPub, shared)
-    this.transcriptHash = sha256(transcriptBytes(this.ctx, this.secrets.salt, this.myPublicBytes, yPub))
+    this.keys = deriveKeys(this.ctx, this.secrets.salt, this.myPublicBytes, yPub, shared, kem)
+    this.transcriptHash = sha256(transcriptBytes(this.ctx, this.secrets.salt, this.myPublicBytes, yPub, kem?.pub, kem?.ct))
     return {
       confirmMac: confirmMac(this.keys.confirmKey, 'sender', this.transcriptHash),
       sas: this.keys.sas,
@@ -282,13 +359,15 @@ interface E2ESession {
   key: CryptoKey | null
   sas: string | null
   roomId: string | null
+  /** v5-b3: the ML-KEM-768 hybrid leg contributed to this session's key. */
+  pqHybrid: boolean
 }
 
 const PRIMARY_KEY = '__primary__'
 const sessions = new Map<string, E2ESession>()
 
 function blankSession(): E2ESession {
-  return { status: 'idle', key: null, sas: null, roomId: null }
+  return { status: 'idle', key: null, sas: null, roomId: null, pqHybrid: false }
 }
 sessions.set(PRIMARY_KEY, blankSession())
 
@@ -312,6 +391,11 @@ export function getE2ESas(peerId?: string | null): string | null {
   return resolveSession(peerId).sas
 }
 
+/** v5-b3: true when the session key is hybrid (SPAKE2 + ML-KEM-768). */
+export function getE2EPqHybrid(peerId?: string | null): boolean {
+  return resolveSession(peerId).pqHybrid
+}
+
 export function setE2EStatus(status: E2EStatus): void {
   const primary = sessions.get(PRIMARY_KEY) ?? blankSession()
   primary.status = status
@@ -325,13 +409,14 @@ export function setE2EStatus(status: E2EStatus): void {
 /**
  * Activate the session with the derived AES key (called by the hook).
  * `peerId` binds the key to that peer (group fan-out); omitted → legacy
- * primary slot (1:1 flows).
+ * primary slot (1:1 flows). `pqHybrid` records whether the ML-KEM-768 leg
+ * contributed (v5-b3) — surfaced in the verification card + debug bundle.
  */
-export async function activateE2ESession(aesKeyRaw: Uint8Array, sas: string, roomId: string, peerId?: string | null): Promise<void> {
+export async function activateE2ESession(aesKeyRaw: Uint8Array, sas: string, roomId: string, peerId?: string | null, pqHybrid = false): Promise<void> {
   const key = await crypto.subtle.importKey('raw', aesKeyRaw as BufferSource, 'AES-GCM', false, ['encrypt', 'decrypt'])
   const slotKey = peerId ?? PRIMARY_KEY
-  sessions.set(slotKey, { status: 'active', key, sas, roomId })
-  console.log(`[FluxDrop] E2E session active for peer ${peerId ? slotKey.slice(0, 8) : 'primary'} (room ${roomId.slice(0, 6)})`)
+  sessions.set(slotKey, { status: 'active', key, sas, roomId, pqHybrid })
+  console.log(`[FluxDrop] E2E session active for peer ${peerId ? slotKey.slice(0, 8) : 'primary'} (room ${roomId.slice(0, 6)})${pqHybrid ? ' [PQ hybrid ML-KEM-768]' : ''}`)
 }
 
 /** Quick check used by send/receive paths to decide wire framing. */

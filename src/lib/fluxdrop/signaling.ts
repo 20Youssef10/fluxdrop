@@ -221,7 +221,7 @@ export class FluxDropSignaling {
     this.emit(SIGNALING_EVENTS.TRANSFER_MANIFEST, payload)
   }
 
-  sendTransferAccepted(payload: { roomId: string; from: string; to: string; accepted: boolean; reason?: string }) {
+  sendTransferAccepted(payload: { roomId: string; from: string; to: string; accepted: boolean; reason?: string; grants?: unknown }) {
     this.emit(SIGNALING_EVENTS.TRANSFER_ACCEPTED, payload)
   }
 

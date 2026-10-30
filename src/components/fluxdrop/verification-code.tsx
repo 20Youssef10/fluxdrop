@@ -1,10 +1,11 @@
 'use client'
 
 import { useMemo } from 'react'
-import { Shield, ShieldCheck, ShieldAlert, Fingerprint } from 'lucide-react'
+import { Shield, ShieldCheck, ShieldAlert, Fingerprint, Atom } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { useSessionStore } from '@/stores/session-store'
 import { useTransferStore } from '@/stores/transfer-store'
+import { getE2EPqHybrid } from '@/lib/fluxdrop/e2e'
 
 /**
  * v1.2: the short authentication string (SAS) — 6 digits derived from the
@@ -46,6 +47,11 @@ export function VerificationCode() {
   const code = active ? e2eSas : legacyCode
   if (!code) return null
 
+  // v5-b3: hybrid PQ indicator — true when the ML-KEM-768 leg contributed to
+  // the session key (harvest-now-decrypt-later resistant). Read lazily so
+  // re-renders pick the flag up from the live session map.
+  const pqHybrid = active ? getE2EPqHybrid() : false
+
   const statusLabel = active
     ? 'End-to-end encrypted (PAKE)'
     : failed
@@ -82,9 +88,18 @@ export function VerificationCode() {
             <p className="text-xs font-semibold flex items-center gap-1">
               <StatusIcon className={`h-3 w-3 ${active ? 'text-flux-500' : failed ? 'text-destructive' : 'text-flux-500'}`} />
               {active ? 'Verification code' : 'Connection security'}
+              {pqHybrid && (
+                <span
+                  className="ml-0.5 inline-flex items-center gap-0.5 rounded bg-flux-500/10 px-1 py-px text-[9px] font-medium uppercase tracking-wide text-flux-700 dark:text-flux-300"
+                  title="Post-quantum hybrid: this session's key also derives from ML-KEM-768 (Kyber) — resistant to harvest-now-decrypt-later attacks."
+                >
+                  <Atom className="h-2.5 w-2.5" aria-hidden />
+                  PQ
+                </span>
+              )}
             </p>
             <p className="text-[10px] text-muted-foreground mt-0.5">
-              {active ? 'Compare with the other device' : statusLabel}
+              {active ? (pqHybrid ? 'Compare with the other device · PQ hybrid' : 'Compare with the other device') : statusLabel}
             </p>
           </div>
           <code
