@@ -10,7 +10,11 @@
     "db:push": "prisma db push --accept-data-loss",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
-    "db:reset": "prisma migrate reset"
+    "db:reset": "prisma migrate reset",
+    "conformance": "bun scripts/protocol-conformance.ts",
+    "conformance:badge": "bun scripts/conformance-badge.ts",
+    "chaos": "bun scripts/chaos-harness.ts",
+    "test:unit": "bun test tests/unit"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -95,6 +99,7 @@
     "bun-types": "^1.3.4",
     "eslint": "^9",
     "eslint-config-next": "^16.1.1",
+    "playwright": "^1.64.1",
     "tailwindcss": "^4",
     "tw-animate-css": "^1.3.5",
     "typescript": "^5"

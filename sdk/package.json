@@ -1,30 +1,42 @@
 {
   "name": "@fluxdrop/sdk",
-  "version": "0.1.0",
-  "description": "Public JS SDK for FluxDrop — the framework-agnostic engine modules plus a typed client façade and a React widget skeleton for embedding send/receive into any web app.",
+  "version": "0.2.0",
+  "description": "Public JS SDK for FluxDrop — the production wire engine, a typed client with REAL signaling+WebRTC transport, and a framework-free <fluxdrop-widget> custom element for embedding verified file sends into any web app.",
   "type": "module",
-  "main": "./src/index.ts",
-  "module": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     },
     "./widget": {
-      "types": "./src/widget.tsx",
-      "default": "./src/widget.tsx"
+      "types": "./dist/widget.d.ts",
+      "default": "./dist/widget.js"
     },
-    "./protocol": "./src/engine.ts",
-    "./encoding": "./src/engine.ts",
-    "./compress": "./src/engine.ts",
-    "./checksum": "./src/engine.ts",
-    "./format": "./src/engine.ts"
+    "./react": {
+      "types": "./dist/widget-react.d.ts",
+      "default": "./dist/widget-react.js"
+    },
+    "./protocol": "./dist/engine.js",
+    "./encoding": "./dist/engine.js",
+    "./compress": "./dist/engine.js",
+    "./checksum": "./dist/engine.js",
+    "./format": "./dist/engine.js"
   },
   "files": [
-    "src",
+    "dist",
     "README.md"
   ],
+  "scripts": {
+    "build": "tsup src/index.ts src/widget.ts src/widget-react.tsx src/engine.ts --format esm --dts --sourcemap --clean",
+    "prepublishOnly": "bun run build",
+    "pack:check": "bun run build && npm pack --dry-run"
+  },
+  "dependencies": {
+    "socket.io-client": "^4.8.3"
+  },
   "peerDependencies": {
     "react": ">=18"
   },
@@ -39,7 +51,12 @@
     "webrtc",
     "file-transfer",
     "p2p",
-    "sdk"
+    "sdk",
+    "web-component"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "tsup": "^9.0.0",
+    "typescript": "~5.9.0"
+  }
 }

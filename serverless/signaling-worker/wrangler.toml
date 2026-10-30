@@ -1,0 +1,38 @@
+# FluxDrop signaling — Cloudflare Worker (v5-E15)
+#
+# The serverless adapter: the SAME socket.io wire contract as the Bun server
+# (mini-services/signaling), implemented on one Durable Object ("hub") with
+# WebSocket hibernation. Deploy with `bun run deploy` (or npx wrangler deploy).
+
+name = "fluxdrop-signaling"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+# One hub DO holds all rooms (template scale: thousands of rooms are fine —
+# DO input/output is cheap; for planet-scale, shard by room-code prefix).
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["FluxDropHub"]
+
+[durable_objects]
+bindings = [{ name = "HUB", class_name = "FluxDropHub" }]
+
+[vars]
+# Relay fallback quotas (per-room) — mirrors the Bun server defaults.
+RELAY_RATE_BYTES_PER_SEC = "4194304"
+RELAY_BURST_BYTES = "8388608"
+RELAY_MAX_ROOM_BYTES = "536870912"
+# Set via `wrangler secret put ADMIN_TOKEN` to enable /admin/api (JSON only).
+# ADMIN_TOKEN = ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LOCAL DEV / TEST
+#   bun install
+#   bun run dev                  # wrangler dev on :8787 (miniflare)
+#   bun run test:smoke           # boots wrangler dev + runs the socket.io
+#                                # conformance roundtrip (create/join/pair/relay)
+#
+# The web client connects by pointing Settings → Network → Signaling server at
+# the worker URL (or /?XTransformPort=8787 behind the gateway) — transports
+# ['websocket','polling'] tries websocket first, which is all this speaks.
+# ─────────────────────────────────────────────────────────────────────────────

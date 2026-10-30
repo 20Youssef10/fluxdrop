@@ -40,8 +40,22 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'http'
 import { createHash, timingSafeEqual } from 'crypto'
 import { Server, type Socket } from 'socket.io'
+import {
+  BUS_EVENTS,
+  emitBusEvent,
+  initWebhooks,
+  webhookAdminAction,
+  webhookSnapshot,
+} from './webhooks'
+import { Federation, parseFederatedRoomRef } from './federation'
+import { handleLeaderboardSubmit, initLeaderboard, leaderboardTop } from './leaderboard'
 
-const PORT = 3003
+// Port: fixed at 3003 by default; PORT/SIGNALING_PORT envs exist so a second
+// instance can run beside the first (federation E2E + self-host topologies).
+const PORT = (() => {
+  const n = parseInt(process.env.SIGNALING_PORT ?? process.env.PORT ?? '', 10)
+  return Number.isFinite(n) && n > 0 ? n : 3003
+})()
 const VERSION = '2.0.0'
 const REGION = process.env.FLUXDROP_REGION || 'local'
 
@@ -368,6 +382,9 @@ interface Device {
   alias: string
   role: 'sender' | 'receiver'
   joinedAt: number
+  /** v5-e17: set when this device joined through a federation link — the
+   * peer id of its HOME server. Frames to it travel the link, not a socket. */
+  fedVia?: string
 }
 
 interface Room {
@@ -400,6 +417,22 @@ interface Room {
 const rooms = new Map<string, Room>()
 const socketToRoom = new Map<string, string>()   // socketId -> roomId
 const socketToDevice = new Map<string, string>() // socketId -> deviceId
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v5-e17: federated signaling — see ./federation.ts for the wire protocol.
+// This server can act as ROOM OWNER (rooms it created, joined by remote
+// devices through a link) and as HOME SERVER (local sockets that joined a
+// remote owner's room via `ROOM@peer`). Owner-side devices carry `fedVia`;
+// home-side sockets are tracked in fedMemberSockets below.
+// ─────────────────────────────────────────────────────────────────────────────
+const federation = new Federation(log, {
+  onFedEvent: (peerId, event, payload) => handleFedEvent(peerId, event, payload),
+  onLinkUp: (peerId) => emitBusEvent(log, 'federation.link', { peer: peerId, state: 'up' }),
+})
+/** socketId -> the remote room a local socket joined through a link. */
+const fedMemberSockets = new Map<string, { peerId: string; roomId: string; deviceId: string }>()
+/** socketId -> join in flight (cleared on fed-joined / fed-error). */
+const pendingFedJoins = new Map<string, { peerId: string; roomId: string }>()
 
 // v2.0 (8.2): relayed-event counters (metadata only — names + counts, never
 // payloads) powering the admin dashboard.
@@ -451,15 +484,41 @@ function verifyMembership(socketId: string, roomId: string): boolean {
 // EVERY member — receiver B must never see the offer addressed to receiver A.
 // All per-peer relay events are now delivered to the addressed device's
 // socket only. Membership of the DESTINATION is verified server-side.
+// v5-e17: devices that joined via a federation link receive the frame over
+// their HOME server's link instead of a local socket (fedVia marker).
 function relayToDevice(io: Server, room: Room, event: string, payload: { to?: string } & Record<string, unknown>): void {
   const to = typeof payload?.to === 'string' ? payload.to : ''
   if (!to) return
   const device = room.devices.get(to)
   if (!device) return // addressed device already gone — drop silently
+  if (device.fedVia) {
+    federation.emitToPeer(device.fedVia, 'fed-frame', {
+      room: room.id,
+      to,
+      event,
+      payload: { ...payload, roomId: room.id },
+    })
+    bumpRelay(event)
+    return
+  }
   const target = io.sockets.sockets.get(device.socketId)
   if (!target) return
   target.emit(event, payload)
   bumpRelay(event) // v2.0 (8.2): metadata-only counter for the admin dashboard
+}
+
+/** v5-e17: room-wide broadcast — local sockets + every federation peer with
+ * members in the room (fed-broadcast reaches their local sockets). */
+function broadcastToRoom(io: Server, room: Room, event: string, payload: Record<string, unknown>, exceptDeviceId?: string): void {
+  for (const device of room.devices.values()) {
+    if (device.id === exceptDeviceId) continue
+    if (device.fedVia) {
+      federation.emitToPeer(device.fedVia, 'fed-broadcast', { room: room.id, event, payload })
+    } else {
+      const s = io.sockets.sockets.get(device.socketId)
+      if (s) s.emit(event, payload)
+    }
+  }
 }
 
 // --- Utilities ---
@@ -544,7 +603,7 @@ function expireStaleRooms(io: Server) {
                  now - room.lastActivityAt > ROOM_IDLE_TTL_MS
     if (stale || idle) {
       log('info', 'room_expired', { roomId: id, reason: stale ? 'timeout' : 'idle', devices: room.devices.size })
-      io.to(id).emit('room-expired', { roomId: id, reason: stale ? 'timeout' : 'idle' })
+      broadcastToRoom(io, room, 'room-expired', { roomId: id, reason: stale ? 'timeout' : 'idle' })
       closeRoom(io, id, stale ? 'timeout' : 'idle')
     }
   }
@@ -553,17 +612,28 @@ function expireStaleRooms(io: Server) {
 function closeRoom(io: Server, roomId: string, reason = 'manual') {
   const room = rooms.get(roomId)
   if (!room) return
+  // v5-e17: federated members hear about the closure through their home
+  // server (fed-close → room-closed on their local socket).
+  const fedPeers = new Set<string>()
   for (const device of room.devices.values()) {
+    if (device.fedVia) {
+      fedPeers.add(device.fedVia)
+      continue
+    }
     const s = io.sockets.sockets.get(device.socketId)
     if (s) {
       s.leave(roomId)
       s.emit('room-closed', { roomId })
     }
   }
+  for (const peerId of fedPeers) {
+    federation.emitToPeer(peerId, 'fed-close', { room: roomId, reason })
+  }
   room.devices.clear()
   room.state = 'closed'
   rooms.delete(roomId)
   log('info', 'room_closed', { roomId, reason })
+  emitBusEvent(log, 'room.closed', { roomId, reason, federatedPeers: fedPeers.size })
 }
 
 function touchRoom(room: Room) {
@@ -651,6 +721,16 @@ function adminSnapshot(): Record<string, unknown> {
       blockedRooms: Array.from(relayBlockedRooms),
       abuse: { ...relayAbuse },
     },
+    // v5-e14: automation hub (webhooks + recent deliveries).
+    webhooks: webhookSnapshot(),
+    // v5-e17: federation peers + link health + fed member count.
+    federation: {
+      ...federation.snapshot(),
+      fedMembers: fedMemberSockets.size,
+      roomsWithFedDevices: Array.from(rooms.values()).filter((r) => Array.from(r.devices.values()).some((d) => d.fedVia)).length,
+    },
+    // v5-f19: speedrun leaderboard (top 5 + total for the dashboard card).
+    leaderboard: leaderboardTop(5),
   }
 }
 
@@ -742,6 +822,35 @@ const ADMIN_HTML = `<!doctype html>
 </section>
 
 <section>
+  <h2>Automation hub — webhooks (transfer.complete → Home Assistant, scripts…)</h2>
+  <div class="chips" id="whCatalog" style="margin-bottom:10px"></div>
+  <div id="whTable"><div class="empty">no webhooks configured</div></div>
+  <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+    <input id="whUrl" placeholder="https://homeassistant.local/api/webhook/fluxdrop" style="flex:1;min-width:240px;background:var(--panel-2);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:6px 10px;font:inherit;font-size:13px">
+    <input id="whSecret" placeholder="secret (optional — auto-generated)" style="flex:1;min-width:200px;background:var(--panel-2);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:6px 10px;font:inherit;font-size:13px">
+    <button id="whAdd">Add webhook</button>
+  </div>
+  <div id="whDeliveries" style="margin-top:10px"></div>
+</section>
+
+<section>
+  <h2>Federation — server-to-server room peering</h2>
+  <div class="chips" id="fedChips" style="margin-bottom:10px"></div>
+  <div id="fedTable"><div class="empty">no peers configured</div></div>
+  <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+    <input id="fedId" placeholder="peer id (e.g. berlin)" style="width:140px;background:var(--panel-2);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:6px 10px;font:inherit;font-size:13px">
+    <input id="fedUrl" placeholder="http://other-server:3003" style="flex:1;min-width:200px;background:var(--panel-2);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:6px 10px;font:inherit;font-size:13px">
+    <input id="fedSecret" placeholder="shared secret (≥ 8 chars)" style="flex:1;min-width:180px;background:var(--panel-2);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:6px 10px;font:inherit;font-size:13px">
+    <button id="fedAdd">Add peer</button>
+  </div>
+</section>
+
+<section>
+  <h2>Speedrun leaderboard (opt-in, alias + time only)</h2>
+  <div id="lbTable"><div class="empty">no runs yet</div></div>
+</section>
+
+<section>
   <h2>Live rooms
     <button id="closeAll" class="danger">Close all rooms</button>
   </h2>
@@ -792,6 +901,69 @@ No PINs, IP addresses, aliases or file data are ever displayed or stored here.</
     if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
     return (n / 1073741824).toFixed(2) + ' GB';
   }
+  function fmtMs(ms) {
+    if (ms == null) return '–';
+    if (ms < 10000) return (ms / 1000).toFixed(2) + ' s';
+    return (ms / 1000).toFixed(1) + ' s';
+  }
+  // v5-e14: webhooks (automation hub).
+  function renderWebhooks(d) {
+    var wh = d.webhooks || {};
+    var cat = wh.catalog || [];
+    document.getElementById('whCatalog').innerHTML = cat.length
+      ? cat.map(function (e) { return '<span class="chip">' + esc(e) + '</span>'; }).join('')
+      : '<span class="pill muted">catalog unavailable</span>';
+    var hooks = wh.hooks || [];
+    document.getElementById('whTable').innerHTML = hooks.length
+      ? '<table><thead><tr><th>URL</th><th>Events</th><th>Delivered / failed</th><th>Last</th><th></th></tr></thead><tbody>'
+        + hooks.map(function (h) {
+            var st = h.stats || {};
+            return '<tr><td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(h.url) + '">' + esc(h.url) + '</td>'
+              + '<td>' + (h.events || []).map(function (e) { return '<span class="pill muted">' + esc(e) + '</span>'; }).join(' ') + '</td>'
+              + '<td><b>' + (st.delivered || 0) + '</b> / <b>' + (st.failed || 0) + '</b></td>'
+              + '<td>' + (st.lastStatus != null ? '<span class="pill ' + (st.lastStatus >= 200 && st.lastStatus < 300 ? 'ok' : 'warn') + '">' + st.lastStatus + '</span>' : '–') + '</td>'
+              + '<td><button class="whTest" data-id="' + esc(h.id) + '">Test</button> '
+              + '<button class="whToggle" data-id="' + esc(h.id) + '">' + (h.active ? 'Pause' : 'Resume') + '</button> '
+              + '<button class="danger whRemove" data-id="' + esc(h.id) + '">Remove</button></td></tr>';
+          }).join('') + '</tbody></table>'
+      : '<div class="empty">no webhooks configured — add one above</div>';
+    var dl = wh.recentDeliveries || [];
+    document.getElementById('whDeliveries').innerHTML = dl.length
+      ? '<div class="chips">' + dl.map(function (e) {
+          return '<span class="chip">' + esc(e.event) + ' → <b>' + (typeof e.status === 'number' ? e.status : 'err') + '</b></span>';
+        }).join('') + '</div>'
+      : '';
+  }
+  // v5-e17: federation.
+  function renderFederation(d) {
+    var fed = d.federation || {};
+    document.getElementById('fedChips').innerHTML =
+      '<span class="chip">self <b>' + esc(fed.selfId || '–') + '</b></span>'
+      + '<span class="chip">fed members <b>' + (fed.fedMembers || 0) + '</b></span>'
+      + '<span class="chip">rooms w/ fed devices <b>' + (fed.roomsWithFedDevices || 0) + '</b></span>';
+    var peers = fed.peers || [];
+    document.getElementById('fedTable').innerHTML = peers.length
+      ? '<table><thead><tr><th>Peer</th><th>URL</th><th>Link</th><th>Latency</th><th></th></tr></thead><tbody>'
+        + peers.map(function (p) {
+            return '<tr><td class="code">' + esc(p.id) + '</td><td>' + esc(p.url) + '</td>'
+              + '<td><span class="pill ' + (p.state === 'up' ? 'ok' : 'warn') + '">' + esc(p.state) + '</span></td>'
+              + '<td>' + (p.latencyMs != null ? p.latencyMs + ' ms' : '–') + '</td>'
+              + '<td><button class="danger fedRemove" data-id="' + esc(p.id) + '">Remove</button></td></tr>';
+          }).join('') + '</tbody></table>'
+      : '<div class="empty">no peers configured — rooms stay local until you peer two servers</div>';
+  }
+  // v5-f19: leaderboard.
+  function renderLeaderboard(d) {
+    var lb = d.leaderboard || {};
+    var rows = lb.entries || [];
+    document.getElementById('lbTable').innerHTML = rows.length
+      ? '<table><thead><tr><th>#</th><th>Alias</th><th>Time</th><th>Size</th><th>When</th></tr></thead><tbody>'
+        + rows.map(function (e) {
+            return '<tr><td class="code">' + e.rank + '</td><td>' + esc(e.alias) + '</td><td><b>' + fmtMs(e.timeMs) + '</b></td>'
+              + '<td>' + fmtBytes(e.sizeBytes) + '</td><td>' + fmtTime(e.at) + '</td></tr>';
+          }).join('') + '</tbody></table>'
+      : '<div class="empty">no opt-in runs yet</div>';
+  }
   function render(d) {
     document.getElementById('meta').textContent =
       d.region + ' · v' + d.version + ' · max ' + d.maxDevicesPerRoom + ' devices/room';
@@ -799,6 +971,9 @@ No PINs, IP addresses, aliases or file data are ever displayed or stored here.</
     document.getElementById('sockets').textContent = d.sockets;
     document.getElementById('roomCount').textContent = d.rooms.length;
     document.getElementById('relayed').textContent = d.totalRelayed;
+    renderWebhooks(d);
+    renderFederation(d);
+    renderLeaderboard(d);
     // v5-b5: relay bytes + policy + abuse accounting.
     var rel = d.relay || {};
     document.getElementById('relayBytes').textContent = fmtBytes(rel.totalRelayedBytes);
@@ -912,6 +1087,47 @@ No PINs, IP addresses, aliases or file data are ever displayed or stored here.</
       action({ action: 'close-all' }, refresh);
     }
   });
+  // v5-e14: webhook hub interactions.
+  document.getElementById('whAdd').addEventListener('click', function () {
+    var url = document.getElementById('whUrl').value.trim();
+    if (!url) return alert('Enter a webhook URL first.');
+    var secret = document.getElementById('whSecret').value.trim();
+    action({ action: 'webhook-add', url: url, secret: secret, events: ['room.created', 'transfer.complete'] }, function () {
+      document.getElementById('whUrl').value = '';
+      document.getElementById('whSecret').value = '';
+      refresh();
+    });
+  });
+  document.getElementById('whTable').addEventListener('click', function (ev) {
+    var t = ev.target;
+    if (!t || t.tagName !== 'BUTTON' || !t.hasAttribute('data-id')) return;
+    var id = t.getAttribute('data-id');
+    if (t.classList.contains('whTest')) return action({ action: 'webhook-test', id: id }, refresh);
+    if (t.classList.contains('whToggle')) return action({ action: 'webhook-toggle', id: id }, refresh);
+    if (t.classList.contains('whRemove')) return action({ action: 'webhook-remove', id: id }, refresh);
+  });
+  // v5-e17: federation interactions.
+  document.getElementById('fedAdd').addEventListener('click', function () {
+    var id = document.getElementById('fedId').value.trim();
+    var url = document.getElementById('fedUrl').value.trim();
+    var secret = document.getElementById('fedSecret').value.trim();
+    if (!id || !url || !secret) return alert('Peer id, URL and shared secret are all required.');
+    action({ action: 'federation-add', id: id, url: url, secret: secret }, function () {
+      document.getElementById('fedId').value = '';
+      document.getElementById('fedUrl').value = '';
+      document.getElementById('fedSecret').value = '';
+      refresh();
+    });
+  });
+  document.getElementById('fedTable').addEventListener('click', function (ev) {
+    var t = ev.target;
+    if (!t || t.tagName !== 'BUTTON' || !t.hasAttribute('data-id')) return;
+    if (t.classList.contains('fedRemove')) {
+      if (confirm('Remove peer ' + t.getAttribute('data-id') + '? Its federated rooms stop relaying.')) {
+        action({ action: 'federation-remove', id: t.getAttribute('data-id') }, refresh);
+      }
+    }
+  });
   refresh();
   setInterval(refresh, 3000);
 })();
@@ -979,7 +1195,19 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, pat
       sendJson(res, 200, { ok: true, action, roomCode: room.id, blocked: relayBlockedRooms.has(room.id) })
       return
     }
-    sendJson(res, 400, { error: "unknown action — expected 'close-room', 'close-all', 'block-relay' or 'unblock-relay'" })
+    // v5-e14: webhook automation hub actions (add/remove/toggle/test).
+    if (action.startsWith('webhook-')) {
+      const r = await webhookAdminAction(log, action, body)
+      sendJson(res, r.status, r.body)
+      return
+    }
+    // v5-e17: federation peer management (add/remove; links dial immediately).
+    if (action.startsWith('federation-')) {
+      const r = await federation.adminAction(action, body)
+      sendJson(res, r.status, r.body)
+      return
+    }
+    sendJson(res, 400, { error: "unknown action — expected 'close-room', 'close-all', 'block-relay', 'unblock-relay', 'webhook-add/remove/toggle/test' or 'federation-add/remove'" })
     return
   }
   sendJson(res, 404, { error: 'not found' })
@@ -1109,15 +1337,19 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
   }
 
   // v2.0 (8.3): region probe — unauthenticated by design (latency probes).
+  // v5-e17: includes the configured federation peer ids so clients can offer
+  // `ROOM@peer` join hints (no URLs — ids only).
   if (path === '/region') {
     if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { error: 'method not allowed' })
     let devices = 0
     for (const room of rooms.values()) devices += room.devices.size
+    const fed = federation.snapshot() as { peers?: Array<{ id: string }> }
     sendJson(res, 200, {
       region: REGION,
       version: VERSION,
       uptimeSec: Math.floor(process.uptime()),
       devices,
+      federation: { selfId: federation.selfId, peers: (fed.peers ?? []).map((p) => p.id) },
     })
     return
   }
@@ -1210,6 +1442,337 @@ setInterval(() => {
   }
 }, 30 * 1000)
 
+// ─────────────────────────────────────────────────────────────────────────────
+// v5-e17: federation routing.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * HOME side: a local socket that fed-joined a remote room is tunneling a
+ * room-scoped frame. Pin `from` to its registered device id and forward to
+ * the owner (all room logic — membership, PIN, quotas — runs there).
+ * Returns true when the frame was consumed (caller must NOT run local logic).
+ */
+function tunnelToFedOwner(socket: Socket, event: string, payload: Record<string, unknown> | undefined): boolean {
+  const fed = fedMemberSockets.get(socket.id)
+  if (!fed) return false
+  const p = (payload ?? {}) as Record<string, unknown>
+  // Home-side per-IP relay budget (the owner runs the room-side ladder).
+  if (event === 'relay-data') {
+    const data = typeof p.data === 'string' ? p.data : ''
+    if (!relayIpQuotaAllows(clientIpOfSocket(socket), data.length)) {
+      relayAbuse.ipQuotaExceeded++
+      socket.emit('relay-error', { roomId: p.roomId, reason: 'quota' })
+      return true
+    }
+  }
+  const sent = federation.emitToPeer(fed.peerId, 'fed-frame', {
+    room: fed.roomId,
+    to: typeof p.to === 'string' ? p.to : '',
+    event,
+    payload: { ...p, from: fed.deviceId },
+  })
+  if (sent) {
+    bumpRelay(event)
+  } else {
+    socket.emit('signaling-error', { code: 'INTERNAL', message: 'federation link to the room owner is down — retrying automatically' })
+  }
+  return true
+}
+
+/**
+ * The single entry point for events arriving over a federation link. The same
+ * server may be an OWNER (fed-join / fed-leave / owner-side fed-frame) and a
+ * HOME (fed-joined / fed-error / fed-broadcast / fed-close / home-side
+ * fed-frame) — even for the same link.
+ */
+function handleFedEvent(peerId: string, event: string, payload: Record<string, unknown>): void {
+  try {
+    switch (event) {
+      case 'fed-join': return ownerFedJoin(peerId, payload)
+      case 'fed-leave': return ownerFedLeave(peerId, payload)
+      case 'fed-joined': return homeFedJoined(peerId, payload)
+      case 'fed-error': return homeFedError(peerId, payload)
+      case 'fed-broadcast': return homeFedBroadcast(payload)
+      case 'fed-close': return homeFedClose(payload)
+      case 'fed-frame': return handleFedFrame(peerId, payload)
+      default: return
+    }
+  } catch (err) {
+    log('error', 'federation_event_error', { peer: peerId, event, message: String((err as Error)?.message ?? err) })
+  }
+}
+
+/** OWNER: a remote device wants to join (or rebind into) one of our rooms. */
+function ownerFedJoin(peerId: string, payload: Record<string, unknown>): void {
+  const roomId = String(payload?.room ?? '').toUpperCase()
+  const dev = payload?.device as { id?: string; alias?: string; role?: 'sender' | 'receiver' } | undefined
+  const room = rooms.get(roomId)
+  if (!room) {
+    federation.emitToPeer(peerId, 'fed-error', { room: roomId, code: 'ROOM_NOT_FOUND', message: 'room does not exist or has expired' })
+    return
+  }
+  if (!dev?.id || typeof dev.id !== 'string') {
+    federation.emitToPeer(peerId, 'fed-error', { room: roomId, code: 'INVALID_INPUT', message: 'device.id required' })
+    return
+  }
+  const existing = room.devices.get(dev.id)
+  if (existing && existing.fedVia !== peerId) {
+    federation.emitToPeer(peerId, 'fed-error', { room: roomId, code: 'ROOM_FULL', message: 'device id already registered locally' })
+    return
+  }
+  if (existing) {
+    // Rebind after the home client's socket reconnect — refresh + reply.
+    existing.alias = dev.alias ?? existing.alias
+    federation.emitToPeer(peerId, 'fed-joined', {
+      room: roomId,
+      joinCode: room.joinCode,
+      device: { id: existing.id, alias: existing.alias, role: existing.role, joinedAt: existing.joinedAt },
+      peers: Array.from(room.devices.values()).filter((d) => d.id !== existing.id),
+    })
+    log('info', 'fed_device_rebound', { roomId, peer: peerId })
+    return
+  }
+  if (room.devices.size >= MAX_DEVICES_PER_ROOM) {
+    federation.emitToPeer(peerId, 'fed-error', { room: roomId, code: 'ROOM_FULL', message: `room already has ${MAX_DEVICES_PER_ROOM} devices` })
+    return
+  }
+  if (room.closedForJoins) {
+    federation.emitToPeer(peerId, 'fed-error', { room: roomId, code: 'ROOM_CLOSED', message: 'room is closed for new joins (share link already used)' })
+    return
+  }
+  if (room.pin) {
+    const pin = typeof payload?.pin === 'string' ? payload.pin : ''
+    if (pin !== room.pin) {
+      federation.emitToPeer(peerId, 'fed-error', { room: roomId, code: 'INVALID_PIN', message: 'incorrect PIN' })
+      return
+    }
+  }
+  const device: Device = {
+    id: dev.id,
+    socketId: `fed:${peerId}`,
+    alias: dev.alias ?? 'device',
+    role: dev.role === 'receiver' ? 'receiver' : 'sender',
+    joinedAt: Date.now(),
+    fedVia: peerId,
+  }
+  room.devices.set(device.id, device)
+  touchRoom(room)
+  if (room.oneJoin && room.devices.size >= 2) room.closedForJoins = true
+  federation.emitToPeer(peerId, 'fed-joined', {
+    room: roomId,
+    joinCode: room.joinCode,
+    device: { id: device.id, alias: device.alias, role: device.role, joinedAt: device.joinedAt },
+    peers: Array.from(room.devices.values()).filter((d) => d.id !== device.id),
+  })
+  broadcastToRoom(io, room, 'device-discovered', { device }, device.id)
+  log('info', 'fed_device_joined', { roomId, peer: peerId, devices: room.devices.size })
+  emitBusEvent(log, 'room.joined', { roomId, devices: room.devices.size, federated: true, peer: peerId })
+}
+
+/** OWNER: a remote device left (its home socket disconnected / left-room). */
+function ownerFedLeave(peerId: string, payload: Record<string, unknown>): void {
+  const roomId = String(payload?.room ?? '').toUpperCase()
+  const deviceId = String(payload?.deviceId ?? '')
+  const room = rooms.get(roomId)
+  if (!room) return
+  const device = room.devices.get(deviceId)
+  if (!device || device.fedVia !== peerId) return
+  room.devices.delete(deviceId)
+  broadcastToRoom(io, room, 'device-left', { deviceId })
+  log('info', 'fed_device_left', { roomId, peer: peerId, devices: room.devices.size })
+  if (room.devices.size === 0) {
+    rooms.delete(roomId)
+    log('info', 'room_closed', { roomId, reason: 'empty' })
+    emitBusEvent(log, 'room.closed', { roomId, reason: 'empty', federatedPeers: 1 })
+  }
+}
+
+/** HOME: the owner accepted our fed-join — bind the pending local socket. */
+function homeFedJoined(peerId: string, payload: Record<string, unknown>): void {
+  const roomId = String(payload?.room ?? '').toUpperCase()
+  const fedRef = `${roomId}@${peerId}`
+  const pending = Array.from(pendingFedJoins.entries()).find(([, v]) => v.peerId === peerId && v.roomId === roomId)
+  if (!pending) return
+  const [socketId] = pending
+  pendingFedJoins.delete(socketId)
+  const target = io.sockets.sockets.get(socketId)
+  if (!target) return
+  const deviceId = socketToDevice.get(socketId) ?? ''
+  fedMemberSockets.set(socketId, { peerId, roomId, deviceId })
+  // roomId travels as the FULL federated ref so the client's subsequent
+  // frames (and reconnect rejoin-room) route back through the tunnel.
+  target.emit('room-joined', { ...payload, roomId: fedRef })
+  log('info', 'fed_room_joined', { roomId, peer: peerId })
+}
+
+/** HOME: the owner rejected our fed-join — surface the error locally. */
+function homeFedError(peerId: string, payload: Record<string, unknown>): void {
+  const roomId = String(payload?.room ?? '').toUpperCase()
+  const pending = Array.from(pendingFedJoins.entries()).find(([, v]) => v.peerId === peerId && v.roomId === roomId)
+  if (!pending) return
+  const [socketId] = pending
+  pendingFedJoins.delete(socketId)
+  const target = io.sockets.sockets.get(socketId)
+  if (!target) return
+  target.emit('signaling-error', {
+    code: String(payload?.code ?? 'ROOM_NOT_FOUND'),
+    message: `${String(payload?.message ?? 'federated join failed')} (via peer ${peerId})`,
+  })
+}
+
+/** HOME: room-wide broadcast from the owner — deliver to every local member. */
+function homeFedBroadcast(payload: Record<string, unknown>): void {
+  const roomId = String(payload?.room ?? '').toUpperCase()
+  const event = String(payload?.event ?? '')
+  const body = (payload?.payload ?? {}) as Record<string, unknown>
+  if (!event) return
+  for (const [socketId, fed] of fedMemberSockets) {
+    if (fed.roomId !== roomId) continue
+    const target = io.sockets.sockets.get(socketId)
+    if (target) target.emit(event, { ...body, roomId: `${roomId}@${fed.peerId}` })
+  }
+}
+
+/** HOME: the owner closed (or expired) the room. */
+function homeFedClose(payload: Record<string, unknown>): void {
+  const roomId = String(payload?.room ?? '').toUpperCase()
+  for (const [socketId, fed] of Array.from(fedMemberSockets)) {
+    if (fed.roomId !== roomId) continue
+    const target = io.sockets.sockets.get(socketId)
+    if (target) target.emit('room-closed', { roomId: `${roomId}@${fed.peerId}` })
+    fedMemberSockets.delete(socketId)
+  }
+  log('info', 'fed_room_closed_local', { roomId })
+}
+
+/**
+ * fed-frame — both directions:
+ *   • OWNER side: the payload's room is one of OUR rooms; `from` is a fed
+ *     device (verified against the link) and the frame runs through the same
+ *     logic as the local handlers (state machine + quotas + relayToDevice).
+ *   • HOME side: the room is remote; `to` addresses one of our local fed
+ *     members — deliver straight to its socket.
+ */
+function handleFedFrame(peerId: string, payload: Record<string, unknown>): void {
+  const roomId = String(payload?.room ?? '').toUpperCase()
+  const event = String(payload?.event ?? '')
+  const to = typeof payload?.to === 'string' ? payload.to : ''
+  const body = (payload?.payload ?? {}) as Record<string, unknown>
+  if (!event || !to) return
+
+  // ── HOME side: remote room, deliver to the local member ──
+  const room = rooms.get(roomId)
+  if (!room) {
+    const socketId = Array.from(fedMemberSockets.entries()).find(([, m]) => m.roomId === roomId && m.deviceId === to)?.[0]
+    if (!socketId) return
+    const target = io.sockets.sockets.get(socketId)
+    if (target) target.emit(event, { ...body, roomId: `${roomId}@${peerId}` })
+    bumpRelay(event)
+    return
+  }
+
+  // ── OWNER side: verify the fed sender, then run owner logic ──
+  const from = typeof body?.from === 'string' ? body.from : ''
+  const device = room.devices.get(from)
+  if (!device || device.fedVia !== peerId) return // anti-spoof: identity is the link's
+  touchRoom(room)
+
+  switch (event) {
+    case 'pairing-request':
+      room.state = 'pairing'
+      relayToDevice(io, room, 'pairing-request', { ...body, roomId })
+      break
+    case 'pairing-confirm':
+      if (body?.accepted === true) {
+        room.state = 'connected'
+        log('info', 'pairing_result', { roomId: room.id, accepted: true, federated: true })
+        emitBusEvent(log, 'pairing.confirmed', { roomId: room.id, federated: true })
+      }
+      relayToDevice(io, room, 'pairing-confirm', { ...body, roomId })
+      break
+    case 'pairing-reject':
+    case 'webrtc-offer':
+    case 'webrtc-answer':
+    case 'webrtc-ice':
+    case 'e2e-relay':
+    case 'resume-request':
+    case 'resume-response':
+    case 'transfer-accepted':
+      relayToDevice(io, room, event, { ...body, roomId })
+      break
+    case 'transfer-manifest': {
+      room.transferActive = true
+      room.state = 'transferring'
+      const tid = (body?.manifest as { transferId?: unknown } | null | undefined)?.transferId
+      if (typeof tid === 'string' && tid) room.activeTransferId = tid
+      log('info', 'transfer_started', { roomId: room.id, devices: room.devices.size, federated: true })
+      emitBusEvent(log, 'transfer.started', { roomId: room.id, federated: true })
+      relayToDevice(io, room, 'transfer-manifest', { ...body, roomId })
+      break
+    }
+    case 'transfer-complete':
+      room.transferActive = false
+      room.state = 'connected'
+      log('info', 'transfer_complete', { roomId: room.id, federated: true })
+      emitBusEvent(log, 'transfer.complete', { roomId: room.id, relayedBytes: room.relayedBytes, federated: true })
+      relayToDevice(io, room, 'transfer-complete', { ...body, roomId })
+      break
+    case 'transfer-cancel':
+      room.transferActive = false
+      relayToDevice(io, room, 'transfer-cancel', { ...body, roomId })
+      break
+    case 'relay-data': {
+      // Owner-side quota ladder (per-IP was enforced by the HOME server —
+      // the origin IP never reaches the owner).
+      const data = typeof body?.data === 'string' ? body.data : ''
+      if (!data || data.length > RELAY_MAX_B64_CHARS) return
+      if (!/^[A-Za-z0-9+/]+={0,2}$/.test(data)) return
+      const transferId = typeof body?.transferId === 'string' ? body.transferId : ''
+      if (!transferId) return
+      const seq = Number(body?.seq)
+      const chunkIndex = Number(body?.chunkIndex)
+      if (!Number.isInteger(seq) || seq < 0 || !Number.isInteger(chunkIndex) || chunkIndex < 0) return
+      if (room.activeTransferId && transferId !== room.activeTransferId) return
+      if (relayBlockedRooms.has(room.id)) {
+        relayAbuse.blockedDrops++
+        federation.emitToPeer(peerId, 'fed-frame', { room: room.id, to: from, event: 'relay-error', payload: { roomId: room.id, reason: 'blocked' } })
+        return
+      }
+      if (room.relayedBytes + data.length > RELAY_MAX_ROOM_BYTES) {
+        relayAbuse.roomCapExceeded++
+        federation.emitToPeer(peerId, 'fed-frame', { room: room.id, to: from, event: 'relay-error', payload: { roomId: room.id, reason: 'room-cap' } })
+        return
+      }
+      if (!relayQuotaAllows(room.id, data.length)) {
+        relayAbuse.quotaExceeded++
+        federation.emitToPeer(peerId, 'fed-frame', { room: room.id, to: from, event: 'relay-error', payload: { roomId: room.id, reason: 'quota' } })
+        return
+      }
+      room.relayedBytes += data.length
+      relayToDevice(io, room, 'relay-data', {
+        roomId: room.id,
+        from,
+        to,
+        transferId,
+        seq,
+        chunkIndex,
+        data,
+        ...(body?.last === true ? { last: true } : {}),
+      })
+      break
+    }
+    case 'relay-ack': {
+      const transferId = typeof body?.transferId === 'string' ? body.transferId : ''
+      const seq = Number(body?.seq)
+      if (!transferId || !Number.isInteger(seq) || seq < 0) return
+      relayToDevice(io, room, 'relay-ack', { roomId: room.id, from, to, transferId, seq })
+      break
+    }
+    default:
+      break
+  }
+}
+
 io.on('connection', (socket) => {
   log('debug', 'socket_connect', { socketId: socket.id })
 
@@ -1280,6 +1843,7 @@ io.on('connection', (socket) => {
           device,
         })
         log('info', 'room_claimed', { roomId: room.id, devices: room.devices.size, oneJoin: room.oneJoin === true })
+        emitBusEvent(log, 'room.created', { roomId: room.id, claimed: true })
         return
       }
 
@@ -1310,6 +1874,7 @@ io.on('connection', (socket) => {
         device,
       })
       log('info', 'room_created', { roomId: room.id, hasPin: room.pin !== undefined, devices: room.devices.size })
+      emitBusEvent(log, 'room.created', { roomId: room.id, hasPin: room.pin !== undefined })
     } catch (err) {
       log('error', 'create_room_error', { message: String((err as Error)?.message ?? err) })
       socket.emit('signaling-error', { code: 'INTERNAL', message: 'failed to create room' })
@@ -1319,6 +1884,34 @@ io.on('connection', (socket) => {
   // === Join existing room (receiver) ===
   socket.on('join-room', (payload: { roomId: string; joinCode?: string; pin?: string; alias: string; deviceId: string; role: 'sender' | 'receiver' }) => {
     try {
+      // v5-e17: federated join — `ROOM@peer` routes through the link to the
+      // room's OWNER server; the response (fed-joined → room-joined with the
+      // full ref as roomId) rebinds this socket into the tunnel.
+      const fedRef = parseFederatedRoomRef(String(payload?.roomId ?? ''))
+      if (fedRef) {
+        if (!payload?.alias || !payload?.deviceId) {
+          socket.emit('signaling-error', { code: 'INVALID_INPUT', message: 'alias and deviceId required' })
+          return
+        }
+        if (!federation.hasPeer(fedRef.peerId)) {
+          socket.emit('signaling-error', { code: 'ROOM_NOT_FOUND', message: `unknown federation peer '${fedRef.peerId}'` })
+          return
+        }
+        socketToDevice.set(socket.id, payload.deviceId)
+        const sent = federation.emitToPeer(fedRef.peerId, 'fed-join', {
+          room: fedRef.roomId,
+          device: { id: payload.deviceId, alias: payload.alias, role: payload.role === 'receiver' ? 'receiver' : 'sender' },
+          ...(typeof payload.pin === 'string' && payload.pin ? { pin: payload.pin } : {}),
+        })
+        if (!sent) {
+          socketToDevice.delete(socket.id)
+          socket.emit('signaling-error', { code: 'ROOM_NOT_FOUND', message: `federation peer '${fedRef.peerId}' is not linked — try again shortly` })
+          return
+        }
+        pendingFedJoins.set(socket.id, { peerId: fedRef.peerId, roomId: fedRef.roomId })
+        log('info', 'fed_join_forwarded', { roomId: fedRef.roomId, peer: fedRef.peerId })
+        return
+      }
       const room = rooms.get(payload?.roomId?.toUpperCase?.() ?? payload.roomId)
       if (!room) {
         socket.emit('signaling-error', { code: 'ROOM_NOT_FOUND', message: 'room does not exist or has expired' })
@@ -1370,8 +1963,9 @@ io.on('connection', (socket) => {
         peers: others,
       })
       // Notify existing devices of the newcomer
-      socket.to(room.id).emit('device-discovered', { device })
+      broadcastToRoom(io, room, 'device-discovered', { device }, device.id)
       log('info', 'room_joined', { roomId: room.id, devices: room.devices.size, max: MAX_DEVICES_PER_ROOM })
+      emitBusEvent(log, 'room.joined', { roomId: room.id, devices: room.devices.size })
     } catch (err) {
       log('error', 'join_room_error', { message: String((err as Error)?.message ?? err) })
       socket.emit('signaling-error', { code: 'INTERNAL', message: 'failed to join room' })
@@ -1387,6 +1981,20 @@ io.on('connection', (socket) => {
   // re-adds a cleaned-up device WITH a PIN (disconnect-cleanup race).
   socket.on('rejoin-room', (payload: { roomId: string; deviceId: string; alias?: string; role?: 'sender' | 'receiver'; pin?: string }) => {
     try {
+      // v5-e17: rejoin of a FEDERATED room — rebind the new socket into the
+      // tunnel and ask the owner to refresh the device (no PIN re-check: the
+      // original join was vetted, same policy as the local rejoin path).
+      const fedRef = parseFederatedRoomRef(String(payload?.roomId ?? ''))
+      if (fedRef && federation.hasPeer(fedRef.peerId)) {
+        socketToDevice.set(socket.id, payload.deviceId)
+        const sent = federation.emitToPeer(fedRef.peerId, 'fed-join', {
+          room: fedRef.roomId,
+          device: { id: payload.deviceId, alias: payload.alias ?? 'device', role: payload.role === 'receiver' ? 'receiver' : 'sender' },
+        })
+        if (sent) pendingFedJoins.set(socket.id, { peerId: fedRef.peerId, roomId: fedRef.roomId })
+        else socketToDevice.delete(socket.id)
+        return
+      }
       const room = rooms.get(payload?.roomId?.toUpperCase?.() ?? payload.roomId)
       if (!room) return // room gone — subsequent relays will error visibly
       const existing = room.devices.get(payload.deviceId)
@@ -1417,7 +2025,7 @@ io.on('connection', (socket) => {
         socketToDevice.set(socket.id, device.id)
         touchRoom(room)
         if (room.oneJoin && room.devices.size >= 2) room.closedForJoins = true
-        socket.to(room.id).emit('device-discovered', { device })
+        broadcastToRoom(io, room, 'device-discovered', { device }, device.id)
         log('info', 'device_rejoined', { roomId: room.id, devices: room.devices.size })
       }
     } catch (err) {
@@ -1427,6 +2035,7 @@ io.on('connection', (socket) => {
 
   // === Pairing handshake (unicast per peer) ===
   socket.on('pairing-request', (payload: { roomId: string; from: string; to: string; transferSummary?: { fileCount: number; totalSize: number; totalName: string } }) => {
+    if (tunnelToFedOwner(socket, 'pairing-request', payload)) return
     if (!verifyMembership(socket.id, payload.roomId)) return socket.emit('signaling-error', { code: 'NOT_MEMBER', message: 'not a room member' })
     const room = rooms.get(payload.roomId)
     if (!room) return socket.emit('signaling-error', { code: 'ROOM_NOT_FOUND', message: 'room gone' })
@@ -1436,16 +2045,21 @@ io.on('connection', (socket) => {
   })
 
   socket.on('pairing-confirm', (payload: { roomId: string; from: string; to: string; accepted: boolean }) => {
+    if (tunnelToFedOwner(socket, 'pairing-confirm', payload)) return
     if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
     touchRoom(room)
-    if (payload.accepted) room.state = 'connected'
+    if (payload.accepted) {
+      room.state = 'connected'
+      emitBusEvent(log, 'pairing.confirmed', { roomId: room.id })
+    }
     log('info', 'pairing_result', { roomId: room.id, accepted: payload.accepted === true })
     relayToDevice(io, room, 'pairing-confirm', payload)
   })
 
   socket.on('pairing-reject', (payload: { roomId: string; from: string; to: string; reason?: string }) => {
+    if (tunnelToFedOwner(socket, 'pairing-reject', payload)) return
     if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
@@ -1454,6 +2068,7 @@ io.on('connection', (socket) => {
 
   // === WebRTC signaling relay (offer / answer / ICE) — unicast per peer ===
   socket.on('webrtc-offer', (payload: { roomId: string; from: string; to: string; sdp: RTCSessionDescriptionInit }) => {
+    if (tunnelToFedOwner(socket, 'webrtc-offer', payload)) return
     if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
@@ -1462,6 +2077,7 @@ io.on('connection', (socket) => {
   })
 
   socket.on('webrtc-answer', (payload: { roomId: string; from: string; to: string; sdp: RTCSessionDescriptionInit }) => {
+    if (tunnelToFedOwner(socket, 'webrtc-answer', payload)) return
     if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
@@ -1470,6 +2086,7 @@ io.on('connection', (socket) => {
   })
 
   socket.on('webrtc-ice', (payload: { roomId: string; from: string; to: string; candidate: RTCIceCandidateInit }) => {
+    if (tunnelToFedOwner(socket, 'webrtc-ice', payload)) return
     if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
@@ -1478,6 +2095,7 @@ io.on('connection', (socket) => {
 
   // === Transfer lifecycle coordination (metadata only — no file data) ===
   socket.on('transfer-manifest', (payload: { roomId: string; from: string; to: string; manifest: any }) => {
+    if (tunnelToFedOwner(socket, 'transfer-manifest', payload)) return
     if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
@@ -1490,10 +2108,12 @@ io.on('connection', (socket) => {
     const tid = (payload?.manifest as { transferId?: unknown } | null | undefined)?.transferId
     if (typeof tid === 'string' && tid) room.activeTransferId = tid
     log('info', 'transfer_started', { roomId: room.id, devices: room.devices.size })
+    emitBusEvent(log, 'transfer.started', { roomId: room.id })
     relayToDevice(io, room, 'transfer-manifest', payload)
   })
 
   socket.on('transfer-accepted', (payload: { roomId: string; from: string; to: string; accepted: boolean; reason?: string }) => {
+    if (tunnelToFedOwner(socket, 'transfer-accepted', payload)) return
     if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
@@ -1501,6 +2121,7 @@ io.on('connection', (socket) => {
   })
 
   socket.on('transfer-complete', (payload: { roomId: string; from: string; to: string }) => {
+    if (tunnelToFedOwner(socket, 'transfer-complete', payload)) return
     if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
@@ -1508,10 +2129,12 @@ io.on('connection', (socket) => {
     room.transferActive = false
     room.state = 'connected'
     log('info', 'transfer_complete', { roomId: room.id })
+    emitBusEvent(log, 'transfer.complete', { roomId: room.id, relayedBytes: room.relayedBytes })
     relayToDevice(io, room, 'transfer-complete', payload)
   })
 
   socket.on('transfer-cancel', (payload: { roomId: string; from: string; to: string; reason?: string }) => {
+    if (tunnelToFedOwner(socket, 'transfer-cancel', payload)) return
     if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
@@ -1521,6 +2144,7 @@ io.on('connection', (socket) => {
 
   // === Resume coordination (unicast) ===
   socket.on('resume-request', (payload: { roomId: string; from: string; to: string; transferId: string; lastChunkIndex: number }) => {
+    if (tunnelToFedOwner(socket, 'resume-request', payload)) return
     if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
@@ -1528,6 +2152,7 @@ io.on('connection', (socket) => {
   })
 
   socket.on('resume-response', (payload: { roomId: string; from: string; to: string; transferId: string; accepted: boolean; fromChunkIndex?: number }) => {
+    if (tunnelToFedOwner(socket, 'resume-response', payload)) return
     if (!verifyMembership(socket.id, payload.roomId)) return
     const room = rooms.get(payload.roomId)
     if (!room) return
@@ -1541,6 +2166,7 @@ io.on('connection', (socket) => {
   // derives the payload-encryption key from the room PIN in a way that never
   // exposes key material to the relay.
   socket.on('e2e-relay', (payload: { roomId: string; from: string; to: string; data: unknown }) => {
+    if (tunnelToFedOwner(socket, 'e2e-relay', payload)) return
     if (!verifyMembership(socket.id, payload.roomId)) return socket.emit('signaling-error', { code: 'NOT_MEMBER', message: 'not a room member' })
     const room = rooms.get(payload.roomId)
     if (!room) return
@@ -1558,6 +2184,7 @@ io.on('connection', (socket) => {
   socket.on('relay-data', (payload: { roomId: string; from: string; to: string; transferId: string; seq: number; chunkIndex: number; data: string; last?: boolean }) => {
     try {
       if (!payload || typeof payload !== 'object') return
+      if (tunnelToFedOwner(socket, 'relay-data', payload)) return
       if (!verifyMembership(socket.id, payload.roomId)) {
         return socket.emit('signaling-error', { code: 'NOT_MEMBER', message: 'not a room member' })
       }
@@ -1591,6 +2218,7 @@ io.on('connection', (socket) => {
         relayAbuse.blockedDrops++
         socket.emit('relay-error', { roomId: room.id, reason: 'blocked' })
         log('warn', 'relay_blocked_room', { roomId: room.id })
+        emitBusEvent(log, 'relay.quota', { roomId: room.id, reason: 'blocked' })
         return
       }
       // 1. Per-room LIFETIME cap: permanent for this room — the client's
@@ -1599,6 +2227,7 @@ io.on('connection', (socket) => {
         relayAbuse.roomCapExceeded++
         socket.emit('relay-error', { roomId: room.id, reason: 'room-cap' })
         log('warn', 'relay_room_cap', { roomId: room.id, bytes: room.relayedBytes })
+        emitBusEvent(log, 'relay.quota', { roomId: room.id, reason: 'room-cap' })
         return
       }
       // 2. Per-IP bucket: an abuser minting many rooms must not multiply
@@ -1608,6 +2237,7 @@ io.on('connection', (socket) => {
         relayAbuse.ipQuotaExceeded++
         socket.emit('relay-error', { roomId: room.id, reason: 'quota' })
         log('warn', 'relay_ip_quota_exceeded', { roomId: room.id, ip: hashIp(clientIpOfSocket(socket)) })
+        emitBusEvent(log, 'relay.quota', { roomId: room.id, reason: 'ip-quota' })
         return
       }
       // 3. Per-room token bucket — over quota: tell the SENDER, drop the frame.
@@ -1615,6 +2245,7 @@ io.on('connection', (socket) => {
         relayAbuse.quotaExceeded++
         socket.emit('relay-error', { roomId: room.id, reason: 'quota' })
         log('warn', 'relay_quota_exceeded', { roomId: room.id })
+        emitBusEvent(log, 'relay.quota', { roomId: room.id, reason: 'quota' })
         return
       }
       touchRoom(room)
@@ -1637,6 +2268,7 @@ io.on('connection', (socket) => {
   socket.on('relay-ack', (payload: { roomId: string; from: string; to: string; transferId: string; seq: number }) => {
     try {
       if (!payload || typeof payload !== 'object') return
+      if (tunnelToFedOwner(socket, 'relay-ack', payload)) return
       if (!verifyMembership(socket.id, payload.roomId)) return
       const room = rooms.get(payload.roomId)
       if (!room) return
@@ -1659,6 +2291,24 @@ io.on('connection', (socket) => {
     if (room) touchRoom(room)
   })
 
+  // === v5-f19: opt-in speedrun leaderboard (alias + time, never content) ===
+  socket.on('leaderboard-submit', (payload: { alias?: string; timeMs?: number; sizeBytes?: number; timeline?: number[] }) => {
+    handleLeaderboardSubmit(
+      log,
+      clientIpOfSocket(socket),
+      payload as unknown,
+      (rank) => {
+        socket.emit('leaderboard-data', { ok: true, rank, ...leaderboardTop(10) })
+        emitBusEvent(log, 'leaderboard.entry', { rank, timeMs: Number(payload?.timeMs) || 0 })
+      },
+      (message) => socket.emit('signaling-error', { code: 'INVALID_INPUT', message })
+    )
+  })
+
+  socket.on('leaderboard-fetch', () => {
+    socket.emit('leaderboard-data', { ok: true, ...leaderboardTop(10) })
+  })
+
   // === Disconnect cleanup ===
   socket.on('leave-room', () => {
     handleDisconnect(socket)
@@ -1677,15 +2327,29 @@ function handleDisconnect(socket: any) {
   const roomId = socketToRoom.get(socket.id)
   const deviceId = socketToDevice.get(socket.id)
   log('debug', 'socket_disconnect', { socketId: socket.id })
-  if (!roomId) return
+  // v5-e17: a local socket that fed-joined a REMOTE room — tell the owner.
+  const fed = fedMemberSockets.get(socket.id)
+  if (fed) {
+    fedMemberSockets.delete(socket.id)
+    pendingFedJoins.delete(socket.id)
+    federation.emitToPeer(fed.peerId, 'fed-leave', { room: fed.roomId, deviceId: fed.deviceId })
+    socketToDevice.delete(socket.id)
+    return
+  }
+  pendingFedJoins.delete(socket.id)
+  if (!roomId) {
+    socketToDevice.delete(socket.id)
+    return
+  }
   const room = rooms.get(roomId)
   if (room && deviceId) {
     room.devices.delete(deviceId)
-    socket.to(roomId).emit('device-left', { deviceId })
+    broadcastToRoom(io, room, 'device-left', { deviceId }, deviceId)
     log('info', 'device_left', { roomId, devices: room.devices.size })
     if (room.devices.size === 0) {
       rooms.delete(roomId)
       log('info', 'room_closed', { roomId, reason: 'empty' })
+      emitBusEvent(log, 'room.closed', { roomId, reason: 'empty' })
     }
   }
   socketToRoom.delete(socket.id)
@@ -1703,6 +2367,11 @@ httpServer.listen(PORT, () => {
     adminEnabled: ADMIN_TOKEN !== '',
     turnEnabled: TURN_URL !== '' && TURN_SECRET !== '',
   })
+  // v5-e/f boot: webhooks event bus (E14), federation links (E17), speedrun
+  // leaderboard store (F19) — all optional features that must never block boot.
+  void initWebhooks(log, process.env)
+  void federation.start(io)
+  void initLeaderboard(log)
 })
 
 process.on('SIGTERM', () => {

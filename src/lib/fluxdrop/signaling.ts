@@ -6,8 +6,17 @@
 import { io, type Socket } from 'socket.io-client'
 import { SIGNALING_EVENTS, RELAY_EVENTS } from './protocol'
 import { recordSignalingEvent } from './telemetry'
+import { usePrefsStore } from './prefs'
+import { activeChaosProfile, chaosDelayForSignaling, chaosShouldDropSignaling } from './chaos'
 
 const SIGNALING_PORT = 3003
+
+/** v5-e17: resolve the socket.io URL — explicit pref wins, else the gateway. */
+export function signalingUrl(): string {
+  const custom = usePrefsStore.getState().signalingEndpoint
+  if (custom) return custom
+  return `/?XTransformPort=${SIGNALING_PORT}`
+}
 
 export interface SignalingCallbacks {
   onConnect: () => void
@@ -56,7 +65,7 @@ export class FluxDropSignaling {
 
   connect(): void {
     if (this.socket?.connected) return
-    this.socket = io(`/?XTransformPort=${SIGNALING_PORT}`, {
+    this.socket = io(signalingUrl(), {
       transports: ['websocket', 'polling'],
       forceNew: true,
       reconnection: true,
@@ -67,6 +76,20 @@ export class FluxDropSignaling {
     })
 
     const s = this.socket
+    // v5-f18: chaos lab — when a profile is active, outbound signaling frames
+    // are delayed/jittered (and the genuinely redundant ICE frames may be
+    // dropped) BEFORE hitting the wire, exercising the client's recovery
+    // ladder (ICE accumulation, rejoin, resume) exactly like real impairment.
+    const chaos = activeChaosProfile()
+    const rawEmit = s.emit.bind(s)
+    if (chaos) {
+      ;(s as unknown as { emit: (ev: string, ...args: unknown[]) => void }).emit = (ev: string, ...args: unknown[]) => {
+        if (chaosShouldDropSignaling(chaos, ev)) return
+        const delay = chaosDelayForSignaling(chaos, ev)
+        if (delay > 0) setTimeout(() => rawEmit(ev, ...args), delay)
+        else rawEmit(ev, ...args)
+      }
+    }
     // v4 (2.6): record inbound signaling events for the transparency panel.
     const recordIn = (event: string) => (p: unknown) => {
       try {
@@ -120,6 +143,17 @@ export class FluxDropSignaling {
 
   get isConnected(): boolean {
     return !!this.socket?.connected
+  }
+
+  /**
+   * v5-f18: chaos lab — simulate an UNEXPECTED transport drop (engine close).
+   * socket.io treats it like a network failure and auto-reconnects; our
+   * rejoin-room machinery then rebinds the room. Exactly the recovery ladder
+   * the flaky profiles are meant to exercise (never used in production).
+   */
+  simulateDrop(): void {
+    const engine = (this.socket as unknown as { io?: { engine?: { close?: () => void } } } | null)?.io?.engine
+    try { engine?.close?.() } catch { /* ignore */ }
   }
 
   /**
@@ -283,6 +317,26 @@ export class FluxDropSignaling {
   onRelayError(cb: (payload: any) => void): () => void {
     this.relayErrorListeners.add(cb)
     return () => { this.relayErrorListeners.delete(cb) }
+  }
+
+  // === v5-f19: opt-in speedrun leaderboard (fun only — alias + time) ===
+
+  /** Submit a completed speedrun run (server rate-limits + validates). */
+  sendLeaderboardSubmit(payload: { alias: string; timeMs: number; sizeBytes: number; timeline?: number[] }) {
+    this.emit(SIGNALING_EVENTS.LEADERBOARD_SUBMIT, payload)
+  }
+
+  /** Ask the server for the current top-10 (answer: leaderboard-data). */
+  sendLeaderboardFetch() {
+    this.emit(SIGNALING_EVENTS.LEADERBOARD_FETCH, {})
+  }
+
+  /** Subscribe to leaderboard data responses. Returns an unsubscribe fn. */
+  onLeaderboardData(cb: (payload: any) => void): () => void {
+    const s = this.socket
+    if (!s) return () => {}
+    s.on(SIGNALING_EVENTS.LEADERBOARD_DATA, cb)
+    return () => s.off(SIGNALING_EVENTS.LEADERBOARD_DATA, cb)
   }
 
   leaveRoom() {

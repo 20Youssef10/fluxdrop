@@ -30,7 +30,12 @@ grounded in what exists, nothing here duplicates shipped features.
 | C11 | ETA confidence bands | ✅ shipped (unit-verified) |
 | D12 | Ship the shells (Tauri desktop + Capacitor Android) | ✅ E2E verified (bridge sim) |
 | D13 | Background transfer resilience (native shells) | ✅ E2E verified (sim lifecycle) |
-| E–F | Sections E & F | ⬜ |
+| E14 | Webhooks / event bus (automation hub) | ✅ E2E verified |
+| E15 | Serverless signaling adapter (CF Worker + DO) | ✅ smoke-verified (socket.io client) |
+| E16 | @fluxdrop/sdk npm + widget + docs site | ✅ E2E verified (widget → app transfer) |
+| E17 | Federated signaling (S2S room peering) | ✅ E2E verified (cross-server transfer) |
+| F18 | Chaos harness in CI | ✅ E2E verified (4/4 profiles) |
+| F19 | Speedrun ghosts + leaderboards | ✅ E2E verified |
 
 **E2E evidence (two browser sessions via gateway, 2026-10-29):**
 - A1: fastLanes=2 + 20 MB fresh file → lane 1 connected mid-transfer and
@@ -155,6 +160,60 @@ grounded in what exists, nothing here duplicates shipped features.
   notification, share-sheet in/out with cache stashing, intent deep links,
   keep-awake, FileProvider) are template-faithful and documented in
   src-tauri/README.md + src-capacitor/README.md.
+
+**Sections E & F evidence (two browser sessions via gateway + headless
+playwright + worker smoke, 2026-10-30):**
+- E14: a webhook registered in the admin automation hub
+  (http://localhost:3050/hook, events room.created/room.joined/
+  transfer.started/transfer.complete) received 10/10 deliveries, EVERY one
+  HMAC-signed (`X-FluxDrop-Signature: t=<ts>,v1=<hex>`, Stripe-style) —
+  covering both real transfers of the run (fed + widget): room.created ×2,
+  room.joined ×2, transfer.started ×1 (P2P manifests ride the DataChannel;
+  the signaling manifest path fires it for SDK/relay sends), transfer.complete
+  ×3, plus webhook.test + federation.link. Metadata-only payloads (room ids,
+  counts, bytes) — never PINs/SDP/content.
+- E17: two signaling instances (alpha :3013, beta :3014, HMAC-authed
+  `/federation` links, link "up" in both admins, /region advertises peers)
+  → sender on alpha created room A9ZBFC, receiver (web app, endpoint pref
+  pointed at beta) joined `A9ZBFC@alpha` through the link → consent →
+  transfer complete, file arrived, SHA-256 verified. WebRTC stays DIRECT
+  browser↔browser; only signaling tunneled. Server-side: roomsWithFed=1,
+  fed device tracked with `fedVia`; home-side per-IP relay budget enforced
+  pre-tunnel, owner-side room ladder post-tunnel.
+- E16: Settings → Dev tab: live wire-conformance badge ran the golden-vector
+  suite in-app (`/api/conformance` → "conformance · 72 passed"); the REAL
+  production `<fluxdrop-widget>` (imported from sdk/src, pointed at the
+  app's own signaling via the pref-aware resolver) sent
+  sdk-widget-demo.bin → joined from a second browser session → Transfer
+  complete + SHA-256 verified; the widget flipped to its verified-done
+  state. `npm pack --dry-run` = 22 files / ~246 kB (tsup ESM+dts build).
+- F18: `bun run chaos` (playwright, headless Chromium) drove REAL 3 MiB
+  transfers through the app under in-app impairment: steady 21.9 s,
+  latency (+250 ms ±80 all frames) 20.1 s, lossy-wifi (120 ms + 20 % ICE
+  loss) 22.2 s, flaky (signaling drop every 15 s → rejoin-room ladder
+  cycles, device_left/rejoined in server logs) 21.1 s — ALL SHA-256
+  verified; ci/chaos-report.json + badges regenerate per run. The harness
+  itself caught and fixed two real bugs during development: the chaos
+  boot-resolve no-op (`?chaos=` silently inactive) and an
+  `Illegal invocation` in the DataChannel impairment wrapper (pre-bound
+  prototype send) — exactly the perf-resume-1 bug class it exists for.
+- F19: speedrun race mode — "Start timed run" sent the fixed 2 MiB
+  fluxdrop-speedrun file through the NORMAL pipeline (room + consent +
+  verified complete); the dialog timed accept→verified-complete, showed
+  "New personal best!" + effective Mbit/s, persisted the ghost
+  (fluxdrop:speedrun-best), and "Race again" rendered the ghost bar +
+  "vs ghost" delta on run 2. Opt-in leaderboard: alias-only submit through
+  the signaling bridge ranked live ("world rank #N", board renders, admin
+  dashboard shows the same board); server rate-limits 5 submissions/
+  10 min/IP and sanitizes entries (alias ≤24 chars, timeMs 200..600 000).
+- E15: `serverless/signaling-worker` — Cloudflare Worker + Durable Object
+  (WebSocket hibernation, SQLite class, rooms persisted across eviction):
+  the STOCK socket.io-client passed a 12-check smoke roundtrip (engine.io
+  v4 WS handshake, create/join/rejoin, pairing + SDP relay, sealed
+  transfer-manifest, relay-data through the per-room token bucket,
+  relay-ack, NOT_MEMBER rejection). Wrangler dev boots it locally; deploy
+  is `bun run deploy`. Deltas vs the Bun server documented in its README
+  (no /nearby, no per-IP relay quota, no admin HTML/federation/webhooks).
 
 > Note on A4: BLAKE3/WASM was evaluated and **dropped** — `blake3` fails to
 > resolve its `blake3-wasm` dep on the current registry, and SHA-256 digests
@@ -430,23 +489,92 @@ active session; schedule fires a toast on an idle session.
     (`isNativeShell()` guard) — the service keeps the process fully alive,
     so pausing would fight a healthy DataChannel.
 
-# E. Ecosystem & Infrastructure — ⬜
+# E. Ecosystem & Infrastructure — v5 shipped
 
-14. **Webhooks / event bus on signaling** — `transfer.complete` hooks
-    (Home Assistant/scripts); admin dashboard as automation hub. (Small.)
-15. **Serverless signaling adapter** — Durable Objects/Workers template for
-    zero-cost self-hosting next to the Bun server. (Medium.)
-16. **Publish `@fluxdrop/sdk` to npm + docs site** — widget as a web
-    component; conformance badge. (Medium.)
-17. **Federated signaling** — server-to-server room peering with shared
-    secrets. Strategic moonshot. (XL.)
+14. **Webhooks / event bus on signaling** — ✅ shipped. A lifecycle event
+    bus (`mini-services/signaling/src/webhooks.ts`) fans ten event types
+    (room.created/joined/closed, pairing.confirmed, transfer.started/
+    complete, relay.quota, federation.link, leaderboard.entry, webhook.test)
+    to admin-registered hooks. Deliveries are Stripe-style HMAC-signed
+    (`t=<ts>,v1=HMAC-SHA256(secret, ts.body)`), 5 s timeout + 2 retries,
+    never block the room path, and carry metadata only (room ids/counts/
+    bytes — PINs, SDP and content are stripped defense-in-depth). Config
+    persists to `data/webhooks.json`, env `WEBHOOKS=[…]` seeds extras. The
+    admin dashboard became the automation hub: add/remove/pause/test hooks,
+    per-hook delivery stats and a recent-deliveries strip.
+15. **Serverless signaling adapter** — ✅ shipped.
+    `serverless/signaling-worker/`: one Durable Object ("hub") with
+    WebSocket hibernation speaks the SAME socket.io wire contract as the
+    Bun server (engine.io v4 over WebSocket; socket.io-client connects
+    unchanged). Rooms/PINs/oneJoin links, pairing + WebRTC relay, the
+    transfer lifecycle, e2e-relay and the chunk relay with per-room token
+    bucket + lifetime cap all run in the DO; room state persists in DO
+    storage so eviction/hibernation never drops a transfer. Plain-HTTP
+    endpoints (/healthz, /region, /link, /turn-credentials, JSON
+    /admin/api). Verified by `test/smoke.ts` (12-check socket.io-client
+    roundtrip against `wrangler dev`). Deltas vs the Bun server (no
+    /nearby, no per-IP relay bucket, no admin HTML/federation/webhooks)
+    are documented in its README.
+16. **Publish `@fluxdrop/sdk` + docs site** — ✅ shipped (publish-runbook
+    ready; `npm publish` from sdk/ is the remaining manual step — the
+    package must ship from a clean checkout). The v0.1 scaffold became a
+    real client: `createFluxdropClient()` runs the FULL transport
+    (socket.io signaling → pairing → WebRTC DataChannel → manifest-first
+    framing → 64 KiB chunks with ACK pacing + lost-ACK resweep →
+    TRANSFER_COMPLETE verification), mirroring cli/src/send.ts.
+    `<fluxdrop-widget>` is a framework-free custom element (shadow DOM,
+    themable, RTL-aware, en/ar strings) with fluxdrop-ready/-progress/
+    -complete/-error events; `@fluxdrop/sdk/react` wraps it. tsup builds
+    ESM + d.ts + sourcemaps (22 files, ~246 kB packed); the engine layer
+    remains the app's production wire code. The in-app face is Settings →
+    Dev: a LIVE conformance badge (`/api/conformance` runs the
+    golden-vector suite), copyable snippets, and a real widget demo wired
+    to the instance's own signaling. `docs-site/index.html` is the static
+    docs page (badges, API table, live demo slot).
+17. **Federated signaling** — ✅ shipped.
+    `mini-services/signaling/src/federation.ts`: servers peer over
+    authenticated socket.io `/federation` links (per-pair shared secret;
+    token = HMAC-SHA256(secret, selfId.ts), ±60 s window, function-form
+    auth so reconnects re-sign). Rooms stay on their OWNER; a client joins
+    cross-server with `ROOM@peer` — its home server tunnels join + every
+    room frame (fed-join/leave/frame/broadcast/close), the owner runs all
+    room logic (PIN, capacity, pairing, relay ladder — owner-side per-room
+    bucket, home-side per-IP bucket). `from` is always pinned to the
+    link-verified device (anti-spoof), room-scoped handlers on BOTH sides
+    got tunnel interceptors, disconnects forward as fed-leave, and
+    reconnects rebind through rejoin-room. The web join form accepts
+    `AB3K7Q@berlin` codes; Settings → Network exposes a signaling-endpoint
+    override (pref `signalingEndpoint`, pref-aware `signalingUrl()` —
+    also what the Dev-tab widget uses). Admin UI: peer table with link
+    state + latency, add/remove peers, federation cards in the snapshot.
 
-# F. Quality & Fun — ⬜
+# F. Quality & Fun — v5 shipped
 
-18. **Chaos harness in CI** — headless Chrome + network impairment profiles
-    driving the conformance suite; would have caught the perf-resume-1 bug
-    class pre-release. (Medium — protects everything else.)
-19. **Speedrun ghosts + leaderboards** — opt-in global times/ghost replays. (Small.)
+18. **Chaos harness in CI** — ✅ shipped. `scripts/chaos-harness.ts`
+    (playwright, headless Chromium) boots the stack, gates on wire
+    conformance, then drives REAL 3 MiB two-browser transfers under
+    in-app impairment profiles from `src/lib/fluxdrop/chaos.ts` — the same
+    module Settings → Network → "Chaos lab" exposes (latency/jitter on
+    signaling + DataChannel sends via a prototype wrapper, ICE-candidate
+    loss, DC throttling, and periodic unexpected engine drops that
+    exercise the rejoin-room ladder). Reports to ci/chaos-report.json and
+    regenerates shields-style badges; `.github/workflows/chaos.yml` runs
+    it on push/PR (steady + lossy-wifi by default, profile input on
+    dispatch). Profiles verified 4/4 (steady/latency/lossy-wifi/flaky) —
+    and the harness caught two real bugs on its first honest run (chaos
+    boot no-op; Illegal-invocation in the DC wrapper).
+19. **Speedrun ghosts + leaderboards** — ✅ shipped. The v4 intro dialog
+    gained RACE MODE: "Start timed run" builds a fixed 2 MiB random file
+    (`speedrun.ts`) and runs it through the NORMAL send pipeline; the
+    timer runs receiver-accept → verified-complete while a recorder
+    samples progress at 250 ms. Your best run persists as a ghost
+    (fluxdrop:speedrun-best) — race again and a second progress bar
+    replays it with a live "vs ghost" delta on completion. The opt-in
+    global leaderboard (pref, default OFF) shares alias + time ONLY
+    through the signaling server's validated, rate-limited (5/10 min/IP)
+    in-memory+persisted store (`leaderboard.ts`); the dialog renders the
+    top-10 with your submit rank, and the admin dashboard shows the same
+    board. Strings localized in all 7 locales (incl. ar).
 
 ---
 

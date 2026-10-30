@@ -26,8 +26,14 @@ export function JoinForm({ onJoin, onBack }: JoinFormProps) {
   }, [])
 
   const handleJoin = () => {
-    const cleaned = roomId.trim().toUpperCase().replace(/\s/g, '')
-    if (cleaned.length < 4) {
+    const cleaned = roomId.trim().replace(/\s/g, '')
+    // v5-e17: `ROOM@peer` joins a FEDERATED room through the named peer
+    // server (the signaling server parses + routes the suffix).
+    const fedMatch = /^([A-Za-z0-9]{4,12})@([A-Za-z0-9][A-Za-z0-9_-]{0,31})$/.exec(cleaned)
+    const normalized = fedMatch
+      ? `${fedMatch[1].toUpperCase()}@${fedMatch[2].toLowerCase()}`
+      : cleaned.toUpperCase()
+    if (normalized.length < 4) {
       toast.error('Enter a valid room ID')
       return
     }
@@ -35,7 +41,7 @@ export function JoinForm({ onJoin, onBack }: JoinFormProps) {
       toast.error('PIN must be 6 digits')
       return
     }
-    onJoin(cleaned, pin)
+    onJoin(normalized, pin)
   }
 
   return (
@@ -65,17 +71,22 @@ export function JoinForm({ onJoin, onBack }: JoinFormProps) {
             <Input
               id="room-id"
               value={roomId}
-              onChange={(e) => setRoomId(e.target.value.toUpperCase())}
-              placeholder="e.g. AB3K7Q"
+              onChange={(e) => {
+                // v5-e17: keep the @peer federation suffix lowercase.
+                const raw = e.target.value
+                const at = raw.indexOf('@')
+                setRoomId(at === -1 ? raw.toUpperCase() : raw.slice(0, at).toUpperCase() + raw.slice(at).toLowerCase())
+              }}
+              placeholder="e.g. AB3K7Q or AB3K7Q@berlin"
               className="font-mono text-lg tracking-widest uppercase h-12 focus-visible:ring-flux-500/40 focus-visible:border-flux-500/50"
-              maxLength={8}
+              maxLength={40}
               autoComplete="off"
               autoFocus
               inputMode="text"
               spellCheck={false}
             />
             <p className="text-xs text-muted-foreground">
-              The 6-character code shown on the sender's screen
+              The 6-character code shown on the sender's screen — append @peer for a federated room
             </p>
           </div>
 

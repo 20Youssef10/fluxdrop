@@ -85,13 +85,14 @@ section('1. Static constants (opcodes, sizes, tunables)')
 // ============================================================================
 {
   const opcodes = Object.values(MessageType) as number[]
-  check('opcode count is exactly 19 (0x01..0x13)', opcodes.length === 19, `got ${opcodes.length}`)
+  // v5-b1 added WIPE_REQUEST (0x14) — 20 opcodes, 0x01..0x14.
+  check('opcode count is exactly 20 (0x01..0x14)', opcodes.length === 20, `got ${opcodes.length}`)
   check(
-    'opcodes are 0x01..0x13 with no gaps and no duplicates',
-    opcodes.every((v) => Number.isInteger(v) && v >= 0x01 && v <= 0x13) &&
+    'opcodes are 0x01..0x14 with no gaps and no duplicates',
+    opcodes.every((v) => Number.isInteger(v) && v >= 0x01 && v <= 0x14) &&
       new Set(opcodes).size === opcodes.length &&
-      opcodes.reduce((a, b) => Math.max(a, b), 0) === 0x13 &&
-      opcodes.reduce((a, b) => Math.min(a, b), 0x13) === 0x01
+      opcodes.reduce((a, b) => Math.max(a, b), 0) === 0x14 &&
+      opcodes.reduce((a, b) => Math.min(a, b), 0x14) === 0x01
   )
   check('header size is 9 bytes', HEADER_SIZE === 9)
   check('transfer id on the wire is 4 bytes', TRANSFER_ID_BYTES === 4)
@@ -413,8 +414,9 @@ section('8. Signaling event-name conformance (client <-> server contract)')
     'pairing-reject', 'webrtc-offer', 'webrtc-answer', 'webrtc-ice', 'transfer-manifest',
     'transfer-accepted', 'transfer-complete', 'transfer-cancel', 'resume-request',
     'resume-response', 'e2e-relay', 'heartbeat', 'leave-room',
+    'leaderboard-submit', 'leaderboard-fetch',
     'room-created', 'room-joined', 'room-expired', 'room-closed', 'device-discovered',
-    'device-left', 'signaling-error',
+    'device-left', 'signaling-error', 'leaderboard-data',
   ])
   const protocolEvents = new Set(Object.values(SIGNALING_EVENTS))
   const clientEmittable = new Set([...SERVER_EVENTS].filter((e) => e !== 'rejoin-room'))

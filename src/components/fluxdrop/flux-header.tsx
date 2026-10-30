@@ -1,7 +1,7 @@
 'use client'
 
 import { useTheme } from 'next-themes'
-import { Moon, Sun, Settings, Wifi, WifiOff, Plus, Trash2, Server, User, Shield, ShieldCheck, ShieldAlert, HelpCircle, Bell, Volume2, BellOff, VolumeX, BadgeCheck, RotateCcw, Zap, Lock, Archive, SlidersHorizontal, Palette, Languages, Vibrate, Smartphone, PlayCircle, Timer, Monitor, Globe } from 'lucide-react'
+import { Moon, Sun, Settings, Wifi, WifiOff, Plus, Trash2, Server, User, Shield, ShieldCheck, ShieldAlert, HelpCircle, Bell, Volume2, BellOff, VolumeX, BadgeCheck, RotateCcw, Zap, Lock, Archive, SlidersHorizontal, Palette, Languages, Vibrate, Smartphone, PlayCircle, Timer, Monitor, Globe, Code2, FlaskConical, Cable } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -48,6 +48,12 @@ import {
   type NativeShellCapabilities,
 } from '@/lib/fluxdrop/native-bridge'
 import { FluxLogo, FluxWordmark } from './flux-logo'
+// v5-e16: Developers tab (conformance badge + live SDK widget demo).
+import { DevelopersTab } from './developers-tab'
+// v5-f18: chaos lab profiles + activation API.
+import { CHAOS_PROFILES, activeChaosProfile, activateChaos, deactivateChaos } from '@/lib/fluxdrop/chaos'
+// v5-e17: signaling endpoint pref (advanced / federation / self-host).
+import { signalingUrl } from '@/lib/fluxdrop/signaling'
 
 /** One-line human description for the Settings → Device shell card. */
 function describeShell(info: NativeShellInfo): string {
@@ -345,6 +351,17 @@ export function SettingsDialog({
   const [draft, setDraft] = useState(alias)
   const [iceDraft, setIceDraft] = useState<IceServerConfig[]>([])
   const [useIceDraft, setUseIceDraft] = useState(false)
+  // v5-e17: signaling endpoint editor (Network tab, advanced).
+  const [endpointDraft, setEndpointDraft] = useState('')
+  const [showEndpointEditor, setShowEndpointEditor] = useState(false)
+  // v5-f18: chaos lab — profile id active for THIS tab (session-scoped).
+  const [chaosId, setChaosId] = useState<string>('')
+  useEffect(() => {
+    if (!open) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setEndpointDraft(usePrefsStore.getState().signalingEndpoint)
+    setChaosId(activeChaosProfile()?.id ?? '')
+  }, [open])
 
   useEffect(() => {
     if (!open) return
@@ -477,7 +494,7 @@ export function SettingsDialog({
         </div>
         <Tabs defaultValue="device" className="flex min-h-0 w-full flex-1 flex-col">
           <div className="shrink-0 px-6 pb-3 pt-4">
-          <TabsList className="grid w-full grid-cols-6">
+          <TabsList className="grid w-full grid-cols-7">
             <TabsTrigger value="device" className="text-xs">
               <User className="mr-1.5 h-3.5 w-3.5" />
               Device
@@ -502,6 +519,11 @@ export function SettingsDialog({
             <TabsTrigger value="tuning" className="text-xs">
               <SlidersHorizontal className="mr-1.5 h-3.5 w-3.5" />
               Tuning
+            </TabsTrigger>
+            {/* v5-e16: developers — SDK, conformance badge, widget demo */}
+            <TabsTrigger value="dev" className="text-xs">
+              <Code2 className="mr-1.5 h-3.5 w-3.5" />
+              Dev
             </TabsTrigger>
           </TabsList>
           </div>
@@ -757,6 +779,127 @@ export function SettingsDialog({
                 <span>Using public Google + Cloudflare STUN servers. Sufficient for most home/mobile networks.</span>
               </div>
             )}
+
+            {/* v5-e17: signaling server endpoint (advanced — self-host / federation). */}
+            <div className="rounded-lg border border-border/60 p-3">
+              <div className="flex items-center justify-between">
+                <div className="min-w-0 pr-3">
+                  <p className="flex items-center gap-1.5 text-sm font-medium">
+                    <Cable className="h-3.5 w-3.5 text-muted-foreground" aria-hidden />
+                    Signaling server
+                  </p>
+                  <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+                    {signalingUrl() || 'same origin'}
+                  </p>
+                </div>
+                <Button variant="outline" size="sm" onClick={() => setShowEndpointEditor((v) => !v)}>
+                  {showEndpointEditor ? 'Close' : 'Override'}
+                </Button>
+              </div>
+              {showEndpointEditor && (
+                <div className="mt-3 space-y-2">
+                  <Input
+                    value={endpointDraft}
+                    onChange={(e) => setEndpointDraft(e.target.value)}
+                    placeholder="http://my-signaling:3003 (empty = default)"
+                    className="h-8 text-xs font-mono"
+                  />
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => {
+                        prefs.setSignalingEndpoint(endpointDraft)
+                        toast.success(endpointDraft ? 'Signaling endpoint saved' : 'Back to the default server', {
+                          description: 'Applies to the NEXT signaling connect — reconnect or reload to switch now.',
+                        })
+                      }}
+                    >
+                      Save
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => {
+                        setEndpointDraft('')
+                        prefs.setSignalingEndpoint('')
+                        toast.info('Signaling endpoint reset to default')
+                      }}
+                    >
+                      Reset
+                    </Button>
+                  </div>
+                  <p className="text-[10px] leading-relaxed text-muted-foreground">
+                    For federated rooms, keep this default and join with a <code>ROOM@peer</code> code instead — only
+                    point this at another server when that server is your home.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* v5-f18: chaos lab — network impairment profiles (test-only). */}
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+              <div className="flex items-center gap-2">
+                <FlaskConical className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium">Chaos lab (testing)</p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    Impair signaling + DataChannel timing to exercise the recovery ladder. This tab only — new
+                    connections pick it up.
+                  </p>
+                </div>
+              </div>
+              <div className="mt-2.5 flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    deactivateChaos()
+                    setChaosId('')
+                    toast.info('Chaos disabled')
+                  }}
+                  className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                    chaosId === ''
+                      ? 'border-flux-500/50 bg-flux-500/10 font-semibold text-flux-700 dark:text-flux-300'
+                      : 'border-border/60 bg-muted/40 text-muted-foreground hover:border-flux-500/40'
+                  }`}
+                >
+                  off
+                </button>
+                {CHAOS_PROFILES.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    title={p.description}
+                    onClick={() => {
+                      activateChaos(p)
+                      setChaosId(p.id)
+                      toast.warning(`Chaos profile active: ${p.label}`, {
+                        description: p.description,
+                      })
+                    }}
+                    className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                      chaosId === p.id
+                        ? 'border-amber-500/60 bg-amber-500/15 font-semibold text-amber-700 dark:text-amber-300'
+                        : 'border-border/60 bg-muted/40 text-muted-foreground hover:border-amber-500/40'
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              {chaosId && (
+                <p className="mt-2 rounded-md bg-amber-500/10 px-2 py-1.5 text-[10px] text-amber-700 dark:text-amber-300">
+                  Also available as a URL param: <code>?chaos={chaosId}</code> — the chaos harness drives E2E runs
+                  through it.
+                </p>
+              )}
+            </div>
+          </TabsContent>
+
+          {/* v5-e16: Developers tab */}
+          <TabsContent value="dev" className="mt-4">
+            <DevelopersTab />
           </TabsContent>
 
           {/* Alerts tab */}

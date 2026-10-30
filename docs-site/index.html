@@ -1,0 +1,146 @@
+<!doctype html>
+<!-- v5-e16: @fluxdrop/sdk docs site — a single static page (no build step).
+     Serve it from anywhere: `bunx serve docs-site` or any static host. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FluxDrop SDK — embed verified file transfers</title>
+<style>
+  :root {
+    --bg: #f7fafc; --panel: #ffffff; --ink: #10201a; --muted: #5b6b66;
+    --accent: #0d9488; --accent-soft: rgba(13, 148, 136, .08);
+    --border: #dbe5e1; --code-bg: #0c1512; --code-ink: #d3ece6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0a0f0d; --panel: #101816; --ink: #e6f2ee; --muted: #8ba39c; --border: #1e2b27; }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--ink); font: 15px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 48px 24px 96px; }
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 10px; }
+  .logo { width: 40px; height: 40px; color: var(--accent); }
+  h1 { font-size: 28px; letter-spacing: -.3px; }
+  h1 b { color: var(--accent); }
+  .sub { color: var(--muted); margin-bottom: 20px; }
+  .badges { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 36px; }
+  .badges img { height: 20px; }
+  section { margin-bottom: 40px; }
+  h2 { font-size: 19px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  h2 .n { color: var(--accent); font-variant-numeric: tabular-nums; }
+  p { color: var(--muted); margin-bottom: 12px; }
+  pre { background: var(--code-bg); color: var(--code-ink); border-radius: 12px; padding: 16px 18px; overflow-x: auto; font: 12.5px/1.6 ui-monospace, "SF Mono", Menlo, Consolas, monospace; margin-bottom: 12px; }
+  pre .c { color: #6e8f87; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; font-size: 13.5px; }
+  th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .8px; background: rgba(127,127,127,.04); }
+  tr:last-child td { border-bottom: none; }
+  td code, p code { font-family: ui-monospace, monospace; font-size: .92em; background: var(--accent-soft); color: var(--accent); padding: 1px 6px; border-radius: 6px; }
+  .demo { border: 1px solid var(--border); background: var(--panel); border-radius: 14px; padding: 20px; }
+  .demo h3 { font-size: 14px; margin-bottom: 4px; }
+  .demo .hint { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+  #widget-slot { max-width: 360px; }
+  footer { color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); padding-top: 18px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <svg class="logo" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 2c3.5 4.2 7 7.6 7 11.5A7 7 0 0 1 5 13.5C5 9.6 8.5 6.2 12 2Z" fill="currentColor" opacity=".9"/><path d="M9 13.5h6M12 10.5v6" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></svg>
+    <h1>Flux<b>Drop</b> SDK</h1>
+  </header>
+  <p class="sub">Embed verified, peer-to-peer file sends into any web app — the same production wire protocol the FluxDrop app runs on, as an npm package and a zero-framework web component.</p>
+  <div class="badges">
+    <img src="../ci/conformance-badge.svg" alt="wire conformance badge" onerror="this.style.display='none'">
+    <img src="../ci/chaos-badge.svg" alt="chaos harness badge" onerror="this.style.display='none'">
+  </div>
+
+  <section>
+    <h2><span class="n">1.</span> Install</h2>
+    <pre>npm install @fluxdrop/sdk   <span class="c"># or: bun add @fluxdrop/sdk</span></pre>
+  </section>
+
+  <section>
+    <h2><span class="n">2.</span> Web component — zero framework</h2>
+    <p>One import registers <code>&lt;fluxdrop-widget&gt;</code>. Shadow DOM, themable, RTL-aware (<code>lang="ar"</code>).</p>
+    <pre>&lt;script type="module"&gt;
+  import '@fluxdrop/sdk/widget'
+&lt;/script&gt;
+
+&lt;fluxdrop-widget
+  signal-url="https://your-fluxdrop-instance"
+  endpoint="https://your-fluxdrop-instance"
+  accent="#0d9488"
+&gt;&lt;/fluxdrop-widget&gt;</pre>
+    <p>Events: <code>fluxdrop-ready</code> (room + pin + joinUrl), <code>fluxdrop-progress</code>, <code>fluxdrop-complete</code> (verified + file list), <code>fluxdrop-error</code>. React wrapper: <code>import { FluxDropWidget } from '@fluxdrop/sdk/react'</code>.</p>
+  </section>
+
+  <section>
+    <h2><span class="n">3.</span> Typed client — full transport</h2>
+    <pre>import { createFluxdropClient } from '@fluxdrop/sdk'
+
+const fluxdrop = createFluxdropClient({
+  alias: 'docs-site',
+  signalUrl: 'https://your-fluxdrop-instance',
+})
+
+const room = await fluxdrop.createRoom()
+<span class="c">// → share room.roomId + room.pin (QR/link/pigeon)</span>
+
+const { verified } = await fluxdrop.sendFiles([file])
+<span class="c">// validate → SHA-256 manifest → pairing → WebRTC DataChannel →
+// 64 KiB chunks with ACK pacing + lost-ACK resweep → TRANSFER_COMPLETE</span>
+console.log(verified)  <span class="c">// true when every checksum matched on the receiver</span></pre>
+  </section>
+
+  <section>
+    <h2><span class="n">4.</span> Live demo</h2>
+    <div class="demo">
+      <h3>&lt;fluxdrop-widget&gt; in this page</h3>
+      <p class="hint">Point it at a FluxDrop signaling server, pick a file, and join the room it shows from any FluxDrop app instance.</p>
+      <div id="widget-slot"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">5.</span> API surface</h2>
+    <table>
+      <tr><th>Export</th><th>What it is</th></tr>
+      <tr><td><code>createFluxdropClient(options)</code></td><td>Typed façade — connect / createRoom / joinRoom / sendFiles / on / destroy</td></tr>
+      <tr><td><code>@fluxdrop/sdk/widget</code></td><td>The <code>&lt;fluxdrop-widget&gt;</code> custom element (auto-registered)</td></tr>
+      <tr><td><code>@fluxdrop/sdk/react</code></td><td><code>&lt;FluxDropWidget /&gt;</code> React wrapper around the element</td></tr>
+      <tr><td><code>@fluxdrop/sdk/protocol</code> · <code>/encoding</code> · <code>/checksum</code> · <code>/compress</code> · <code>/format</code></td><td>The engine layer — the app's production wire code, re-exported</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2><span class="n">6.</span> Compatibility notes</h2>
+    <p>SDK senders are plaintext-over-DataChannel (like the CLI): the receiving FluxDrop app shows its visible E2EE downgrade notice. E2EE (PAKE over the room PIN) stays an interactive web↔web feature. Receivers: any FluxDrop web app v2+ or the worker adapter. Signaling: the Bun server or the <a href="../serverless/signaling-worker/README.md">Cloudflare Worker adapter</a>.</p>
+  </section>
+
+  <footer>
+    FluxDrop SDK · MIT · wire conformance locked by <code>scripts/protocol-conformance.ts</code> (docs/protocol-spec.md §10) ·
+    badges regenerate via <code>bun scripts/conformance-badge.ts</code> and <code>bun run chaos</code>.
+  </footer>
+</main>
+<script type="module">
+  // Demo: pull the widget straight from the package build (same artifact npm
+  // ships). For this static preview we load from the sibling sdk/dist.
+  try {
+    const { FluxDropWidgetElement } = await import('../sdk/dist/widget.js')
+    if (!customElements.get('fluxdrop-widget')) {
+      customElements.define('fluxdrop-widget', FluxDropWidgetElement)
+    }
+    const el = document.createElement('fluxdrop-widget')
+    el.setAttribute('accent', '#0d9488')
+    el.setAttribute('signal-url', location.origin) // adjust to your signaling server
+    document.getElementById('widget-slot').appendChild(el)
+  } catch (err) {
+    document.getElementById('widget-slot').textContent =
+      'Live demo unavailable in this preview (build the SDK first: cd sdk && bun run build).'
+    console.warn(err)
+  }
+</script>
+</body>
+</html>

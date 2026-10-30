@@ -306,6 +306,9 @@ export const SIGNALING_EVENTS = {
   // v1.2: opaque PAKE handshake relay (server forwards between room members
   // without looking inside — membership-checked like every other relay).
   E2E_RELAY: 'e2e-relay',
+  // v5-f19: opt-in speedrun leaderboard (fun only — alias + time, no content).
+  LEADERBOARD_SUBMIT: 'leaderboard-submit',
+  LEADERBOARD_FETCH: 'leaderboard-fetch',
   // server -> client
   ROOM_CREATED: 'room-created',
   ROOM_JOINED: 'room-joined',
@@ -314,6 +317,7 @@ export const SIGNALING_EVENTS = {
   DEVICE_DISCOVERED: 'device-discovered',
   DEVICE_LEFT: 'device-left',
   SIGNALING_ERROR: 'signaling-error',
+  LEADERBOARD_DATA: 'leaderboard-data',
 } as const
 
 // === v5-a2: server-relayed fallback transport events ===

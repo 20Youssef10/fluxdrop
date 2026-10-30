@@ -1,0 +1,62 @@
+# v5-F18: Chaos harness in CI — headless Chromium + in-app network
+# impairment profiles driving a REAL transfer through the conformance-gated
+# app. This is the harness that would have caught the perf-resume-1 bug class
+# (ICE restarts / signaling blips mid-transfer) before release.
+#
+# Runs on push + manual dispatch. Everything is bun-based; playwright's
+# chromium is cached by its own key.
+
+name: chaos
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      profiles:
+        description: 'Comma-separated chaos profiles (steady, latency, lossy-wifi, edge-3g, flaky, adversarial)'
+        required: false
+        default: 'steady,lossy-wifi'
+
+concurrency:
+  group: chaos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chaos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install deps
+        run: |
+          bun install --frozen-lockfile
+          bunx playwright install chromium --with-deps
+
+      - name: Wire conformance badge (gate + artifact)
+        run: bun scripts/conformance-badge.ts
+
+      - name: Chaos harness (steady + impaired profiles)
+        run: |
+          bun run chaos -- \
+            --base http://localhost:3000 \
+            --seed-signaling http://localhost:3003 \
+            --profiles ${{ github.event.inputs.profiles || 'steady,lossy-wifi' }}
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-report
+          path: |
+            ci/chaos-report.json
+            ci/chaos-badge.svg
+            ci/conformance-badge.json
+            ci/conformance-badge.svg

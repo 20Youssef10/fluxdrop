@@ -42,6 +42,8 @@ import { resolveSaveConflicts } from '@/components/fluxdrop/save-conflict-dialog
 import type { FilePreview } from '@/stores/transfer-store'
 import { useChatStore } from '@/stores/chat-store'
 import { addRecentRoom } from '@/lib/fluxdrop/recent-rooms'
+// v5-e/f: chaos lab (F18) — flake timer + active-profile probe.
+import { activeChaosProfile, chaosStartFlake, chaosStopFlake } from '@/lib/fluxdrop/chaos'
 import { isTrustedPeer, addTrustedPeer } from '@/lib/fluxdrop/trusted-peers'
 import { playSuccess, playError, playConnect, playPause, playResume } from '@/lib/fluxdrop/sound'
 import { MessageType, CONSTANTS, FAST_LANE_MAX, FAST_LANE_MIN_BYTES, DELTA_MSG, DELTA_MAX_PATCH_BYTES, DELTA_SOURCE_MAX, DELTA_PLAN_WAIT_MS, PULL_MSG, PULL_MAX_FILES, type TransferManifest, type TransferSummary, type TransferState, type DeltaHashesBody, type DeltaPlanBody, type DeltaDeclinedBody, type SessionGrants, type PullOfferBody, type PullRequestBody, type PullFileEntry } from '@/lib/fluxdrop/protocol'
@@ -369,6 +371,11 @@ export function useFluxDrop() {
   useEffect(() => { transferRef.current = transfer }, [transfer])
 
   const signalingRef = useRef<FluxDropSignaling | null>(null)
+  // v5-f19: leaderboard CustomEvent bridge teardown + handlers (rebuilt on
+  // every signaling (re)connect — see the connect() wiring).
+  const leaderboardTeardownRef = useRef<(() => void) | null>(null)
+  const onLeaderboardFetchRef = useRef<(() => void) | null>(null)
+  const onLeaderboardSubmitRef = useRef<((ev: Event) => void) | null>(null)
   // v1.3 (6.1): ALL peer connections live here (sender → one per receiver;
   // receiver → one entry keyed by the sender's deviceId). Lookup helper below.
   const peerRtcsRef = useRef<Map<string, FluxDropWebRTC>>(new Map())
@@ -2292,6 +2299,38 @@ export function useFluxDrop() {
     })
     sig.connect()
     signalingRef.current = sig
+    // ── v5-f19: leaderboard bridge ── the speedrun dialog talks through the
+    // page's single signaling session via window CustomEvents (same pattern
+    // as the library-preview bridge). Responses come back as
+    // 'fluxdrop:leaderboard-data'.
+    const offLeaderboardData = sig.onLeaderboardData((payload: unknown) => {
+      window.dispatchEvent(new CustomEvent('fluxdrop:leaderboard-data', { detail: payload }))
+    })
+    leaderboardTeardownRef.current = () => {
+      offLeaderboardData()
+      window.removeEventListener('fluxdrop:leaderboard-fetch', onLeaderboardFetchRef.current!)
+      window.removeEventListener('fluxdrop:leaderboard-submit', onLeaderboardSubmitRef.current!)
+    }
+    onLeaderboardFetchRef.current = () => sig.sendLeaderboardFetch()
+    onLeaderboardSubmitRef.current = (ev: Event) => {
+      const d = (ev as CustomEvent<{ alias?: string; timeMs?: number; sizeBytes?: number; timeline?: number[] }>).detail
+      if (!d || typeof d.timeMs !== 'number') return
+      sig.sendLeaderboardSubmit({
+        alias: String(d.alias ?? 'racer'),
+        timeMs: d.timeMs,
+        sizeBytes: Number(d.sizeBytes) || 0,
+        ...(Array.isArray(d.timeline) ? { timeline: d.timeline } : {}),
+      })
+    }
+    window.addEventListener('fluxdrop:leaderboard-fetch', onLeaderboardFetchRef.current)
+    window.addEventListener('fluxdrop:leaderboard-submit', onLeaderboardSubmitRef.current)
+    // ── v5-f18: chaos flake ── a flaky profile forces periodic unexpected
+    // transport drops; socket.io reconnects + rejoin-room rebinds (that
+    // recovery ladder IS the thing under test). Test-only, session-scoped.
+    const chaosNow = activeChaosProfile()
+    if (chaosNow?.flakeEveryMs) {
+      chaosStartFlake(() => sig.simulateDrop())
+    }
     // v5-a2: the page-lifetime relay receiver — every inbound relay-data
     // frame routes through the SAME ingest as the DataChannel CHUNK_ENC path
     // (decrypt → gunzip → processReceivedChunk). The receiver itself sends
@@ -6388,6 +6427,11 @@ export function useFluxDrop() {
     signalingRef.current?.leaveRoom()
     signalingRef.current?.disconnect()
     signalingRef.current = null
+    // v5-f19: the leaderboard bridge dies with the signaling session.
+    leaderboardTeardownRef.current?.()
+    leaderboardTeardownRef.current = null
+    // v5-f18: no flake timer outlives the session it was started for.
+    chaosStopFlake()
     // v1.1: forget the receiver PIN too.
     receiverPinRef.current = null
     // Kill any running send loop generation.
@@ -6578,6 +6622,22 @@ export function useFluxDrop() {
     window.addEventListener('fluxdrop:request-remote-wipe', onWipe)
     return () => window.removeEventListener('fluxdrop:request-remote-wipe', onWipe)
   }, [requestRemoteWipe])
+
+  // ---- v5-f19: speedrun race mode — the dialog hands the orchestrator a
+  // fixed 2 MiB file and the NORMAL send pipeline runs it (the dialog times
+  // accept → verified-complete and races the ghost locally). The view must
+  // flip to 'sender' so the room code renders in SenderPanel (same pattern
+  // as the deep-link/join flows in page.tsx). ----
+  useEffect(() => {
+    const onStart = (e: Event) => {
+      const file = (e as CustomEvent<{ file?: File }>).detail?.file
+      if (!file) return
+      useSessionStore.getState().setView('sender')
+      void startSend([file])
+    }
+    window.addEventListener('fluxdrop:start-speedrun-run', onStart)
+    return () => window.removeEventListener('fluxdrop:start-speedrun-run', onStart)
+  }, [startSend])
 
   // ---- v5-a1: terminal states tear every fast lane down (complete, cancel,
   // fail, error). PAUSED/RESUMING keep lanes — resume continuity. ----

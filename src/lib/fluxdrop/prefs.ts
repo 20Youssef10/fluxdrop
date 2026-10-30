@@ -142,6 +142,17 @@ interface PrefsState {
   // itself is kept alive by the foreground service / tray regardless.
   keepAwakeDuringTransfers: boolean
   setKeepAwakeDuringTransfers: (v: boolean) => void
+
+  // v5-e17: explicit signaling server endpoint (advanced / self-host /
+  // federation). '' = default (same-origin through the gateway). Takes effect
+  // on the NEXT signaling connect — a note in the UI says so.
+  signalingEndpoint: string
+  setSignalingEndpoint: (v: string) => void
+
+  // v5-f19: opt-in speedrun leaderboard (fun only — shares alias + time,
+  // never content). Off by default; the race mode panel explains it.
+  speedrunLeaderboardOptIn: boolean
+  setSpeedrunLeaderboardOptIn: (v: boolean) => void
 }
 
 const KEY = 'fluxdrop:prefs-v4'
@@ -367,6 +378,23 @@ export const usePrefsStore = create<PrefsState>((set) => ({
   setKeepAwakeDuringTransfers: (v) => {
     set({ keepAwakeDuringTransfers: v })
     persist({ keepAwakeDuringTransfers: v })
+  },
+
+  // v5-e17: advanced signaling endpoint override. Normalized lightly (trim;
+  // drop trailing slash) and never validated hard — a bad URL simply fails
+  // to connect with the standard connect-error toast, same as any server.
+  signalingEndpoint: '',
+  setSignalingEndpoint: (v) => {
+    const next = String(v ?? '').trim().replace(/\/+$/, '')
+    set({ signalingEndpoint: next })
+    persist({ signalingEndpoint: next })
+  },
+
+  // v5-f19: speedrun leaderboard opt-in (default off — privacy-first).
+  speedrunLeaderboardOptIn: false,
+  setSpeedrunLeaderboardOptIn: (v) => {
+    set({ speedrunLeaderboardOptIn: v })
+    persist({ speedrunLeaderboardOptIn: v })
   },
 
   ...stored,

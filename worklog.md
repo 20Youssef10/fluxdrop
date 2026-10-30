@@ -2180,3 +2180,157 @@ Task: Implement FEATURES-v5.md section D — D12 ship the shells (Tauri desktop 
 
 ## Commit
 About to commit as feat v5-d; push to origin/main as 20Youssef10 (ShinZero) <youssef2010.mahmoud@gmail.com>.
+
+---
+
+## feat-v5-ef: ecosystem & infrastructure + quality & fun (E14–E17, F18–F19)
+
+**Z.ai Code (Sections E & F)** — the v5 roadmap closes out: every remaining
+section item implemented, E2E-verified, and shipped.
+
+### E14 — Webhooks / event bus (automation hub)
+- `mini-services/signaling/src/webhooks.ts`: lifecycle bus with 10 event types;
+  Stripe-style HMAC-signed deliveries (`X-FluxDrop-Signature: t=…,v1=…`), 5 s
+  timeout + 2 retries, fire-and-forget (never blocks rooms), metadata-only
+  payloads (pin/sdp/candidate stripped defense-in-depth). Persists to
+  `data/webhooks.json`; `WEBHOOKS='[{url,events,secret}]'` env seeding.
+- Admin dashboard = automation hub: add/remove/pause/test hooks, delivery
+  stats, recent-deliveries strip. Bus events wired into create/join (local +
+  fed), pairing, transfer lifecycle (local + fed), the relay quota ladder,
+  federation links and leaderboard entries.
+
+### E15 — Serverless signaling adapter (Cloudflare Worker + DO)
+- `serverless/signaling-worker/`: Durable Object hub with WebSocket
+  hibernation speaking the SAME socket.io wire contract (engine.io v4 over
+  WS; stock socket.io-client connects unchanged). Rooms/PIN/oneJoin, pairing
+  + WebRTC relay, transfer lifecycle, e2e-relay, chunk relay with per-room
+  token bucket + lifetime cap; room state in DO storage (eviction-proof).
+  HTTP: /healthz /region /link /turn-credentials /admin/api (JSON).
+- Verified by `test/smoke.ts` — 12-check roundtrip with the STOCK
+  socket.io-client against `wrangler dev` (handshake, create/join/rejoin,
+  pairing/SDP relay, manifest, relay-data through the bucket, relay-ack,
+  NOT_MEMBER rejection). Deploy: `bun run deploy` (wrangler.toml, SQLite DO
+  class migration). Deltas vs the Bun server documented in its README.
+
+### E16 — @fluxdrop/sdk v0.2 + docs site
+- `sdk/src/index.ts`: REAL transport — connect/createRoom/joinRoom/sendFiles
+  run socket.io → pairing → WebRTC DC → manifest-first framing → 64 KiB
+  chunks with ACK pacing + resweep → verification (mirrors cli/src/send.ts).
+- `sdk/src/widget.ts`: `<fluxdrop-widget>` custom element (shadow DOM,
+  themable accent, RTL/ar strings, ready/progress/complete/error events) +
+  `sdk/src/widget-react.tsx` React wrapper. tsup ESM+dts build; `npm pack
+  --dry-run` = 22 files / ~246 kB. socket.io-client as a real dependency.
+- In-app face: Settings → **Dev** tab (7th) — live conformance badge via
+  `/api/conformance` (spawns `bun scripts/protocol-conformance.ts`, 60 s
+  cache; bun-explicit because next dev runs routes under node), copyable
+  snippets, and a REAL widget demo (imports sdk/src/widget, pref-aware
+  `signalingUrl()`).
+- `docs-site/index.html`: static docs (badges from ci/, API table, live demo
+  slot). `scripts/conformance-badge.ts` regenerates the badge pair.
+
+### E17 — Federated signaling (S2S room peering)
+- `mini-services/signaling/src/federation.ts`: mutual `/federation`
+  socket.io links, per-pair secrets, HMAC auth with ±60 s window
+  (function-form auth re-signs every reconnect). Wire: fed-join/-joined/
+  -leave/-frame/-broadcast/-close/-error/-ping.
+- Routing: rooms stay on their OWNER; `ROOM@peer` joins tunnel through the
+  home server; owner runs all room logic. Every room-scoped socket handler
+  got a `tunnelToFedOwner` interceptor (from-pinned, home-side per-IP relay
+  budget); `handleFedFrame` runs the owner-side state machine + quota
+  ladder; broadcasts/closures reach fed members via their home server;
+  disconnects forward as fed-leave; rejoin-room re-tunnels. Anti-spoof:
+  fed device identity == the link it arrived on.
+- Client: join form accepts `AB3K7Q@berlin` (input preserves lowercase
+  @peer); Settings → Network "Signaling server" override (pref
+  `signalingEndpoint` → `signalingUrl()`); admin UI peer table + add/remove
+  + link state/latency. Server port now env-tunable (SIGNALING_PORT) so a
+  second instance runs beside the first.
+
+### F18 — Chaos harness in CI
+- `src/lib/fluxdrop/chaos.ts`: in-app impairment — signaling latency/jitter
+  (emit wrapper), ICE loss, DC latency/jitter/throttle (prototype send
+  wrapper), periodic engine drops (flake). Profiles: steady/latency/lossy-
+  wifi/edge-3g/flaky/adversarial + `?chaos=` compact spec
+  (`latency:250,ice:10,flake:15`). Settings → Network "Chaos lab" UI
+  (session-scoped, amber-styled, URL-param hint).
+- `scripts/chaos-harness.ts`: playwright driver — conformance gate, boots
+  the stack, two contexts, REAL 3 MiB transfer per profile, asserts
+  complete + SHA-256 verified; ci/chaos-report.json + chaos-badge.svg.
+  `.github/workflows/chaos.yml`: push/PR/dispatch CI (steady+lossy default).
+  Root scripts: `conformance`, `conformance:badge`, `chaos`, `test:unit`.
+- **The harness did its job**: it caught (1) the chaos boot-resolve no-op
+  (`let active = null` meant `?chaos=`/session restore never engaged —
+  profiles silently ran clean) and (2) an `Illegal invocation` in the DC
+  wrapper (pre-bound prototype `send`) that killed every impaired transfer.
+  Both fixed; 4/4 profiles now pass genuinely impaired (21–22 s each).
+
+### F19 — Speedrun ghosts + leaderboards
+- `src/lib/fluxdrop/speedrun.ts`: fixed 2 MiB payload, 250 ms-sampling
+  recorder, ghost timeline persistence + `ghostProgressAt`, phase mapping.
+- `speedrun-dialog.tsx` race mode: "Start timed run" dispatches
+  `fluxdrop:start-speedrun-run` → use-fluxdrop bridge flips the view +
+  runs the NORMAL pipeline; timer accept→verified-complete; PR detection;
+  ghost bar + "vs ghost" delta on reruns; opt-in leaderboard (7-locale
+  strings incl. ar) with live top-10 + submit rank.
+- Server: `leaderboard.ts` — validated (alias ≤24 sanitized, timeMs
+  200..600 000), rate-limited (5/10 min/IP), persisted top-100;
+  `leaderboard-submit`/`-fetch` socket events (added to protocol.ts + the
+  conformance mirrored list); admin card shows the board.
+
+### Toolchains installed
+- playwright (+chromium) at root — the chaos harness runtime.
+- tsup + typescript@5.9 in sdk/ — the npm build.
+- wrangler + @cloudflare/workers-types in serverless/signaling-worker/.
+- socket.io-client in the signaling service (federation outbound links).
+
+## Real bugs found & fixed during E2E
+1. **Chaos boot-resolve no-op**: `let active: ChaosProfile | null = null`
+   made the `active === undefined` lazy-init unreachable — `?chaos=` and
+   session restore never engaged (the first harness "passes" were silently
+   clean). Fixed with an explicit `undefined`-vs-`null` distinction + DC
+   patch on the boot path.
+2. **`Illegal invocation` in the DC impairment wrapper**:
+   `proto.prototype.send.bind(proto.prototype)` breaks native receivers —
+   every impaired DataChannel send threw, so manifests never arrived
+   (receiver stuck "Negotiating (connected)"). Fixed with an unbound
+   original + per-call `.call(this, …)`.
+3. **Speedrun race never rendered its room**: the start bridge called
+   `startSend` without flipping the view, so SenderPanel (and the room
+   code) never mounted. Fixed: the bridge sets `view: 'sender'` via the
+   session store (same pattern as deep links).
+4. **Stale conformance assertion**: v5-b added WIPE_REQUEST (0x14) but the
+   opcode-count check still demanded 19/0x01..0x13 — the suite had been
+   failing since B shipped. Updated to 20/0x01..0x14 (72 checks green).
+5. Sandbox-only: bun servers on shared ports made E2E non-deterministic
+   (an env-less long-lived `bun --hot` instance on :3003 round-robins with
+   test servers) — E2E/harness now use dedicated ports (3013/3014/3016)
+   and the harness takes `--seed-signaling` for exactly this.
+
+## E2E verification (all green, 2026-10-30)
+- **E2E #1** (agent-browser, 2 sessions, dedicated servers :3013/:3014):
+  fed transfer ROOM@alpha complete + SHA-256 verified; Dev-tab badge 72;
+  widget → app transfer complete + verified; webhook ledger 10/10
+  HMAC-signed (room.created ×2, room.joined ×2, transfer.started,
+  transfer.complete ×3, test, federation.link); admin page renders all
+  three new sections + peer/hook rows.
+- **E2E #2** (agent-browser, 2 sessions): race mode real run (2 MiB, PR +
+  time + rank), ghost bar + "vs ghost" on run 2, own-best persisted;
+  leaderboard opt-in → submit → live rank + board; chaos lab UI
+  (sessionStorage flag, URL-param hint, off/deactivate) + ?chaos=latency
+  boot engagement.
+- **Chaos harness** (playwright): steady 21.9 s / latency 20.1 s / lossy-
+  wifi 22.2 s / flaky 21.1 s — all SHA-256 verified under real impairment;
+  report + badges regenerated.
+- **Worker smoke**: 12/12 socket.io-client checks against wrangler dev.
+- Gates: lint ✓, tsc ✓ (root + worker), 39 unit tests ✓, conformance 72 ✓,
+  SDK build ✓, npm pack ✓.
+
+## Known limits (honest)
+- `npm publish` itself is intentionally not run from the sandbox (registry
+  credentials); the package is build+pack-verified with the runbook in
+  sdk/README.md.
+- The signaling server's webhook/federation/leaderboard state is
+  single-instance (in-memory + JSON files) — horizontal scaling still
+  points at the Redis recipe documented since v2.0.
+- `transfer.started` fires only for signaling-path manifests (SDK/relay
+  sends); pure-P2P manifests ride the DataChannel by design.

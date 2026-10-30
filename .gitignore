@@ -68,3 +68,4 @@ server.log
 /src-tauri/target/
 /src-tauri/gen/
 /src-capacitor/plugin/dist/
+sdk/dist/

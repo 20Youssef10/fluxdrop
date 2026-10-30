@@ -1,0 +1,32 @@
+{
+  "generatedAt": "2026-10-30T15:16:21.248Z",
+  "passed": 4,
+  "total": 4,
+  "ok": true,
+  "results": [
+    {
+      "profile": "steady",
+      "ok": true,
+      "elapsedMs": 21856,
+      "verified": true
+    },
+    {
+      "profile": "latency",
+      "ok": true,
+      "elapsedMs": 20090,
+      "verified": true
+    },
+    {
+      "profile": "lossy-wifi",
+      "ok": true,
+      "elapsedMs": 22245,
+      "verified": true
+    },
+    {
+      "profile": "flaky",
+      "ok": true,
+      "elapsedMs": 21149,
+      "verified": true
+    }
+  ]
+}
