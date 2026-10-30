@@ -14,9 +14,14 @@
 # The admin dashboard is enabled on alpha with the documented dev token.
 #
 # Usage:   bash scripts/start-signaling.sh        (idempotent — restarts both)
+#          wired into `bun run dev` / `bun run start` so every app (re)start
+#          brings the signaling topology back up automatically.
 # Logs:    /tmp/fluxdrop-signaling-alpha.log, /tmp/fluxdrop-signaling-beta.log
-set -u
-cd "$(dirname "$0")/../mini-services/signaling"
+#
+# MUST NEVER FAIL THE CALLER: every dev/start run funnels through here, so
+# the script is defensive by contract — no set -u, no set -e, always exit 0.
+cd "$(dirname "$0")/../mini-services/signaling" 2>/dev/null || exit 0
+[ -f package.json ] || exit 0
 
 FED_SECRET='fedsharedsecret1'
 ADMIN_TOKEN="${ADMIN_TOKEN:-changeme-dev}"
@@ -36,3 +41,4 @@ SIGNALING_PORT=3014 LOG_LEVEL="${LOG_LEVEL:-info}" FEDERATION_ID=beta \
   setsid nohup bun run start >/tmp/fluxdrop-signaling-beta.log 2>&1 &
 
 echo "signaling: alpha -> :3003, beta -> :3014 (logs in /tmp/fluxdrop-signaling-*.log)"
+exit 0
